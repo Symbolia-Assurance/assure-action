@@ -1,0 +1,94 @@
+# Assure: collects PostgreSQL facts in the customer's runner, sends them to the hosted Assure API over TLS with the
+# customer's key, and writes the verdict the API returns (DIRECTOR-DIRECTION-SERVE-003). The check runs on Symbolia's
+# server. Inputs reach entry.py through env only; no expression appears inside the run script. No third-party action is
+# used. The API key reaches entry.py by environment only, never on a command line.
+# execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.
+name: Assure check
+description: Check a PostgreSQL server against an Assure profile. Collects in your runner, checks on the Assure API, writes a verdict file.
+author: Symbolia
+
+inputs:
+  mode:
+    description: api (the check runs on the Assure API) or local (in-runner, private distribution only).
+    required: false
+    default: api
+  api-key:
+    description: Your Assure API key. Pass it from a secret, for example secrets.ASSURE_API_KEY. Required in api mode.
+    required: false
+    default: ''
+  api-url:
+    description: The Assure API base URL (https only).
+    required: false
+    default: https://api.symbolia.ai
+  profile:
+    description: The checker profile to run.
+    required: false
+    default: postgresql-observed-baseline
+  artefacts:
+    description: A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both.
+    required: false
+    default: ''
+  connection:
+    description: A libpq keyword/value connection string or a postgresql:// URI. Pass it from a secret.
+    required: false
+    default: ''
+  collection-role:
+    description: The collection role. It must match the user in the connection.
+    required: false
+    default: ''
+  collection-privileges:
+    description: The read-only roles granted to the collection role, comma separated.
+    required: false
+    default: pg_read_all_settings,pg_read_all_stats
+  data-dir:
+    description: A directory where the runner can read the server's data directory. Optional; used with connection.
+    required: false
+    default: ''
+  config-dirs:
+    description: Directories outside the data directory that hold the server's configuration files (for example /etc/postgresql/16/main), one per line or separated by colons. Optional; used with connection.
+    required: false
+    default: ''
+  fail-on:
+    description: Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never.
+    required: false
+    default: fails
+  output:
+    description: Where to write the verdict file.
+    required: false
+    default: assure-verdict.json
+  python:
+    description: The Python 3.14 interpreter to run the Action with.
+    required: false
+    default: python3
+
+outputs:
+  verdict-path:
+    description: The path of the verdict file (or of the failure file).
+    value: ${{ steps.assure.outputs.verdict-path }}
+  outcome:
+    description: verdict, no_verdict, or the typed failure outcome.
+    value: ${{ steps.assure.outputs.outcome }}
+  exit-code:
+    description: The verdict's policy exit (0 policy met or never, 1 policy failed, 3 nothing was checked), 2 bad input, 3 typed refusal or API failure.
+    value: ${{ steps.assure.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - id: assure
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_ARTEFACTS: ${{ inputs.artefacts }}
+        INPUT_CONNECTION: ${{ inputs.connection }}
+        INPUT_COLLECTION_ROLE: ${{ inputs.collection-role }}
+        INPUT_COLLECTION_PRIVILEGES: ${{ inputs.collection-privileges }}
+        INPUT_DATA_DIR: ${{ inputs.data-dir }}
+        INPUT_CONFIG_DIRS: ${{ inputs.config-dirs }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        ASSURE_PYTHON: ${{ inputs.python }}
+      run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

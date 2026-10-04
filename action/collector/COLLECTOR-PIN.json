@@ -1,0 +1,23 @@
+{
+ "schema": "assure.serve.collector-pin/v1",
+ "files": {
+  "collect_pg.py": "0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6",
+  "QUERIES.json": "e5076ffa0781815a932ffbe66235de4a0fb9a6ab29254a313ca7d014e586d733",
+  "SECRET-KEYWORDS.json": "347dda9b029b058d848ef4875e9a82147d12e085e3d71c12937dc7cd68d99983"
+ },
+ "source": {
+  "collect_pg.py": "Symbolia read-only PostgreSQL collector, accepted follow-up 6, frozen 2026-10-02",
+  "QUERIES.json": "the published query list; the collector writes its own copy into every output",
+  "SECRET-KEYWORDS.json": "the published secret keyword list",
+  "copied": "2026-10-04, byte-exact, sha256 checked"
+ },
+ "flags": {
+  "execution_authorized": false,
+  "hardware_authorized": false,
+  "industrial_release_authorized": false,
+  "release_allowed": false,
+  "physical_validation": false,
+  "simulation": true,
+  "self_approved": false
+ }
+}

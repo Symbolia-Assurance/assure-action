@@ -1,0 +1,377 @@
+{
+  "execution_authorized": false,
+  "hardware_authorized": false,
+  "industrial_release_authorized": false,
+  "release_allowed": false,
+  "physical_validation": false,
+  "simulation": true,
+  "self_approved": false,
+  "schema": "symbolia.rf06.pg-collector-queries.v1",
+  "majors": [
+    14,
+    18
+  ],
+  "output_contract": "each query returns exactly one JSON value on stdout (psql -At)",
+  "read_only": "every query is a single SELECT; the default runner session sets default_transaction_read_only=on; nothing is retried, never as another role",
+  "secret_keywords": "SECRET-KEYWORDS.json",
+  "queries": [
+    {
+      "id": "collector_identity",
+      "key": null,
+      "views": [
+        "pg_roles"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT json_build_object('current_user', current_user::text, 'session_user', session_user::text, 'rolsuper', r.rolsuper, 'rolcanlogin', r.rolcanlogin, 'rolbypassrls', r.rolbypassrls, 'rolcreaterole', r.rolcreaterole, 'rolcreatedb', r.rolcreatedb, 'rolreplication', r.rolreplication) FROM pg_catalog.pg_roles r WHERE r.rolname = current_user",
+      "purpose": "first read: the collection role row; superuser, a different role or no row is a typed refusal"
+    },
+    {
+      "id": "server_version",
+      "key": null,
+      "views": [],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT json_build_object('server_version_num', pg_catalog.current_setting('server_version_num'), 'server_version', pg_catalog.current_setting('server_version'))",
+      "purpose": "major selects the version-gated queries; outside 14..18 is a typed refusal"
+    },
+    {
+      "id": "collector_memberships",
+      "key": null,
+      "views": [
+        "pg_auth_members",
+        "pg_roles"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT coalesce(json_agg(b.rolname::text ORDER BY b.rolname), '[]'::json) FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles b ON b.oid = m.roleid JOIN pg_catalog.pg_roles u ON u.oid = m.member WHERE u.rolname = current_user",
+      "purpose": "the grants actually provisioned to the collection role (compared with --privileges in the sidecar)"
+    },
+    {
+      "id": "file_locations",
+      "key": null,
+      "views": [
+        "pg_settings"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT coalesce(json_object_agg(s.name, s.setting ORDER BY s.name), '{}'::json) FROM pg_catalog.pg_settings s WHERE s.name IN ('config_file', 'hba_file', 'ident_file', 'data_directory')",
+      "purpose": "where the server says its configuration files are (remapped onto --data-dir when they lie under it)"
+    },
+    {
+      "id": "server_times",
+      "key": null,
+      "views": [],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "timing",
+      "sql": "SELECT json_build_object('pg_conf_load_time', pg_catalog.pg_conf_load_time()::text, 'pg_postmaster_start_time', pg_catalog.pg_postmaster_start_time()::text)",
+      "purpose": "volatile; written only to TIMING.json (configuration load time, start time)"
+    },
+    {
+      "id": "command_line_settings",
+      "key": null,
+      "views": [
+        "pg_settings"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "command_line",
+      "sql": "SELECT coalesce(json_agg(json_build_object('name', s.name, 'setting', s.setting, 'unit', s.unit, 'source', s.source, 'sourcefile', s.sourcefile, 'sourceline', s.sourceline, 'boot_val', s.boot_val, 'reset_val', s.reset_val, 'pending_restart', s.pending_restart) ORDER BY s.name), '[]'::json) FROM pg_catalog.pg_settings s WHERE s.source IN ('command line', 'environment variable')",
+      "purpose": "settings whose source is the server command line or environment (raw/command_line.json)"
+    },
+    {
+      "id": "roles",
+      "key": "roles",
+      "views": [
+        "pg_roles"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('rolname', r.rolname::text, 'rolsuper', r.rolsuper, 'rolinherit', r.rolinherit, 'rolcreaterole', r.rolcreaterole, 'rolcreatedb', r.rolcreatedb, 'rolreplication', r.rolreplication, 'rolbypassrls', r.rolbypassrls, 'rolcanlogin', r.rolcanlogin, 'rolconnlimit', r.rolconnlimit, 'rolvaliduntil', r.rolvaliduntil) ORDER BY r.rolname), '[]'::json) FROM pg_catalog.pg_roles r",
+      "purpose": "roles (pg_roles; the password column is never selected)"
+    },
+    {
+      "id": "memberships_14_15",
+      "key": "memberships",
+      "views": [
+        "pg_auth_members"
+      ],
+      "min_major": 14,
+      "max_major": 15,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('roleid', pg_catalog.pg_get_userbyid(m.roleid), 'member', pg_catalog.pg_get_userbyid(m.member), 'grantor', pg_catalog.pg_get_userbyid(m.grantor), 'admin_option', m.admin_option) ORDER BY pg_catalog.pg_get_userbyid(m.roleid), pg_catalog.pg_get_userbyid(m.member), pg_catalog.pg_get_userbyid(m.grantor)), '[]'::json) FROM pg_catalog.pg_auth_members m",
+      "purpose": "role memberships, majors 14-15 (no inherit_option/set_option columns)"
+    },
+    {
+      "id": "memberships_16_18",
+      "key": "memberships",
+      "views": [
+        "pg_auth_members"
+      ],
+      "min_major": 16,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('roleid', pg_catalog.pg_get_userbyid(m.roleid), 'member', pg_catalog.pg_get_userbyid(m.member), 'grantor', pg_catalog.pg_get_userbyid(m.grantor), 'admin_option', m.admin_option, 'inherit_option', m.inherit_option, 'set_option', m.set_option) ORDER BY pg_catalog.pg_get_userbyid(m.roleid), pg_catalog.pg_get_userbyid(m.member), pg_catalog.pg_get_userbyid(m.grantor)), '[]'::json) FROM pg_catalog.pg_auth_members m",
+      "purpose": "role memberships, majors 16-18 (inherit_option, set_option)"
+    },
+    {
+      "id": "objects",
+      "key": "objects",
+      "views": [
+        "pg_class",
+        "pg_namespace",
+        "pg_rewrite",
+        "pg_depend"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('relname', c.relname::text, 'schema', n.nspname::text, 'relkind', c.relkind::text, 'owner', pg_catalog.pg_get_userbyid(c.relowner), 'relacl', c.relacl::text[], 'relrowsecurity', c.relrowsecurity, 'relforcerowsecurity', c.relforcerowsecurity, 'reloptions', c.reloptions, 'base_tables', CASE WHEN c.relkind IN ('v', 'm') THEN (SELECT coalesce(json_agg(DISTINCT t.relname::text), '[]'::json) FROM pg_catalog.pg_rewrite w JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = w.oid AND d.refclassid = 'pg_catalog.pg_class'::regclass JOIN pg_catalog.pg_class t ON t.oid = d.refobjid WHERE w.ev_class = c.oid AND t.oid <> c.oid) ELSE NULL END) ORDER BY n.nspname, c.relname), '[]'::json) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'",
+      "purpose": "relations with ACL, owner and RLS flags; views and materialized views with their base tables"
+    },
+    {
+      "id": "default_acl",
+      "key": "default_acl",
+      "views": [
+        "pg_default_acl",
+        "pg_namespace"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('defaclrole', pg_catalog.pg_get_userbyid(d.defaclrole), 'defaclnamespace', n.nspname::text, 'defaclobjtype', d.defaclobjtype::text, 'defaclacl', d.defaclacl::text[]) ORDER BY pg_catalog.pg_get_userbyid(d.defaclrole), n.nspname NULLS FIRST, d.defaclobjtype), '[]'::json) FROM pg_catalog.pg_default_acl d LEFT JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace",
+      "purpose": "default privileges (global rows have defaclnamespace null)"
+    },
+    {
+      "id": "policies",
+      "key": "policies",
+      "views": [
+        "pg_policy",
+        "pg_class",
+        "pg_namespace"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('polname', p.polname::text, 'polrelid', c.relname::text, 'schema', n.nspname::text, 'polcmd', p.polcmd::text, 'polpermissive', p.polpermissive, 'polroles', (SELECT json_agg(CASE WHEN u.r = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(u.r)::text END ORDER BY u.i) FROM unnest(p.polroles) WITH ORDINALITY AS u(r, i)), 'polqual', pg_catalog.pg_get_expr(p.polqual, p.polrelid), 'polwithcheck', pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid)) ORDER BY n.nspname, c.relname, p.polname), '[]'::json) FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace",
+      "purpose": "row-level security policies (relation by name, roles by name, expressions deparsed)"
+    },
+    {
+      "id": "functions",
+      "key": "functions",
+      "views": [
+        "pg_proc",
+        "pg_namespace"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('proname', p.proname::text, 'schema', n.nspname::text, 'arguments', pg_catalog.pg_get_function_identity_arguments(p.oid), 'prokind', p.prokind::text, 'prosecdef', p.prosecdef, 'proconfig', p.proconfig, 'proacl', p.proacl::text[], 'proowner', pg_catalog.pg_get_userbyid(p.proowner)) ORDER BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)), '[]'::json) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      "purpose": "functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL"
+    },
+    {
+      "id": "schemas",
+      "key": "schemas",
+      "views": [
+        "pg_namespace"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('nspname', n.nspname::text, 'nspowner', pg_catalog.pg_get_userbyid(n.nspowner), 'nspacl', n.nspacl::text[]) ORDER BY n.nspname), '[]'::json) FROM pg_catalog.pg_namespace n WHERE n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'",
+      "purpose": "schemas with owner and ACL"
+    },
+    {
+      "id": "replication_slots",
+      "key": "replication_slots",
+      "views": [
+        "pg_replication_slots"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('slot_name', r.slot_name::text, 'plugin', r.plugin::text, 'slot_type', r.slot_type, 'database', r.database::text, 'temporary', r.temporary, 'active', r.active, 'wal_status', r.wal_status, 'safe_wal_size', r.safe_wal_size, 'restart_lsn', r.restart_lsn::text) ORDER BY r.slot_name), '[]'::json) FROM pg_catalog.pg_replication_slots r",
+      "purpose": "replication slots"
+    },
+    {
+      "id": "publications",
+      "key": "publications",
+      "views": [
+        "pg_publication"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('pubname', p.pubname::text, 'pubowner', pg_catalog.pg_get_userbyid(p.pubowner), 'puballtables', p.puballtables, 'pubinsert', p.pubinsert, 'pubupdate', p.pubupdate, 'pubdelete', p.pubdelete, 'pubtruncate', p.pubtruncate, 'pubviaroot', p.pubviaroot) ORDER BY p.pubname), '[]'::json) FROM pg_catalog.pg_publication p",
+      "purpose": "publications"
+    },
+    {
+      "id": "publication_rels",
+      "key": "publication_rels",
+      "views": [
+        "pg_publication_rel",
+        "pg_publication",
+        "pg_class"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('pubname', p.pubname::text, 'relname', c.relname::text, 'schema', n.nspname::text) ORDER BY p.pubname, n.nspname, c.relname), '[]'::json) FROM pg_catalog.pg_publication_rel pr JOIN pg_catalog.pg_publication p ON p.oid = pr.prpubid JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace",
+      "purpose": "tables named by publications"
+    },
+    {
+      "id": "publication_namespaces",
+      "key": "publication_namespaces",
+      "views": [
+        "pg_publication_namespace"
+      ],
+      "min_major": 15,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('pubname', p.pubname::text, 'nspname', n.nspname::text) ORDER BY p.pubname, n.nspname), '[]'::json) FROM pg_catalog.pg_publication_namespace pn JOIN pg_catalog.pg_publication p ON p.oid = pn.pnpubid JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid",
+      "purpose": "schemas named by publications (catalog exists from major 15)"
+    },
+    {
+      "id": "subscriptions_14_15",
+      "key": "subscriptions",
+      "views": [
+        "pg_subscription"
+      ],
+      "min_major": 14,
+      "max_major": 15,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subconninfo', s.subconninfo, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
+      "purpose": "subscriptions, majors 14-15 (subconninfo password stripped before retention)"
+    },
+    {
+      "id": "subscriptions_16_18",
+      "key": "subscriptions",
+      "views": [
+        "pg_subscription"
+      ],
+      "min_major": 16,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subconninfo', s.subconninfo, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname, 'subpasswordrequired', s.subpasswordrequired, 'subrunasowner', s.subrunasowner) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
+      "purpose": "subscriptions, majors 16-18 (subconninfo password stripped before retention)"
+    },
+    {
+      "id": "subscription_rels",
+      "key": "subscription_rels",
+      "views": [
+        "pg_subscription_rel",
+        "pg_subscription",
+        "pg_class"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname::text, 'relname', c.relname::text, 'schema', n.nspname::text, 'srsubstate', sr.srsubstate::text) ORDER BY s.subname, n.nspname, c.relname), '[]'::json) FROM pg_catalog.pg_subscription_rel sr JOIN pg_catalog.pg_subscription s ON s.oid = sr.srsubid JOIN pg_catalog.pg_class c ON c.oid = sr.srrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace",
+      "purpose": "subscription target tables (attached to subscriptions[].tables when both reads succeed)"
+    },
+    {
+      "id": "pg_settings",
+      "key": "pg_settings",
+      "views": [
+        "pg_settings"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('name', s.name, 'setting', s.setting, 'unit', s.unit, 'source', s.source, 'sourcefile', s.sourcefile, 'sourceline', s.sourceline, 'boot_val', s.boot_val, 'reset_val', s.reset_val, 'pending_restart', s.pending_restart) ORDER BY s.name), '[]'::json) FROM pg_catalog.pg_settings s WHERE s.name IN ('authentication_timeout', 'config_file', 'data_directory', 'hba_file', 'hot_standby', 'ident_file', 'krb_server_keyfile', 'listen_addresses', 'log_connections', 'max_replication_slots', 'max_slot_wal_keep_size', 'max_wal_senders', 'password_encryption', 'port', 'primary_conninfo', 'primary_slot_name', 'row_security', 'search_path', 'session_preload_libraries', 'shared_preload_libraries', 'ssl', 'ssl_ca_file', 'ssl_cert_file', 'ssl_crl_file', 'ssl_key_file', 'ssl_max_protocol_version', 'ssl_min_protocol_version', 'ssl_passphrase_command', 'synchronous_commit', 'synchronous_standby_names', 'wal_keep_size', 'wal_level')",
+      "purpose": "settings with source, sourcefile and sourceline for the fixed setting list"
+    },
+    {
+      "id": "pg_file_settings",
+      "key": "pg_file_settings",
+      "views": [
+        "pg_file_settings"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('sourcefile', f.sourcefile, 'sourceline', f.sourceline, 'seqno', f.seqno, 'name', f.name, 'setting', f.setting, 'applied', f.applied, 'error', f.error) ORDER BY f.seqno), '[]'::json) FROM pg_catalog.pg_file_settings f",
+      "purpose": "configuration file rows and error rows (current file contents)"
+    },
+    {
+      "id": "pg_hba_file_rules_14_15",
+      "key": "pg_hba_file_rules",
+      "views": [
+        "pg_hba_file_rules"
+      ],
+      "min_major": 14,
+      "max_major": 15,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('line_number', h.line_number, 'type', h.type, 'database', h.database, 'user_name', h.user_name, 'address', h.address, 'netmask', h.netmask, 'auth_method', h.auth_method, 'options', h.options, 'error', h.error) ORDER BY h.line_number), '[]'::json) FROM pg_catalog.pg_hba_file_rules h",
+      "purpose": "pg_hba rules and error rows as parsed from the current file, majors 14-15"
+    },
+    {
+      "id": "pg_hba_file_rules_16_18",
+      "key": "pg_hba_file_rules",
+      "views": [
+        "pg_hba_file_rules"
+      ],
+      "min_major": 16,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('rule_number', h.rule_number, 'file_name', h.file_name, 'line_number', h.line_number, 'type', h.type, 'database', h.database, 'user_name', h.user_name, 'address', h.address, 'netmask', h.netmask, 'auth_method', h.auth_method, 'options', h.options, 'error', h.error) ORDER BY h.file_name, h.line_number), '[]'::json) FROM pg_catalog.pg_hba_file_rules h",
+      "purpose": "pg_hba rules and error rows as parsed from the current files (with includes), majors 16-18"
+    },
+    {
+      "id": "pg_ident_file_mappings_15",
+      "key": "pg_ident_file_mappings",
+      "views": [
+        "pg_ident_file_mappings"
+      ],
+      "min_major": 15,
+      "max_major": 15,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('line_number', i.line_number, 'map_name', i.map_name, 'sys_name', i.sys_name, 'pg_username', i.pg_username, 'error', i.error) ORDER BY i.line_number), '[]'::json) FROM pg_catalog.pg_ident_file_mappings i",
+      "purpose": "pg_ident mappings and error rows, major 15 (view exists from major 15)"
+    },
+    {
+      "id": "pg_ident_file_mappings_16_18",
+      "key": "pg_ident_file_mappings",
+      "views": [
+        "pg_ident_file_mappings"
+      ],
+      "min_major": 16,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('map_number', i.map_number, 'file_name', i.file_name, 'line_number', i.line_number, 'map_name', i.map_name, 'sys_name', i.sys_name, 'pg_username', i.pg_username, 'error', i.error) ORDER BY i.file_name, i.line_number), '[]'::json) FROM pg_catalog.pg_ident_file_mappings i",
+      "purpose": "pg_ident mappings and error rows (with includes), majors 16-18"
+    },
+    {
+      "id": "pg_db_role_setting",
+      "key": "pg_db_role_setting",
+      "views": [
+        "pg_db_role_setting",
+        "pg_database",
+        "pg_roles"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('setdatabase', d.datname::text, 'setrole', r.rolname::text, 'setconfig', s.setconfig) ORDER BY d.datname NULLS FIRST, r.rolname NULLS FIRST), '[]'::json) FROM pg_catalog.pg_db_role_setting s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase LEFT JOIN pg_catalog.pg_roles r ON r.oid = s.setrole",
+      "purpose": "per-role and per-database settings (null database or role means all)"
+    },
+    {
+      "id": "databases",
+      "key": "databases",
+      "views": [
+        "pg_database"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('datname', d.datname::text, 'owner', pg_catalog.pg_get_userbyid(d.datdba), 'datallowconn', d.datallowconn, 'datistemplate', d.datistemplate, 'datacl', d.datacl::text[], 'is_current', d.datname = current_database()) ORDER BY d.datname), '[]'::json) FROM pg_catalog.pg_database d",
+      "purpose": "databases (is_current marks the database the catalog reads were made in)"
+    }
+  ]
+}
