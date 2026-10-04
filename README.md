@@ -6,11 +6,13 @@ The Action collects facts about your PostgreSQL server in your own GitHub Action
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence exists for PostgreSQL 18.
 
+**Not yet checkable:** a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) stops the check today with exit 3 (`collector_refused`). PostgreSQL needs quotes around a role or database name with a hyphen or an upper-case letter, so this is not rare. The collector withholds such a rule whole, and Assure cannot read it. The message names the file and the line; send Symbolia the file name and the line number so the shape is counted. There is no workaround yet.
+
 ## What is sent, and what is never read
 
 The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. What leaves the runner:
 
-- settings and rules as written, without comment text: every comment in your configuration files, including commented-out settings, is replaced in the runner with `# <withheld comment>`, and every line keeps its place;
+- settings and rules as written, without comment text: every comment in your configuration files, including commented-out settings, is replaced in the runner with `# <withheld comment>`, and every line keeps its place. A line PostgreSQL cannot parse (an unclosed quote) becomes `<withheld: a line PostgreSQL cannot parse>`, which the check still counts as a broken line; if the check would read it as a working setting or rule, the Action stops, exits 2 (`bad_input`) and names the file and the line, and you fix the line and run again. A `pg_hba.conf` rule or `postgresql.conf` setting the collector had to withhold whole, such as a rule with a quoted or `@file` name, stops the upload with exit 3 (`collector_refused`): that shape cannot be checked yet. The collector's record of which lines it withheld (`COLLECTION-SIDECAR.json`) must come with its output: without it, a file that holds a withheld line cannot be checked, and the upload stops the same way;
 - policy expressions with every string literal withheld: each quoted literal becomes `'<withheld literal N>'` in the runner, and so does each literal in your declaration's `declared_predicate`;
 - no secret-bearing value: the collector withholds every one whole before anything is written, and checks its own output for those values.
 
@@ -219,6 +221,8 @@ You can collect on one machine and check from another. Set `artefacts` to a dire
 
 The directory must hold files under the names the profile reads. The API lists them for each profile (`GET /v1/profiles`). Files with other names stay in the runner and are listed in a notice. A symbolic link at an expected name is refused.
 
+Give the collector's output directory as it wrote it. The collector writes `raw/` and, beside it, `COLLECTION-SIDECAR.json` and `TIMING.json`. The Action takes those two files from beside `raw/` (or from inside `raw/`, if you moved them there) and sends them as `raw/COLLECTION-SIDECAR.json` and `raw/TIMING.json`. If both places hold a copy and the copies differ, the Action stops with `bad_input`. Do not leave out `COLLECTION-SIDECAR.json`: it is the collector's record of which lines it withheld whole and why. A configuration file that holds a line the collector withheld (`# [collect_pg: line withheld, ...]`) cannot be checked without it, so the Action stops with `collector_refused` and sends nothing: a collector output without its sidecar cannot be checked.
+
 The served profile, `postgresql-declared-model`, reads your declaration from `raw/declaration.json` (and optionally `raw/clients.json`) beside the collected files:
 
 ```yaml
@@ -249,7 +253,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `engine_digest_mismatch` | 3 | The server's engine does not match its pin, so it runs no check. | Report it to Symbolia. |
 | `not_found` | 3 | The API holds no check with that id for this account. | Run the check again. |
 | `collector_cannot_connect` | 3 | The first query could not reach the database, or `psql` is missing. | Check the secret, the network path from the runner and `pg_hba.conf`. Install `postgresql-client`. |
-| `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad, the major is outside 14 to 18, or the role name does not match. Others come after it has read: its self-check found a withheld secret value in its own output. In every refusal it keeps no collected data, and nothing is sent. | Read the reason. For a role refusal, recreate the collection role as in section 2. |
+| `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad, the major is outside 14 to 18, or the role name does not match. Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when the collector withheld a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line, which cannot be checked yet, and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file; the reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. | Read the reason. For a role refusal, recreate the collection role as in section 2. For a missing `COLLECTION-SIDECAR.json`, give the collector's output as it wrote it (section 9). For a withheld rule or setting, Assure cannot check that shape yet: send Symbolia the file name and the line number so it is counted. |
 | `profile_not_servable` | 3 | This profile's checker is not yet qualified for use. | Use a served profile. |
 | `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. | Read the reason. Check that collection completed. |
 | `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. | Report the check id to Symbolia, or submit the check again when the reason says so. |

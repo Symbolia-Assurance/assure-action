@@ -18,7 +18,7 @@ _TABLE = {
     'credit_exhausted': (402, None, 'Your free credit is spent; contact Symbolia to continue.'),
     'engine_digest_mismatch': (503, 3, 'Report it to Symbolia (or reinstall the pinned release when you run the engine yourself), because the engine files differ from their pin and no check ran.'),
     'collector_cannot_connect': (None, 3, 'Check the connection settings and that the server accepts the collection role.'),
-    'collector_refused': (None, 3, 'Fix the condition the collector names, such as a role with too broad a grant, then run again.'),
+    'collector_refused': (422, 3, 'Fix the condition the reason names and run again, or, for a rule or setting shape that cannot be checked yet, send Symbolia the file name and line number it gives.'),
     'profile_not_servable': (503, 3, 'Use another profile, because this one is not yet qualified to serve readings.'),
     'profile_refused': (422, 3, 'Fix the collection or declaration fault the reason names, then run again.'),
     'checker_error': (500, 3, 'Report the check id to Symbolia, because the checker failed in a way it should not.'),
