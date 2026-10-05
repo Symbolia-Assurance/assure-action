@@ -1,19 +1,25 @@
 # What a verdict claims
 
-**Not yet checkable:** a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) stops the check today (`collector_refused`, exit 3 in the Action, HTTP 422 from the API). PostgreSQL needs quotes around a role or database name with a hyphen or an upper-case letter, so this is not rare. The collector withholds such a rule whole and Assure cannot read it. The message names the file and the line; send Symbolia the file name and the line number so the shape is counted. There is no workaround yet.
+**Not yet checkable:** a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) stops the check today (`collector_refused`, exit 3 in the Action, HTTP 422 from the API). PostgreSQL needs quotes around a role or database name with a hyphen or an upper-case letter, so this is not rare. The collector withholds such a rule whole and Assure cannot read it. The message names the file and the line. What you can do today: remove quotes a name does not need; write an `@file` list's names inline; use a `+group` role in place of a list; list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted. These refusals go away once you collect with the next collector (RF-28), which keeps such rules as written and marks any rule or setting it still withholds; the check reads a marked line as not observed and the summary lists it as `not observed: <file> line N (<reason>)`. The collector the Action ships is still the earlier one until the next is accepted, so today these refusals still happen.
 
-**Served today:** `postgresql-declared-model`, which needs a declaration file in an artefacts directory (see "The declared profile" below). The intent-free profile, `postgresql-observed-baseline`, is not yet served; a check with it returns `profile_not_servable`. This page describes the intent-free profile's claims, which apply once it is served.
+**Served today:** both PostgreSQL profiles. The intent-free profile, `postgresql-observed-baseline`, needs no declaration; this page describes its claims. `postgresql-declared-model` needs a declaration file in an artefacts directory (see "The declared profile" below).
 
-The check runs on Symbolia's server. The Action collects in your runner and sends the collected facts to the API; [DATA.md](DATA.md) says what is sent and how long it is kept. Before anything is sent, the Action replaces the text of every configuration comment with `# <withheld comment>` and every string literal in a policy expression with `'<withheld literal N>'`; secret-bearing values are withheld whole by the collector. The check reads every file as it would have read it before the comments were withheld: a line PostgreSQL cannot parse is kept as the non-comment marker `<withheld: a line PostgreSQL cannot parse>`, which the check still counts as unparseable, or, when the check would read it as a working setting or rule, the Action stops before sending and names the file and the line. A rule or setting the collector had to withhold whole also stops the upload (`collector_refused`) rather than being read as absent or as broken (see [DATA.md](DATA.md)). So does a file holding a line the collector withheld whole when the collector's record, `COLLECTION-SIDECAR.json`, is not sent with it: a collector output without its sidecar cannot be checked. The file digests a verdict records are those of the files as sent. A reading that compares a policy expression with your declared predicate still compares them exactly: equal literals get the same marker within one check.
+The check runs on Symbolia's server. The Action collects in your runner and sends the collected facts to the API; [DATA.md](DATA.md) says what is sent and how long it is kept. Before anything is sent, the Action replaces the text of every configuration comment with `# <withheld comment>` and every string literal in a policy expression with `'<withheld literal N>'`; secret-bearing values are withheld whole by the collector. The check reads every file as it would have read it before the comments were withheld: a line PostgreSQL cannot parse is kept as the non-comment marker `<withheld: a line PostgreSQL cannot parse>`, which the check still counts as unparseable, or, when the check would read it as a working setting or rule, the Action stops before sending and names the file and the line. A rule or setting the collector had to withhold whole also stops the upload (`collector_refused`) rather than being read as absent or as broken (see [DATA.md](DATA.md)); with the next collector (RF-28) it is a marker line that the check reads as not observed instead. So does a file holding a line the collector withheld whole when the collector's record, `COLLECTION-SIDECAR.json`, is not sent with it: a collector output without its sidecar cannot be checked. The Action also needs the collector's `REDACTION-MANIFEST.json` from the same run beside `raw/`, to check in your runner that the sidecar belongs to these files; the manifest is never sent. Records from another run are caught only when a file that holds a withheld line differs, byte for byte, from that run's file, so always use the sidecar and manifest written by the same collector run as `raw/` ([DATA.md](DATA.md) states the limit). A direct API caller is responsible for sending the collector's own output from one run. The file digests a verdict records are those of the files as sent. A reading that compares a policy expression with your declared predicate still compares them exactly: equal literals get the same marker within one check.
 
 Assure reads a PostgreSQL deployment and gives a reading for each of 40 reliability and safety obligations. Every premise comes from your observed system or from a pinned public baseline row, and each one names its source. You declare nothing.
 
 The design treats a wrong "holds" as the worst possible outcome. When a fact is missing, the reading says so.
 
+## What a check that meets the policy claims
+
+Under the default policy (`fail-on: fails`), a check exits 0 only when every machine was read, at least one obligation reads holds or deviates, and none reads fails. Such a check claims this: every rule Symbolia holds for the system was checked against what was observed and none is violated; what could not be observed or judged is named. Deviations from a recommendation are listed beside it. The claim covers these rules and these observations, and nothing beyond them. Uptime and behaviour under load are outside it, because no rule for them exists yet.
+
+A run in which some machines could not be read exits 3 by default, because the claim is about the whole system; the first line of the summary says how many machines were read and how many were refused. A run that checked nothing, or whose only verdicts are vacuous, also exits 3, and so does a run in which no machine could be read, even with allow-partial set.
+
 ## What a verdict claims
 
 - **holds**: the obligation is met over the observed, non-empty domain, within the reading's qualifiers.
-- **fails**: an unconditional vendor requirement, or an unconditional safety property computed from observation, is broken. The witness shows where.
+- **fails**: an unconditional vendor requirement, or an unconditional safety property computed from observation, is broken. The `witnesses` list shows where.
 - **deviates**: a recommendation from the vendor or from the Assure baseline is not followed. The `authority` field says whose.
 - **vacuous**: the observed domain is empty. The `domain_locator` shows where it was looked for.
 
@@ -21,13 +27,13 @@ Every verdict is tied to the exact engine (`engine.commit`) and the exact input 
 
 ## What a verdict leaves open
 
-- Whether the database is secure or fit for its purpose. Readings cover the 40 obligations only.
+- Anything beyond the rules Symbolia holds today, including whether the database is fit for its purpose. Readings cover the 40 obligations only.
 - Anything about obligations that read needs intent, not observed, missing baseline, missing method or representation.
 - Other databases in the cluster. Database-scoped obligations read only the database you connected to. Their text names it ("in database <db>"). Other connectable databases appear as the qualifier "other connectable databases not collected: <names>". On a default server this includes `template1`. While another connectable database exists, PRIV-2-OB reads not observed.
 - The rules the server has loaded. Client-authentication readings use the configured `pg_hba.conf` file. They carry the qualifier "configured rules; loaded identity not observed". HBA-6 reads not observed.
 - Password presence and stored-hash type. Readings on scram or md5 rules carry "password presence not observed".
 - The collection role. It is left out of every domain. Facts about it appear as observations and are never counted. Use a new role for collection, so it hides none of your site's results.
-- Remote access on a server with only local listeners. Host-local means Unix socket, `127.0.0.0/8` and `::1/128`. With no other listener, the remote obligations read vacuous.
+- Remote access on a server with only local listeners. Host-local means Unix socket, `127.0.0.0/8`, `::1/128` and the IPv4-mapped loopback `::ffff:127.0.0.0/104`. With no other listener, the remote obligations read vacuous.
 - A populated production deployment. Qualification evidence today comes from the official PostgreSQL 18 image. A populated deployment has not yet been run.
 
 ## PostgreSQL versions
@@ -36,12 +42,11 @@ The collector and checker accept majors 14 to 18. The major comes from the obser
 
 ## Managed PostgreSQL
 
-Some facts live in configuration files: `postgresql.conf` and its includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`. With a connection and no data directory, those files cannot be read. This is the usual case for managed PostgreSQL services. Then:
-
-- a reading that needs a fact from a file reads **not observed**;
-- where the checker cannot represent the input without the file, as with a missing `pg_hba.conf` or `postgresql.conf`, the readings that use it read **representation**.
+Some facts live in configuration files: `postgresql.conf` and its includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`. With a connection and no data directory, those files cannot be read. This is the usual case for managed PostgreSQL services. Then every reading that could not be made is named with its status and its reason, such as not observed or representation; the reason says which fact or file was missing. A machine the checker could not read at all is listed with its reason under "Machines not read" in the job summary, and in the verdict's `machines` field. A run in which machines were refused does not meet the policy by default: it exits 3. Set `allow-partial: true` to accept a partial read.
 
 To fail a job when a needed fact was not collected, set `fail-on` to `fails,not_collected`.
+
+The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. A verdict does not say whether the session was read-only.
 
 A self-hosted runner, or a collection machine, that can read the files lifts this limit. Set `data-dir` to the data directory. Set `config-dirs` to any directory outside it that holds configuration files, such as `/etc/postgresql/<major>/<cluster>` on Debian and Ubuntu. The collector reads files only inside those directories.
 
@@ -55,4 +60,4 @@ A new, default database reads mostly needs intent and vacuous. That means there 
 
 ## Checker status
 
-The `postgresql-observed-baseline` checker is not yet qualified. Until it is, a check with that profile returns the typed outcome `profile_not_servable`. Qualification means: on the official PostgreSQL 18 image the readings equal the expected readings, every planted defect is caught, there are zero wrong holds, one independent review found no blocking defect, and two hosted runs give identical bytes.
+The `postgresql-observed-baseline` checker is served. It was qualified before it was served. Qualification means: on the official PostgreSQL 18 image the readings equal the expected readings, every planted defect is caught, there are zero wrong holds, one independent review found no blocking defect, and two hosted runs give identical bytes.

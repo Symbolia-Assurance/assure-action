@@ -16,12 +16,13 @@ Schema `assure.serve.verdict/v1`.
 | `profile_version` | The version of that profile's checker entry. |
 | `engine` | `commit`, `release_sha256` and `checkers_sha256`: the exact engine that produced the readings. |
 | `input` | `files`: each file's `path`, `bytes` and `sha256`. `bundle_sha256`: one digest over that list. |
-| `outcome` | `verdict` when at least one obligation reads holds, fails, deviates or vacuous. `no_verdict` when none does. |
+| `outcome` | `verdict` when at least one obligation reads holds, fails or deviates (holds or fails for the declared profile). `no_verdict` otherwise. A vacuous reading alone is not a verdict: it says only that a domain was empty. |
 | `readings` | The checker's full output, unchanged. This is the proof tree (section 3). |
 | `counts` | The number of obligations in each status. Every status appears, including those at zero. |
 | `a0` | Null, or the reason the input failed its integrity gate (section 7). |
+| `machines` | `read`: the machines that gave readings of their own. `refused`: each machine that could not be read, with the checker's `reason`. `total`: every machine the profile checks (8). `source`: `reported` when the checker said which machines it refused, `inferred` when Assure worked it out from the readings (section 7). |
 | `rows` | One line per obligation: `machine`, `id`, `status`, `status_text`, `authority` and `reason`. |
-| `policy` | `fail_on`: the statuses that fail the job (`not_collected` already expanded). `exit` and `reason`: see section 9. |
+| `policy` | `fail_on`: the statuses that fail the job (`not_collected` already expanded). `exit` and `reason`: see section 9. `allow_partial`: true when you accepted a partial read. |
 | `scope_notes` | Limits that bound every reading in this check. See [SCOPE.md](SCOPE.md). |
 | seven flags | Fixed record flags: `execution_authorized`, `hardware_authorized`, `industrial_release_authorized`, `release_allowed`, `physical_validation`, `simulation`, `self_approved`. A verdict authorises no change, release or action. |
 
@@ -29,19 +30,19 @@ When no verdict can be made, the file is a failure envelope instead, schema `ass
 
 ## 2. The nine statuses
 
-Four statuses are verdicts. Five are not.
+Four statuses are verdicts. Five are not. A vacuous reading alone does not make a check's outcome a verdict, because it says only that a domain was empty.
 
 | Status | Verdict | Meaning | How it is written |
 |---|---|---|---|
 | `holds` | yes | The observed system meets the obligation over a non-empty observed domain. | "holds", or "holds in database <db>". It is bounded by its qualifiers. |
-| `fails` | yes | An unconditional vendor requirement, or an unconditional safety property computed from observation, is broken. | "fails: <row id>" |
+| `fails` | yes | An unconditional vendor requirement, or an unconditional safety property computed from observation, is broken. | "fails: <id>", where the id is a baseline row or a safety property (such as OSP-AUTH-1), with " in database <db>" on a database-scoped obligation |
 | `deviates` | yes | A recommendation is not followed. `authority` says whose recommendation. | "deviates from vendor guidance <row id>" or "deviates from the Assure baseline <row id>" |
 | `vacuous` | yes | The observed domain is empty. There is nothing to check. | "vacuous: observed empty domain", sometimes with " in database <db>". It always carries `domain_locator`. |
 | `needs_intent` | no | The rule depends on what the system is for. | "needs intent", or "needs intent in database <db>"; its reason reads "needs intent: out of scope for Assure", with the observations listed |
 | `not_observed` | no | A fact the reading needs was not collected or could not be read. | "not observed: <what> (<locator>)" |
 | `missing_baseline` | no | A baseline row the reading needs is absent or not documented for this major. | "missing baseline: <row id> not pinned for major <n>" |
 | `missing_method` | no | The checker has no method for this input shape. | "missing method: <gap id>" |
-| `representation` | no | The input could not be represented faithfully, or a typed internal failure occurred. | "representation: <reason>" |
+| `representation` | no | The input could not be represented faithfully. | "representation: <reason>" |
 
 How to read them:
 
@@ -69,7 +70,7 @@ Readings sit at `readings.M<n>.obligations.<id>`. `readings.order` lists the 40 
 | `status_text` | The short text from the table above. Show it as given. |
 | `reason` | The full reason. For not observed it names what is missing and where it was looked for. |
 | `authority` | Present on deviates: `vendor` or `assure`. |
-| `witness` | For fails, deviates and needs intent: the example that shows it. Null otherwise. |
+| `witnesses` | A list. For fails, deviates and needs intent: every example that shows it. Empty otherwise. |
 | `qualifiers` | Strings that bound the reading, such as the database it covers. |
 | `observations` | Observed facts that bear on the reading. |
 | `premises` | Every input the reading used, each with its source (section 4). |
@@ -88,7 +89,7 @@ Each premise has a `field`, a `source` and a `role` (`reads` or `informational`)
 | `intent_required` | An input only you can give. The reading is "needs intent: out of scope for Assure". |
 | `not_observed` | A fact that was missing. It names the gap. |
 
-A few premises carry method tags such as `model_constant` or `domain_restriction`. These are internal to the checker's method.
+A separate list, `internal_premises`, holds method tags such as `model_constant` or `domain_restriction`. These are internal to the checker's method. They are neither observations nor baselines.
 
 A verdict never reads a premise that is not observed or that needs intent.
 
@@ -145,16 +146,18 @@ Every intent-bound obligation reads needs intent. The "listed" obligations read 
 
 A new, default database reads mostly **needs intent** and **vacuous**. That means there is little to check. The 16 intent-bound obligations always need intent. An empty database has no ordinary logins, tables, definer functions or subscriptions, so many domains are empty.
 
-On the official PostgreSQL 18 image the expected counts are about: needs intent 16, vacuous 13, holds 4, deviates 2, not observed 3, missing baseline 2, fails 0. These counts may shift as baseline rows are pinned.
+On the official PostgreSQL 18 image the checker reads: needs intent 17, vacuous 13, holds 4, not observed 4, deviates 2, missing baseline 0, fails 0.
 
 ## 7. "No verdicts" and input integrity
 
-- **No verdicts.** `outcome` is `no_verdict` when no obligation reads holds, fails, deviates or vacuous. Nothing could be checked, so `policy.exit` is 3 with `policy.reason` `no_verdict`, unless a reading has a status you fail on (then 1) or `fail-on` is `never` (then 0). Look at the not observed readings to see what was missing.
+- **No verdicts.** `outcome` is `no_verdict` when no obligation on a machine that was read reads holds, fails or deviates. A vacuous reading alone does not count, and neither does a reading on a machine that could not be read, so a run in which no machine could be read is `no_verdict` even with allow-partial set. Nothing could be checked, so `policy.exit` is 3 with `policy.reason` `no_verdict`, unless a reading has a status you fail on (then 1) or `fail-on` is `never` (then 0). Look at the not observed readings to see what was missing.
+- **Machines not read.** The first line of the summary says how many machines were read and how many were refused, for example "5 of 8 machines read, 3 refused", or "No machine could be read". The count is out of every machine the profile checks (eight for both profiles); a machine with no reading at all is refused with the reason "no readings for this machine". Each refused machine is listed with the checker's reason. A run with refused machines exits 3 with `policy.reason` `machines_refused`, unless a reading has a status you fail on (then 1), `fail-on` is `never` (then 0) or you set allow-partial (then 0). When `machines.source` is `inferred`, the checker did not say which machines it refused, the first line ends "(inferred)" and the summary says so, whether or not a machine was refused, and the list was worked out from the readings: a machine counts as refused when every reading of it is representation or not observed with one same reason.
+- **The selected scope.** A profile can check a set you select that is not a set of machines, for example a list of endpoints. Its verdict then carries `scope_observed` beside `machines`: `unit` and `label` (for example `endpoint` and `endpoints`), `expected` (every unit you asked to be checked), `observed` (the units that were observed), `refused` (each unit that was not, with its `reason`) and `source` (`bound` when the set came with your request, `row` when the profile fixes it, `reported` when only the checker named it). The set you send is fixed before the checker runs, so the checker's output can add to it but never remove from it. The first line of the summary starts with this scope, for example "1 of 2 endpoints observed, 1 refused; 5 of 5 machines read, none refused", and adds "(accepted scope reduced)" when a unit was removed from the scope you accepted. Each unit that was not observed is listed with its reason. A run that observed less than it was asked to exits 3 with `policy.reason` `scope_refused`, unless a reading has a status you fail on (then 1), `fail-on` is `never` (then 0) or you set allow-partial (then 0), exactly as for machines. Both PostgreSQL profiles check machines: their verdicts carry `machines` alone and read as before.
 - **No reading: input integrity.** When `a0` is set, the input failed its integrity gate. Every reading is representation, with the gate's reason. `policy.exit` is 3 with `policy.reason` `input_integrity` under every policy except `never`. Fix the collection and run again.
 
 ## 8. The declared profile
 
-`postgresql-declared-model` reads per machine against a declaration you supply. Its statuses are holds, fails, vacuous, missing method, missing premise, representation and not evaluated. Holds, fails and vacuous are its verdicts. **Missing premise** means the declaration lacks a value the model needs. **Not evaluated** means the machine was not run; the reason says why. It is the profile served today.
+`postgresql-declared-model` reads per machine against a declaration you supply. Its statuses are holds, fails, vacuous, missing method, missing premise, representation and not evaluated. Holds, fails and vacuous are its verdicts. **Missing premise** means the declaration lacks a value the model needs. **Not evaluated** means the machine was not run; the reason says why. Both profiles are served.
 
 ## 9. The policy exit
 
@@ -165,7 +168,13 @@ On the official PostgreSQL 18 image the expected counts are about: needs intent 
 | 1 | `never` | 0 | `fail-on` is `never`. |
 | 2 | `input_integrity` | 3 | The input-integrity gate stopped the check (`a0` is set). |
 | 3 | `policy_failed` | 1 | A reading has a status you fail on. |
-| 4 | `no_verdict` | 3 | No reading is a verdict: nothing was checked. |
-| 5 | `policy_met` | 0 | Otherwise. |
+| 4 | `no_verdict` | 3 | No reading is holds, fails or deviates: nothing was checked. |
+| 5 | `machines_refused` | 3 | Some machines could not be read, and allow-partial is not set. |
+| 6 | `scope_refused` | 3 | Every machine was read, but part of the selected scope (for example an endpoint) was not observed, and allow-partial is not set. |
+| 7 | `policy_met` | 0 | Otherwise. |
 
-Exit 2 is bad input, and a failure envelope gives its outcome's own exit, 3 for every outcome that has none. `fail-on` takes, for each profile, the statuses it can emit except holds and vacuous, the group word `not_collected`, or `never` alone; the quickstarts list them.
+Exit 2 is bad input, and a failure envelope gives its outcome's own exit, 3 for every outcome that has none. A failure of the checker itself is the failure envelope `checker_error`, under every policy. A check is charged once the checker has started, whatever its result, `checker_error` and `checker_timeout` included. One failure is not charged: the checker's own internal error, a `checker_error` whose `detail.rule` is `internal_error`. A request refused before the checker starts is never charged, and neither is a check cut short by a server restart; it still counts against your rate limits.
+
+A result is returned whenever one can be produced. When the checker's output for one machine is malformed, that machine is refused and named under "Machines not read" with its reason, `malformed_output: ...` (or `server_fault: ...` when the server could not write that machine's readings), and the other machines keep their readings; a refused machine never contributes a verdict, so the policy reads it as any refused machine. When no result can be produced, the typed failure says what was malformed in `detail.malformation`: a kind from a fixed list, the file, the line, the field and the expected form, never the text of your input. A rule or setting the RF-28 collector withheld is listed in `not_observed_lines` and in the summary as `not observed: <file> line N (<reason>)`; the check reads it as not observed.
+
+`fail-on` takes, for each profile, the statuses it can emit except holds and vacuous, the group word `not_collected`, or `never` alone; the quickstarts list them.

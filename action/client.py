@@ -21,6 +21,7 @@ Rules:
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
 - `fail_on` is passed through as the customer wrote it; the server checks it against the profile and decides the exit.
+  `allow_partial=True` adds `allow_partial=1` to the query; false sends nothing (the server's default).
 Every failure is a typed Refusal; nothing here returns a pass that did not come from the server.
 
 `allow_list(listing, profile_id)` builds a profile's allow-list from `GET /v1/profiles`: exact paths and full-match
@@ -250,15 +251,20 @@ class Client:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
 
-    def submit(self, profile_id, files, fail_on=None, *, body=None):
+    def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it."""
         started = self.clock()
         if body is None:
             body = bundle.request_body(profile_id, files)
         path = '/v1/checks'
+        query = {}
         if fail_on:
-            path += '?' + urllib.parse.urlencode({'fail_on': fail_on})
+            query['fail_on'] = fail_on
+        if allow_partial is True:
+            query['allow_partial'] = '1'
+        if query:
+            path += '?' + urllib.parse.urlencode(query)
         idem = secrets.token_hex(16)
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem})
         polls = 0

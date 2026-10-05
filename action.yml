@@ -1,8 +1,7 @@
 # Assure: collects PostgreSQL facts in the customer's runner, sends them to the hosted Assure API over TLS with the
-# customer's key, and writes the verdict the API returns (DIRECTOR-DIRECTION-SERVE-003). The check runs on Symbolia's
-# server. Inputs reach entry.py through env only; no expression appears inside the run script. No third-party action is
-# used. The API key reaches entry.py by environment only, never on a command line.
-# execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.
+# customer's key, and writes the verdict the API returns. The check runs on Symbolia's server. Inputs reach entry.py
+# through the environment only; no expression appears inside the run script. No third-party action is used. The API
+# key reaches entry.py by environment only, never on a command line.
 name: Assure check
 description: Check a PostgreSQL server against an Assure profile. Collects in your runner, checks on the Assure API, writes a verdict file.
 author: Symbolia
@@ -33,11 +32,11 @@ inputs:
     required: false
     default: ''
   collection-role:
-    description: The collection role. It must match the user in the connection.
+    description: The collection role's name inside the database, which the collector checks against current_user. Defaults to the user in the connection. Set it when a connection pooler's login name (the user in the connection) differs, for example Supabase's <role>.<project-ref>.
     required: false
     default: ''
   collection-privileges:
-    description: The read-only roles granted to the collection role, comma separated.
+    description: The read-only roles granted to the collection role, comma separated. On Supabase, grant and give pg_monitor.
     required: false
     default: pg_read_all_settings,pg_read_all_stats
   data-dir:
@@ -52,6 +51,10 @@ inputs:
     description: Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never.
     required: false
     default: fails
+  allow-partial:
+    description: true lets a run in which some machines could not be read meet the policy (exit 0 when no reading has a fail-on status). Default false, so such a run exits 3.
+    required: false
+    default: 'false'
   output:
     description: Where to write the verdict file.
     required: false
@@ -69,7 +72,7 @@ outputs:
     description: verdict, no_verdict, or the typed failure outcome.
     value: ${{ steps.assure.outputs.outcome }}
   exit-code:
-    description: The verdict's policy exit (0 policy met or never, 1 policy failed, 3 nothing was checked), 2 bad input, 3 typed refusal or API failure.
+    description: The verdict's policy exit (0 policy met or never, 1 policy failed, 3 nothing was checked or machines were refused), 2 bad input, 3 typed refusal or API failure.
     value: ${{ steps.assure.outputs.exit-code }}
 
 runs:
@@ -89,6 +92,7 @@ runs:
         INPUT_DATA_DIR: ${{ inputs.data-dir }}
         INPUT_CONFIG_DIRS: ${{ inputs.config-dirs }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

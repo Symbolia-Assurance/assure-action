@@ -9,27 +9,44 @@
 - `check_config_dirs(text)`: the `config-dirs` input (line-break or colon separated directories holding configuration
   files outside the data directory) as resolved paths; each becomes one `--extra-root` argument item.
 - `collect(...)`: runs `collect_pg.py` as a child process with an argument list (never a shell), an explicit minimal
-  environment (PATH, LC_ALL, PGAPPNAME, PGCONNECT_TIMEOUT and the parsed PG* variables; the collector adds PGOPTIONS
-  itself), stdin closed, its own process group and a wall clock. Its output is captured to files, read bounded, and never
+  environment (PATH, LC_ALL, PGAPPNAME, PGCONNECT_TIMEOUT and the parsed PG* variables, plus ASSURE_LOGIN_USER and
+  ASSURE_COLLECTION_ROLE when the login name differs from the role; the collector adds PGOPTIONS itself), stdin closed, its own process group and a wall clock. Its output is captured to files, read bounded, and never
   echoed: only a typed outcome with a bounded, sanitised reason leaves this module. Exit 0 or 1: collected (gaps become
   `not observed` readings); exit 3: REFUSAL.json gives `collector_refused`, or `collector_cannot_connect` when the first
   query could not reach the server; exit 2 or anything else: `checker_error`. The collector's `out/raw/*`,
   `out/COLLECTION-SIDECAR.json` and `out/TIMING.json` become `raw/...` names loaded through `bundle.from_directory`, so the
-  bounds of an artefacts directory apply. Then `action/withhold.py` withholds every configuration comment and every
-  string literal in the policy expressions (refutation 002, TC-1 and TC-2), before anything else reads the bytes.
+  bounds of an artefacts directory apply. `out/REDACTION-MANIFEST.json` stays beside raw/, where `from_directory` reads
+  it as a runner-only record (never uploaded). Then `action/withhold.py` `apply` checks that the manifest binds the
+  sidecar to the collected bytes (refutation 005, WH-4) and withholds every configuration comment and every string
+  literal in the policy expressions (refutation 002, TC-1 and TC-2), before anything else reads the bytes.
 
 The collector's `--psql` command is this file in `--psql-shim` mode in front of the resolved psql: it appends one line to
 a progress file and then replaces itself with psql, so on a wall-clock expiry the Action knows whether the collector was
-still on its first query (cannot connect) or later (timeout). The shim reads and changes nothing else.
+still on its first query (cannot connect) or later (timeout).
+
+The login name and the collection role. `collection-role` is the role's name inside the database: the collector checks
+it against `current_user` and `session_user`, and that check is the authority. The connection's `user` is the login
+name. They differ behind a connection pooler that routes on the login name (Supabase's pooler logs in
+`<role>.<project-ref>` and the session's role is `<role>`). The frozen collector always runs psql with `-U <role>`, so
+when the two differ the Action sets ASSURE_LOGIN_USER (the login name) and ASSURE_COLLECTION_ROLE (the role) in the
+collector child's environment, never on a command line, and the shim replaces the value after the collector's one `-U`
+(which must be the role) with the login name. That is the shim's only change to psql's arguments: every other argument
+passes byte for byte, as an argument list, never through a shell. It removes those two variables from psql's
+environment and changes nothing else in it. Without ASSURE_LOGIN_USER the arguments pass unchanged. When the variable
+is set and the collector's arguments do not hold exactly one `-U <role>` before `-c`, psql is not run (exit 2).
 """
 from __future__ import annotations
 
 import os
 import sys
 
+LOGIN_ENV = 'ASSURE_LOGIN_USER'
+ROLE_ENV = 'ASSURE_COLLECTION_ROLE'
+
 
 def _psql_shim(argv):
-    """`collect.py --psql-shim <progress file> -- <psql> <args...>`: count the query, then exec psql unchanged."""
+    """`collect.py --psql-shim <progress file> -- <psql> <args...>`: count the query, put the login name in place of
+    the role after `-U` when ASSURE_LOGIN_USER is set, then exec psql."""
     if len(argv) < 3 or argv[1] != '--':
         os.write(2, b'assure psql shim: bad arguments\n')
         return 2
@@ -41,8 +58,18 @@ def _psql_shim(argv):
             os.close(fd)
     except OSError:
         pass
+    args = list(argv[2:])
+    env = dict(os.environ)
+    login, role = env.pop(LOGIN_ENV, None), env.pop(ROLE_ENV, None)
+    if login is not None:
+        end = args.index('-c', 1) if '-c' in args[1:] else len(args)
+        found = [i for i in range(1, end) if args[i] == '-U']
+        if not login or role is None or len(found) != 1 or found[0] + 1 >= end or args[found[0] + 1] != role:
+            os.write(2, b'assure psql shim: the -U argument is not the declared collection role; psql was not run\n')
+            return 2
+        args[found[0] + 1] = login
     try:
-        os.execv(argv[2], argv[2:])
+        os.execve(args[0], args, env)
     except OSError:
         os.write(2, b'psql executable not found\n')
         return 127
@@ -88,6 +115,10 @@ APP_NAME = 'assure-action'
 DEFAULT_PRIVILEGES = 'pg_read_all_settings,pg_read_all_stats'
 READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')
 ROLE_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,62}')       # the frozen collector's own --role rule
+# The login name: the role rule's characters, with room for a pooler's routing suffix after a role of 63 characters.
+LOGIN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}')
+_MISMATCH_RE = re.compile(r"connected as current_user '([^'\\]*)' / session_user '([^'\\]*)', not the declared "
+                          r"collection role '([^'\\]*)'")
 NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 
 # libpq connection keywords this Action accepts, and the environment variable each becomes.
@@ -366,18 +397,38 @@ def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
 
 
 # ---------- inputs ----------
+def _plain_name(name, rule):
+    return bool(rule.fullmatch(name)) and name.upper() != 'PUBLIC' and not name.startswith('pg_')
+
+
 def check_role(role, conn):
-    """The collection role: the input, else the connection's user; they must agree. `bad_input` otherwise."""
+    """The collection role: the role's name inside the database, which the collector checks against current_user and
+    session_user. It is the input, else the connection's user. The connection's user is the login name; it may differ
+    from the role (a connection pooler routes on it), and `collect` then logs in with it. `bad_input` when either name
+    is outside its rule; no reason quotes a name."""
     role = (role or '').strip()
     user = conn.user if conn is not None else None
     if not role and not user:
         raise Refusal('bad_input', 'collection-role is empty and the connection names no user')
-    if role and user and role != user:
-        raise Refusal('bad_input', 'collection-role differs from the user in the connection; they must be the same role')
+    if user is not None and not _plain_name(user, LOGIN_RE):
+        raise Refusal('bad_input', 'the user in the connection must be a name of letters, digits, "_", "." and "-", '
+                      'at most 128 characters, starting with a letter or "_", neither PUBLIC nor pg_-prefixed')
     role = role or user
-    if not ROLE_RE.fullmatch(role) or role.upper() == 'PUBLIC' or role.startswith('pg_'):
-        raise Refusal('bad_input', 'collection-role must be an identifier that is neither PUBLIC nor pg_-prefixed')
+    if not _plain_name(role, ROLE_RE):
+        raise Refusal('bad_input', 'collection-role (by default the user in the connection) must be an identifier of '
+                      'at most 63 characters that is neither PUBLIC nor pg_-prefixed')
     return role
+
+
+def login_env(conn, role):
+    """The collector child's extra environment for a login name that differs from the role: {} when they are equal or
+    the connection names no user. `bad_input` for a name outside its rule."""
+    user = conn.user if conn is not None else None
+    if not user or user == role:
+        return {}
+    if not _plain_name(user, LOGIN_RE) or not _plain_name(role, ROLE_RE):
+        raise Refusal('bad_input', 'the user in the connection or collection-role is outside the name rule')
+    return {LOGIN_ENV: user, ROLE_ENV: role}
 
 
 def check_privileges(text):
@@ -487,7 +538,24 @@ def _is_transport(kind, reason, queries_run):
             and any(w in reason.lower() for w in TRANSPORT_WORDS))
 
 
-def _refused(out, stdout_text, conn, rc):
+def _pooler_step(kind, reason, conn, role):
+    """The next step for a pooler login declared as the collection role: the collector found current_user `<name>`
+    where the declared role, which is also the connection user, is `<name>.<suffix>`. '' in every other case. Never a
+    retry: the customer sets collection-role."""
+    if kind != 'collection_role_mismatch' or conn is None or not conn.user or role != conn.user:
+        return ''
+    m = _MISMATCH_RE.search(reason)
+    if not m:
+        return ''
+    current, session, declared = m.groups()
+    if current != session or declared != role or not role.startswith(current + '.') \
+            or not _plain_name(current, ROLE_RE):
+        return ''
+    return ("set collection-role to '%s' (the role's name inside the database); the connection user stays as it is"
+            % current)
+
+
+def _refused(out, stdout_text, conn, rc, role=None):
     doc = _refusal_doc(out, stdout_text)
     ref = doc.get('refusal') if isinstance(doc.get('refusal'), dict) else {}
     kind = ref.get('type') if isinstance(ref.get('type'), str) else 'unknown'
@@ -499,8 +567,13 @@ def _refused(out, stdout_text, conn, rc):
                        'collection role: ' + tail, conn), collector_exit=rc, collector_refusal=kind)
     if not doc:
         return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc)
-    return Refusal('collector_refused', sanitise('%s: %s' % (kind, reason or 'no reason given'), conn),
-                   collector_exit=rc, collector_refusal=kind)
+    text = sanitise('%s: %s' % (kind, reason or 'no reason given'), conn)
+    step = _pooler_step(kind, reason, conn, role)
+    if step:                                   # the next step is kept whole; the collector's reason gives way
+        step = sanitise(step, conn)            # 'collector_refused: ' precedes it in the 300-character ::error line
+        room = max(REASON_CAP - len('collector_refused: ') - len(step) - 2, 40)
+        text = (text if len(text) <= room else text[:room - 1] + '…') + '; ' + step
+    return Refusal('collector_refused', text, collector_exit=rc, collector_refusal=kind)
 
 
 def _gather(out, profile, limits):
@@ -533,6 +606,8 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     """Verify and run the collector into `scratch`; return the bundle (`bundle.Collected`). Every fault is a Refusal."""
     d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
     verify_collector(d, frozen_sha256)
+    env = child_env(conn, path=path)
+    env.update(login_env(conn, role))               # only when the login name differs from the role
     path = path or '/usr/bin:/bin'
     psql_path = resolve_psql(psql, path)
     scratch = Path(scratch)
@@ -548,7 +623,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     for root in extra_roots:                        # config-dirs: each one argument item, never through a shell
         argv += ['--extra-root', str(root)]
     with open(stdout_p, 'wb') as so, open(stderr_p, 'wb') as se:
-        proc = subprocess.Popen(argv, env=child_env(conn, path=path), stdin=subprocess.DEVNULL, stdout=so, stderr=se,
+        proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=so, stderr=se,
                                 cwd=str(scratch), start_new_session=True, close_fds=True)
         try:
             rc = proc.wait(timeout=timeout)
@@ -569,7 +644,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     if rc in (0, 1):
         return _gather(out, profile, limits)
     if rc == 3:
-        raise _refused(out, _read_bounded(stdout_p), conn, rc)
+        raise _refused(out, _read_bounded(stdout_p), conn, rc, role)
     printed = _refusal_doc(scratch / 'no-such-output', _read_bounded(stdout_p)).get('refusal')
     if isinstance(printed, dict) and isinstance(printed.get('reason'), str):
         detail = '%s: %s' % (printed.get('type'), printed['reason'])

@@ -4,7 +4,9 @@ is built, named only by allow-listed relative paths, and written by this module 
 - `parse_json` decodes strict UTF-8, refuses a nesting depth above the cap by scanning the text before the parser runs,
   refuses duplicate keys, NaN/Infinity and a number that overflows to infinity (such as 1e999).
 - `from_directory` reads an artefacts directory: raw/ and, as the collector lays it out, COLLECTION-SIDECAR.json and
-  TIMING.json beside raw/ (submitted under raw/; a differing copy inside raw/ is `bad_input`).
+  TIMING.json beside raw/ (submitted under raw/; a differing copy inside raw/ is `bad_input`). The collector's
+  REDACTION-MANIFEST.json, beside raw/ or inside it, is read into `Collected.records` for the runner's own check
+  (serve/faithful.py `check_binding`) and is never part of the upload; a differing copy in both places is `bad_input`.
 - `check_name` admits a name only when it equals a profile path or fully matches a profile pattern, after refusing,
   before any filesystem call, absolute paths, `..`/`.`/empty segments, backslashes, NUL and control characters.
 - `check_files` is the one name, cap and required-file check (the API runs it before admission); a name that is also a
@@ -31,11 +33,13 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .outcomes import Refusal
+from .outcomes import Refusal, malformation
 
 MAX_NAME = 200
 # Files the frozen collector writes beside raw/ (its own layout) that the checker contract names under raw/.
 BESIDE_RAW = ('COLLECTION-SIDECAR.json', 'TIMING.json')
+# Records the frozen collector writes beside raw/ that the runner reads and never uploads (Collected.records).
+RUNNER_ONLY = ('REDACTION-MANIFEST.json',)
 
 
 @dataclass(frozen=True)
@@ -52,10 +56,13 @@ LIMITS = Limits()
 @dataclass
 class Collected:
     """What `from_directory` found: allow-listed files by name, and the names it ignored. `withheld` holds the counts
-    of the Action's withholding pass (action/withhold.py) once it has run, else None."""
+    of the Action's withholding pass (action/withhold.py) once it has run, else None. `records` holds the collector's
+    runner-only records by base name (RUNNER_ONLY: REDACTION-MANIFEST.json), read for the runner's checks and never
+    uploaded."""
     files: dict = field(default_factory=dict)
     ignored: list = field(default_factory=list)
     withheld: dict | None = None
+    records: dict = field(default_factory=dict)
 
 
 def _depth_ok(text, limit):
@@ -83,19 +90,19 @@ def _pairs(pairs):
     out = {}
     for k, v in pairs:
         if k in out:
-            raise ValueError('duplicate key %r' % (k[:64],))
+            raise ValueError('a duplicate key')
         out[k] = v
     return out
 
 
 def _no_constant(name):
-    raise ValueError('non-finite number %s' % name)
+    raise ValueError('a non-finite number')
 
 
 def _finite_float(text):
     v = float(text)
     if v != v or v in (float('inf'), float('-inf')):
-        raise ValueError('number %s is not finite' % text[:40])
+        raise ValueError('a number that is not finite')
     return v
 
 
@@ -108,13 +115,20 @@ def parse_json(data, limits=LIMITS):
     try:
         text = bytes(data).decode('utf-8')
     except UnicodeDecodeError:
-        raise Refusal('bad_input', 'the body is not UTF-8') from None
+        raise Refusal('bad_input', 'the body is not UTF-8', malformation=malformation('body_not_utf8')) from None
     if not _depth_ok(text, limits.json_depth):
         raise Refusal('oversize_input', 'JSON nesting is deeper than %d' % limits.json_depth)
     try:
         return json.loads(text, object_pairs_hook=_pairs, parse_constant=_no_constant, parse_float=_finite_float)
     except (ValueError, RecursionError) as e:
-        raise Refusal('bad_input', 'malformed JSON: %s' % (str(e)[:200],)) from None
+        # refutation 008, G2 sweep: the reason names where and what kind of fault, never a key or a value of the input
+        if isinstance(e, json.JSONDecodeError):
+            why = '%s at line %d column %d' % (e.msg[:80], e.lineno, e.colno)
+        elif isinstance(e, RecursionError):
+            why = 'nesting too deep'
+        else:
+            why = str(e)
+        raise Refusal('bad_input', 'malformed JSON: %s' % (why,), malformation=malformation('body_not_json')) from None
 
 
 def _rule_for(name, profile):
@@ -127,18 +141,23 @@ def _rule_for(name, profile):
 def check_name(name, profile):
     """Return `name` when it is a safe relative POSIX path on the profile's allow-list; else `bad_input`."""
     if not isinstance(name, str):
-        raise Refusal('bad_input', 'a file name is not a string')
+        raise Refusal('bad_input', 'a file name is not a string', malformation=malformation('file_name', field='files'))
     shown = name[:80].encode('unicode_escape').decode('ascii')
     if not name or len(name) > MAX_NAME:
-        raise Refusal('bad_input', 'file name empty or longer than %d characters' % MAX_NAME)
+        raise Refusal('bad_input', 'file name empty or longer than %d characters' % MAX_NAME,
+                      malformation=malformation('file_name', field='files'))
     if any(ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xa0 for c in name):
-        raise Refusal('bad_input', 'file name holds a control character: %s' % shown)
+        raise Refusal('bad_input', 'file name holds a control character: %s' % shown,
+                      malformation=malformation('file_name', field='files'))
     if '\\' in name or name.startswith('/'):
-        raise Refusal('bad_input', 'file name is absolute or holds a backslash: %s' % shown)
+        raise Refusal('bad_input', 'file name is absolute or holds a backslash: %s' % shown,
+                      malformation=malformation('file_name', field='files'))
     if any(seg in ('', '.', '..') for seg in name.split('/')):
-        raise Refusal('bad_input', 'file name has an empty, "." or ".." segment: %s' % shown)
+        raise Refusal('bad_input', 'file name has an empty, "." or ".." segment: %s' % shown,
+                      malformation=malformation('file_name', field='files'))
     if _rule_for(name, profile) is None:
-        raise Refusal('bad_input', 'file name is not accepted by profile %s: %s' % (profile.id, shown))
+        raise Refusal('bad_input', 'file name is not accepted by profile %s: %s' % (profile.id, shown),
+                      malformation=malformation('file_name', file=name, field='files'))
     return name
 
 
@@ -147,22 +166,25 @@ def from_request(body, limits=LIMITS):
     against the profile, by `materialise`."""
     doc = parse_json(body, limits)
     if not isinstance(doc, dict) or set(doc) != {'profile', 'files'}:
-        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files')
+        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files',
+                      malformation=malformation('body_shape'))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
-        raise Refusal('bad_input', 'profile must be a string and files an object')
+        raise Refusal('bad_input', 'profile must be a string and files an object', malformation=malformation('body_shape'))
     if len(enc) > limits.files:
         raise Refusal('oversize_input', '%d files; the limit is %d' % (len(enc), limits.files))
     files = {}
     for name, value in enc.items():
         if not isinstance(value, str):
-            raise Refusal('bad_input', 'a file value is not a base64 string')
+            raise Refusal('bad_input', 'a file value is not a base64 string',
+                          malformation=malformation('file_value', file=name, field='files'))
         if len(value) // 4 * 3 > limits.file_bytes + 2:
             raise Refusal('oversize_input', 'a file is larger than %d bytes' % limits.file_bytes)
         try:
             data = base64.b64decode(value.encode('ascii'), validate=True)
         except (binascii.Error, ValueError, UnicodeEncodeError):
-            raise Refusal('bad_input', 'a file value is not strict base64') from None
+            raise Refusal('bad_input', 'a file value is not strict base64',
+                          malformation=malformation('file_value', file=name, field='files')) from None
         if len(data) > limits.file_bytes:
             raise Refusal('oversize_input', 'a file is larger than %d bytes' % limits.file_bytes)
         files[name] = data
@@ -193,7 +215,8 @@ def from_directory(root, profile, limits=LIMITS):
     """Collect allow-listed files from `root` (a directory holding `raw/`, or the `raw` directory itself). Links are
     never followed: a symlink or non-regular file at an allow-listed name is `bad_input`; unlisted names are ignored and
     reported. Sizes are checked from lstat before any byte is read. COLLECTION-SIDECAR.json and TIMING.json beside
-    `raw/` (where the frozen collector writes them) are taken as raw/COLLECTION-SIDECAR.json and raw/TIMING.json."""
+    `raw/` (where the frozen collector writes them) are taken as raw/COLLECTION-SIDECAR.json and raw/TIMING.json.
+    REDACTION-MANIFEST.json beside `raw/` or directly inside it goes to `records`, never to `files`."""
     root = Path(root)
     raw = None
     for cand in (root / 'raw', root):
@@ -218,6 +241,9 @@ def from_directory(root, profile, limits=LIMITS):
         for entry in sorted(linked + filenames):
             full = Path(dirpath) / entry
             name = 'raw/' + full.relative_to(raw).as_posix()
+            if name[len('raw/'):] in RUNNER_ONLY:            # the collector's record, for the runner only
+                out.records[name[len('raw/'):]] = _read_record(full, name, limits)
+                continue
             rule = _rule_for(name, profile)
             if rule is None:
                 out.ignored.append(name)
@@ -235,8 +261,36 @@ def from_directory(root, profile, limits=LIMITS):
     if walk_errors:
         raise Refusal('bad_input', 'a directory under raw/ cannot be listed')
     _beside(raw.parent, profile, limits, out)
+    _records_beside(raw.parent, limits, out)
     out.ignored.sort()
     return out
+
+
+def _read_record(path, shown, limits):
+    """A runner-only record's bytes: a regular file (never a link) within the file cap."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise Refusal('bad_input', '%s cannot be read' % shown) from None
+    if not stat.S_ISREG(st.st_mode):
+        raise Refusal('bad_input', '%s is a link or not a regular file' % shown)
+    if st.st_size > limits.file_bytes:
+        raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (shown, st.st_size, limits.file_bytes))
+    return _read_capped(path, limits.file_bytes)
+
+
+def _records_beside(parent, limits, out):
+    """REDACTION-MANIFEST.json beside raw/, where the collector writes it, into `out.records`. A copy inside raw/ that
+    differs from the one beside it is `bad_input`: which one belongs to the collection cannot be told."""
+    for base in RUNNER_ONLY:
+        src = Path(parent) / base
+        if not os.path.lexists(src):
+            continue
+        data = _read_record(src, base + ' beside raw/', limits)
+        if base in out.records and out.records[base] != data:
+            raise Refusal('bad_input', '%s beside raw/ and raw/%s inside it differ; keep the one the collector wrote '
+                          'with this output' % (base, base), path='raw/' + base)
+        out.records[base] = data
 
 
 def _beside(parent, profile, limits, out):
@@ -299,7 +353,8 @@ def check_files(files, profile, limits=LIMITS):
         raise Refusal('oversize_input', 'the files total %d bytes; the limit is %d' % (total, limits.body_bytes))
     for rule in profile.required:
         if rule.path not in files:
-            raise Refusal('bad_input', 'missing required file %s' % rule.path, path=rule.path)
+            raise Refusal('bad_input', 'missing required file %s' % rule.path, path=rule.path,
+                          malformation=malformation('file_missing', file=rule.path, field='files'))
     return total
 
 

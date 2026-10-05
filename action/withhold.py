@@ -31,6 +31,10 @@ Configuration files (every name under raw/ that does not end in .json):
   (only whitespace is kept as written), so derive.py numbers the lines as before.
 - Kept as they are: a line that is only whitespace, a comment holding only `#` and whitespace, and the frozen
   collector's own fixed markers (`# <withheld comment>` and its withheld-line marker), which hold no customer text.
+- The RF-28 collector's whole-line marker (`!collect_pg-withheld line <N> reason <CODE>[ setting <name>]`,
+  serve/markers.py) is not a comment and is never turned into one: it holds no `#` and no quote, so every grammar's
+  pass keeps it byte for byte, and `_check_reading` confirms derive reads it as before. It is counted (`not_observed`)
+  as a rule or setting the collector withheld, which the check reads as not observed.
 
 What the checker reads never changes (refutation 003, WH-1). For every file derive.py reads (postgresql.conf grammar
 and pg_hba.conf grammar, includes followed) the pass computes derive.py's own reading of the file before and after
@@ -39,8 +43,9 @@ as `bad_input`, naming the file and line and never the line's text, when they di
 PostgreSQL cannot parse that derive.py reads as a setting or a rule (no marker can carry a value without its text), for a
 comment whose text after a line-break character derive.py would read as a setting or a rule, for a file both
 grammars reach whose lines cannot be withheld one way for both, and for a file of unknown grammar whose withholding
-would change either grammar's reading. Continuation follows raw/declaration.json `major`, the
-one source derive.py reads (refutation 003, B1).
+would change either grammar's reading. Continuation follows raw/declaration.json `major` (the declared derive) and
+the sidecar's server version (the intent-free derive); when they disagree about which side of 16 the server is on and a
+pg_hba.conf-grammar line ends in a backslash, the upload is refused as `bad_input` (serve/faithful.py `continuation`).
 
 The frozen collector's whole-line marker (refutation 003, B6; refutation 004, WH-2). collect_pg.py writes
 `# [collect_pg: line withheld, ...]` in place of a whole line it cannot keep, and the checker skips it as a comment. In
@@ -54,8 +59,19 @@ raw/COLLECTION-SIDECAR.json is present and readable, has rows for that file, eve
 whole, there are at least as many such rows as marker lines, and the server reports no setting from a marker line.
 The refusal names the file, the candidate lines and the collector's reason, never a line's text. The upload takes the
 sidecar from beside raw/, where the collector writes it (serve/bundle.py `from_directory`). One postgresql.conf case
-stays open (serve/faithful.py, DATA.md): a setting outside the collector's fixed list withheld for a control character
-or secret pattern, with no pg_file_settings row naming its line, still reads as absent.
+stays open (serve/faithful.py, DATA.md): a setting withheld for a control character or secret pattern, with no
+pg_settings or pg_file_settings row naming its line, still reads as absent.
+
+The sidecar is bound to the bytes (refutation 005, WH-4). `apply`, the runner's entry to the pass, first runs
+`serve.faithful.check_binding`: for every file held above, the collector's REDACTION-MANIFEST.json from the same run
+(beside raw/ or inside it; read by `from_directory` into `Collected.records` and never uploaded) must record the
+file's digest as collected and the same withheld rows as the sidecar, or the upload is refused as `collector_refused`.
+The binding has a limit (refutation 006, G-1; DATA.md). Records from another run are caught only when a file that
+holds a withheld line differs, byte for byte, from that run's file. Records kept from an earlier run of the same server
+pass if the withheld lines sit at the same places with the same marker, even where a line that was a comment is now a
+rule: the frozen collector writes the same marker text for both, so the bytes and their digest are identical. The
+customer must use the sidecar and manifest written by the same collector run as raw/. It closes when the collector's
+whole-line marker for a withheld rule or setting is no longer a comment (tests/serving/test_faithful.py pins the gap).
 
 SQL expressions (raw/catalog_snapshot.json `policies[].polqual` and `policies[].polwithcheck`, and
 raw/declaration.json `declared_predicate`, the one expression the declared profile compares them with): every quoted
@@ -82,7 +98,7 @@ from serve.faithful import (DECLARATION, HBA_TYPES, INCLUDES, REDACTED_LINE, SID
                             WITHHELD_VALUE, _conf_value, _derive_lines, _directives, _hba_logical, _hba_tokens, _reach,
                             _resolve, conf_reading, continuation, grammars, setting_locations)
 from serve import faithful
-from serve.outcomes import Refusal
+from serve.outcomes import Refusal, malformation
 
 WITHHELD_COMMENT = '# <withheld comment>'
 UNPARSEABLE_MARK = '<withheld: a line PostgreSQL cannot parse>'
@@ -93,7 +109,7 @@ POLICY_FIELDS = ('polqual', 'polwithcheck')
 _BREAK = re.compile('([\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])')        # str.splitlines boundaries other than \n
 _DOLLAR = re.compile(r'\$(?:[^\W\d][\w]*)?\$')
 _WS = re.compile(r'\s+')
-COUNT_KEYS = ('comments', 'lines', 'literals', 'expressions')
+COUNT_KEYS = ('comments', 'lines', 'literals', 'expressions', 'not_observed')
 
 
 class _Unsafe(Exception):
@@ -360,7 +376,8 @@ def _check_reading(name, grammars_reached, before, after, cont, marked, unknown=
         else:
             why = ('cannot have its comment withheld without changing what the check reads from the file. Check the '
                    'line, then run again')
-        raise Refusal('bad_input', 'line %d of %s %s; nothing was sent' % (line, name, why), path=name, line=line)
+        raise Refusal('bad_input', 'line %d of %s %s; nothing was sent' % (line, name, why), path=name, line=line,
+                      malformation=malformation('reading_changed', file=name, line=line))
 
 
 # ---------- SQL expressions ----------
@@ -476,7 +493,7 @@ def _dump(doc, name):
     except UnicodeEncodeError:
         raise Refusal('bad_input', '%s holds a string that is not valid Unicode (a lone surrogate escape), so its SQL '
                       'expressions could not be written back with their literals withheld; nothing was sent' % name,
-                      path=name) from None
+                      path=name, malformation=malformation('json_unicode', file=name)) from None
 
 
 def _load(files, name):
@@ -484,7 +501,8 @@ def _load(files, name):
         return parse_json(bytes(files[name]))
     except Refusal:
         raise Refusal('bad_input', '%s is not valid JSON, so its SQL expressions could not be checked for string '
-                      'literals; nothing was sent' % name, path=name) from None
+                      'literals; nothing was sent' % name, path=name,
+                      malformation=malformation('json_file', file=name)) from None
 
 
 def _withhold_json(files, literals, counts):
@@ -521,6 +539,7 @@ def withhold_files(files):
     counts = empty_counts()
     new = {name: bytes(data) for name, data in files.items()}
     faithful.check(new, as_collected=True)
+    counts['not_observed'] = len(faithful.markers.scan(new))   # RF-28 markers: kept byte for byte, never a comment
     cont = continuation(new)
     reach = _reach(new, cont)
     for name, grammar in sorted(grammars(new, cont).items()):
@@ -535,7 +554,12 @@ def withhold_files(files):
 
 
 def apply(collected):
-    """Withhold in a `bundle.Collected` in place; returns it with `withheld` set to the counts."""
+    """Withhold in a `bundle.Collected` in place; returns it with `withheld` set to the counts. This is the runner's one
+    entry to the pass (api and local mode; a connection or an artefacts directory): before any byte changes, the
+    collector's REDACTION-MANIFEST.json (`collected.records`, never uploaded) must bind its sidecar to the bytes as
+    collected for every file in which a collector marker may hide a rule or setting (serve/faithful.py `check_binding`,
+    refutation 005, WH-4); then `withhold_files` runs the count, reason and location checks and the pass."""
+    faithful.check_binding(collected.files, (collected.records or {}).get(faithful.MANIFEST))
     collected.files, collected.withheld = withhold_files(collected.files)
     return collected
 
@@ -556,6 +580,9 @@ def describe(counts):
     if c['lines']:
         extra.append(_n(c['lines'], 'configuration line', 'configuration lines') + ' PostgreSQL cannot parse, kept '
                      'as a marked unparseable line')
+    if c['not_observed']:
+        extra.append(_n(c['not_observed'], 'rule or setting line', 'rule or setting lines') + ' the collector '
+                     'withheld, kept as its marker and read as not observed')
     if extra:
         text += ' Also: %s.' % '; '.join(extra)
     return text

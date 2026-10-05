@@ -5,7 +5,7 @@ SERVE-001 U2).
 
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
-INPUT_FAIL_ON, INPUT_OUTPUT), with GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
+INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_OUTPUT), with GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
 connection or a runner token.
@@ -13,23 +13,31 @@ connection or a runner token.
 `mode: api` (the default) is the thin client. The check runs on Symbolia's server:
   the inputs -> the API's profile list (`GET /v1/profiles`: each profile's input allow-list and the global limits) ->
   the frozen collector in the runner (or the `artefacts` directory) under those bounds, so an unlisted or oversize file
-  never leaves the runner -> `POST /v1/checks?fail_on=...` over TLS with the key -> poll while 202 -> the returned
+  never leaves the runner -> `POST /v1/checks?fail_on=...[&allow_partial=1]` over TLS with the key -> poll while 202 -> the returned
   envelope is written to the output path -> the job summary and annotations are rendered here from it -> the exit code
   is the envelope's `policy.exit` (never derived here). A failure envelope gives its outcome's exit code. `fail-on` is
-  sent as written; the server checks it against the profile.
+  sent as written; the server checks it against the profile. `allow-partial` is `true` or `false` (default false; any
+  other word is `bad_input`): true lets a run in which some machines could not be read meet the policy.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
 
-Exit codes: 0 policy met, 1 policy failed, 2 bad input, 3 nothing was checked (no verdict, or the input-integrity gate
-stopped the check), a typed refusal or a delivery failure (`api_unreachable`, `api_error`); an outcome with no exit code
+The last stdout line reads `Assure: <how many machines were read and refused>; <outcome>; policy exit <n>; <path>`, for
+example `Assure: 5 of 8 machines read, 3 refused; verdict; policy exit 3; assure-verdict.json` (`serve.render.first_line`:
+for a profile scoped by another unit the scope phrase comes first, `1 of 2 endpoints observed, 1 refused; 5 of 5
+machines read, none refused`; an envelope without `machines`, from an older server, leaves that part out).
+
+Exit codes: 0 policy met, 1 policy failed, 2 bad input, 3 nothing was checked (no verdict, the input-integrity gate
+stopped the check, or machines were refused and allow-partial is not set), a typed refusal or a delivery failure (`api_unreachable`, `api_error`); an outcome with no exit code
 of its own (for example `unauthenticated`) exits 3. Every failure writes the failure envelope at the output path, its
 summary and one `::error` line. The key, the connection, its password and the collector's raw output are never printed,
 and customer text reaches stdout only escaped as workflow-command data.
 
 Before anything is checked or sent, `action.withhold` withholds every configuration comment and every string literal in
 the policy expressions, in every mode and for a connection or an artefacts directory alike (the customer's directory is
-never changed); the counts are printed and added to the job summary. In api mode the verdict's shape is checked before it
+never changed); the counts are printed and added to the job summary. First, `action.withhold.apply` checks that the
+collector's REDACTION-MANIFEST.json (read beside raw/, never uploaded) binds its sidecar to the bytes as collected
+(refutation 005, WH-4). In api mode the verdict's shape is checked before it
 is rendered: a malformed verdict is `api_error` (exit 3), with the failure file and the step outputs written.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
@@ -215,11 +223,12 @@ def _inputs(env, conn, conn_error, collect):
         raise Refusal('bad_input', 'set exactly one of connection and artefacts (%s set)'
                       % ('both are' if has_conn else 'neither is'))
     fail_on = _plain(env, 'INPUT_FAIL_ON')
+    allow_partial = parse_allow_partial(_plain(env, 'INPUT_ALLOW_PARTIAL'))
     data_dir_text = _plain(env, 'INPUT_DATA_DIR')
     config_dirs_text = env.get('INPUT_CONFIG_DIRS')      # line breaks separate items, so it is not read by _plain
     if conn_error is not None:
         raise conn_error
-    out = {'profile': profile, 'fail_on': fail_on, 'artefacts': artefacts or None}
+    out = {'profile': profile, 'fail_on': fail_on, 'artefacts': artefacts or None, 'allow_partial': allow_partial}
     if artefacts:
         if data_dir_text:
             raise Refusal('bad_input', 'data-dir applies only with connection; with artefacts, put the collected '
@@ -233,6 +242,17 @@ def _inputs(env, conn, conn_error, collect):
     out['data_dir'] = collect.check_data_dir(data_dir_text)
     out['config_dirs'] = collect.check_config_dirs(config_dirs_text)
     return out
+
+
+def parse_allow_partial(text):
+    """The `allow-partial` input: '', 'false' or '0' is False; 'true' or '1' is True (case-insensitive); else bad_input.
+    The same words `serve.envelope.parse_allow_partial` accepts, which the server applies again."""
+    v = (text or '').strip().lower()
+    if v in ('', 'false', '0'):
+        return False
+    if v in ('true', '1'):
+        return True
+    raise Refusal('bad_input', 'allow-partial must be true or false')
 
 
 def _scratch(env):
@@ -325,7 +345,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         inputs = _inputs(env, conn, conn_error, collect)
         state['scratch'] = _scratch(env)
         verdict, ignored, state['withheld'] = local_mode.run(
-            engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn,
+            engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
             collect_kw=None if inputs['artefacts'] else collect_kw(collect, inputs), scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
             on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)))
@@ -356,7 +376,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         say('Assure: ' + withhold.describe(collected.withheld))
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         body = bundle.request_body(inputs['profile'], collected.files, lim)
-        verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, body=body)
+        extra = {'allow_partial': True} if inputs['allow_partial'] else {}
+        verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, body=body, **extra)
         check_verdict(verdict)
         return verdict, list(collected.ignored)
 
@@ -400,7 +421,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         more = len(ignored) - len(names)
         say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
             len(ignored), inputs_profile, ', '.join(names), (' and %d more' % more) if more else '')))
-    say('Assure: %s; policy exit %d; %s' % (_cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
+    line = render.first_line(verdict)
+    say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line) + '; ',
+                                              _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
     outputs(verdict['outcome'], code)
     return code
 
