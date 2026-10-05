@@ -457,11 +457,11 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             produced, binding = http_identity.produce_and_collect(
                 root, (art if art.is_absolute() else Path(cwd) / art).resolve(), state['scratch'].resolve(), scope=scope)
             scope = sorted(binding['endpoint_tokens'])
-            collected = withhold.apply(bundle.from_directory(produced, allow, lim))
+            collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             collected = withhold.apply(bundle.from_directory(art if art.is_absolute() else Path(cwd) / art, allow,
-                                                             lim))
+                                                             lim), allow)
         else:
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'

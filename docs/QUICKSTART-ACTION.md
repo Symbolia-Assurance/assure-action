@@ -8,9 +8,9 @@
 > - [ ] The API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
 > - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
 
-**Served today:** both PostgreSQL profiles. The intent-free profile, `postgresql-observed-baseline`, needs no declaration. `postgresql-declared-model` needs a declaration file in an artefacts directory (section 9).
+**Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
 
-The Action collects facts about your PostgreSQL server in your own GitHub Actions runner. It sends the collected facts to `api.symbolia.ai` over TLS, with your API key. The check runs on Symbolia's server. The Action writes the verdict the server returns, the job summary and the annotations in your runner.
+The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with your API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence exists for PostgreSQL 18.
 
@@ -26,7 +26,7 @@ The Action sends the collector's output: catalog facts (roles, memberships, obje
 - policy expressions with every string literal withheld: each quoted literal becomes `'<withheld literal N>'` in the runner, and so does each literal in your declaration's `declared_predicate`;
 - no secret-bearing value: the collector withholds every one whole before anything is written, and checks its own output for those values.
 
-The job log and the job summary state how many comments and literals were withheld. [DATA.md](DATA.md) lists every item, including what is still sent as written, such as role names and client addresses.
+The job log and the job summary state how many comments and literals were withheld. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold; none of the files sent is a PostgreSQL configuration or pg_hba file". [DATA.md](DATA.md) lists every item, including what is still sent as written, such as role names and client addresses.
 
 The collector never reads table contents, password hashes, key material or other sessions' statements. It reads the connection string of a subscription and withholds it whole before anything is written.
 
@@ -403,5 +403,58 @@ A collection with gaps is still a verdict. Each gap reads **not observed** with 
 
 - `postgresql-declared-model` checks your server against a declaration you supply in `raw/declaration.json` (and optionally `raw/clients.json`). It needs `artefacts`: the collector does not write a declaration, so with `connection` this profile reads `bad_input` for the missing `raw/declaration.json`. Collect first, add your declaration under `raw/`, then run with `artefacts`.
 - `postgresql-observed-baseline` reads your server and compares it with observed facts and pinned public baselines. You declare nothing.
+- `http-observed-baseline` reads the response heads you captured for the HTTP endpoints you select (section 12).
 
-What either profile claims, and what it does not, is in [SCOPE.md](SCOPE.md). What is collected and where it goes is in [DATA.md](DATA.md).
+What each profile claims, and what it does not, is in [SCOPE.md](SCOPE.md) and, for `http-observed-baseline`, in section 12. What is collected and where it goes is in [DATA.md](DATA.md).
+
+## 12. Checking HTTP endpoints
+
+`http-observed-baseline` checks one HEAD response per endpoint you select against the HTTP obligations Assure holds (response framing, transport policy, cookies and similar). Live collection against real endpoints is not in this release: the Action reads response heads you captured, offline. `connection` is refused for this profile, before anything is read.
+
+Give the Action an artefacts folder that holds:
+
+- `manifest.json`, with these ten keys exactly: `"schema_version": "http-fixture-001"`, `"mode": "offline_fixture"`, `endpoints`, and the seven flags at the values shown below (`execution_authorized`, `hardware_authorized`, `industrial_release_authorized`, `release_allowed`, `physical_validation` and `self_approved` false; `simulation` true). Any other key, a missing key or another value makes the Action stop before anything is sent (`MANIFEST-INVALID`). `endpoints` is a list of 1 to 16 objects with exactly these keys: `id` (`endpoint-NNN`, three digits), `scope_token` (a lower-case name you choose, distinct per endpoint), `scheme`, `host`, `port`, `path`, `response_file` (the head file's name in the folder) and `complete` (`true` when you captured the whole head);
+- one file per endpoint holding the raw response head as received: the status line and every header line, each ending in CRLF, and the empty line that ends the head.
+
+A complete `manifest.json` for two endpoints:
+
+```json
+{
+  "schema_version": "http-fixture-001",
+  "mode": "offline_fixture",
+  "endpoints": [
+    {"id": "endpoint-001", "scope_token": "checkout", "scheme": "https", "host": "shop.example.test", "port": 443,
+     "path": "/checkout", "response_file": "head-001.txt", "complete": true},
+    {"id": "endpoint-002", "scope_token": "login", "scheme": "https", "host": "shop.example.test", "port": 443,
+     "path": "/login", "response_file": "head-002.txt", "complete": true}
+  ],
+  "execution_authorized": false,
+  "hardware_authorized": false,
+  "industrial_release_authorized": false,
+  "release_allowed": false,
+  "physical_validation": false,
+  "simulation": true,
+  "self_approved": false
+}
+```
+
+```yaml
+      - name: Assure check
+        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        with:
+          api-key: ${{ secrets.ASSURE_API_KEY }}
+          profile: http-observed-baseline
+          artefacts: http-fixture
+```
+
+The inputs: `profile: http-observed-baseline`; `artefacts`, the folder above. `scope` is optional: a JSON file listing the endpoint ids to check, which must name exactly the manifest's ids (the Action stops before collecting otherwise). Leave `scope-binding` unset so the Action produces it: before collection it runs the identity producer and then the collector over your manifest, and sends their record as the scope binding with the endpoint tokens. `identity-key` stays `pipe`, its default: the Action makes a fresh key for each job and passes it on a pipe, so no key is an input, an environment variable or a file.
+
+Every reading summary carries the profile's three scope notes:
+
+- Readings cover one HEAD request per operator-selected endpoint.
+- Evidence freshness and response authenticity are unverified; same-selection replay is not excluded.
+- Per-endpoint coverage qualifications are not displayed in this report.
+
+A full read of the two `https` endpoints above has the first line "2 of 2 endpoints observed, none refused; 4 of 5 machines read, 1 refused": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. By default that run exits 3 (`machines_refused`); set `allow-partial: true` to accept the other machines' readings. For `http://` endpoints M2 reads vacuous and the first line is "2 of 2 endpoints observed, none refused; 5 of 5 machines read, none refused". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1.
+
+The policy exits are those of section 7: `policy_met` (0) when no reading has a status you fail on and every selected endpoint was observed; `policy_failed` (1) when one has; `scope_refused` (3) when a selected endpoint was not observed and `allow-partial` is not set; `no_verdict` (3) and `machines_refused` (3) as for PostgreSQL.

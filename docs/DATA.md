@@ -32,7 +32,7 @@ After the collector finishes, and before anything is checked or sent, the Action
 - **String literals in SQL expressions.** In row-level security policy expressions (`polqual` and `polwithcheck`), and in the `declared_predicate` of your declaration, every quoted string literal is replaced with `'<withheld literal N>'`. N numbers the different literals of one upload, so two equal literals get the same N. The rest of the expression is sent as written: column and other identifiers (quoted ones too), operators, casts, and numeric constants such as the `4821` in `pin = 4821`. An expression the Action cannot parse safely is withheld whole as one marker. No other SQL expression is collected: no view definitions, function bodies or column defaults.
 - **Structured secret values** stay withheld whole by the collector, as above.
 
-The Action does the same to an `artefacts` directory you made yourself. It works on the bytes it read, so your directory is not changed. The job log and the job summary state how many comments and literals were withheld, and how many lines were marked. They show the counts only.
+The Action does the same to an `artefacts` directory you made yourself. It works on the bytes it read, so your directory is not changed. The job log and the job summary state how many comments and literals were withheld, and how many lines were marked. They show the counts only. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold; none of the files sent is a PostgreSQL configuration or pg_hba file".
 
 What still leaves the runner, as written:
 

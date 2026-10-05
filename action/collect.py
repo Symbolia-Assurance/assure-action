@@ -683,7 +683,7 @@ def _gather(out, profile, limits):
         if os.path.lexists(dst):
             raise Refusal('checker_error', 'the collector wrote raw/%s itself; the bundle name is taken' % name)
         os.rename(src, dst)
-    return withhold.apply(from_directory(out, profile, limits))   # before any check, body or upload sees the bytes
+    return withhold.apply(from_directory(out, profile, limits), profile)   # before any check, body or upload sees the bytes
 
 
 def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_roots=(), collector_dir=None,

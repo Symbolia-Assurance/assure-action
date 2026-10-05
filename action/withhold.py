@@ -5,6 +5,13 @@ no engine byte, so the public Action tree ships it.
 from an `artefacts` directory the customer made) and returns `(new files, counts)`. The customer's directory is never
 changed: the pass works on the bytes in memory, after they are read and before any check, request body or upload.
 
+What the pass covers (serve-013). Everything below reads PostgreSQL inputs. The pass applies to a bundle only when the
+profile's input allow-list (the API listing in api mode, the loaded row in local mode) names one of the four PostgreSQL
+top-level files, serve/faithful.py `TOP`, or one of the two JSON files whose SQL it reads (`covers`). Any other bundle, such as the HTTP profile's response heads, passes
+through byte for byte: no grammar is read, no collector marker check or count runs (`serve.faithful.check` and
+`check_binding` read PostgreSQL collectors' markers), and the counts say no file was covered (`files` 0), which
+`describe` states in its own sentence. `files` counts the files the pass covered.
+
 Configuration files (every name under raw/ that does not end in .json):
 - The text of every comment, whole-line or trailing, is replaced with exactly `# <withheld comment>`. A commented-out
   setting (`#shared_buffers = 128MB`) is a comment and is withheld too. Every line, every line ending (`\\r` runs
@@ -110,6 +117,9 @@ _BREAK = re.compile('([\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])')        # str.s
 _DOLLAR = re.compile(r'\$(?:[^\W\d][\w]*)?\$')
 _WS = re.compile(r'\s+')
 COUNT_KEYS = ('comments', 'lines', 'literals', 'expressions', 'not_observed')
+# serve-013: `withhold_files` adds `files`, the number of files the pass covered (configuration files read with a
+# grammar, and the JSON files whose SQL expressions it reads); 0 for a bundle whose profile names no PostgreSQL input
+FILES_KEY = 'files'
 
 
 class _Unsafe(Exception):
@@ -531,18 +541,34 @@ def _withhold_json(files, literals, counts):
 
 
 # ---------- the pass ----------
-def withhold_files(files):
+def covers(profile):
+    """True when the profile's input allow-list (a loaded row, or the client's allow-list from the API listing: both
+    have `required` and `optional` rules with `matches`) names one of the PostgreSQL top-level files of serve/faithful.py
+    `TOP`, or one of the JSON files whose SQL literals the pass withholds (raw/catalog_snapshot.json,
+    raw/declaration.json: REFUTATION-SERVE-013 B-1), so the pass applies (module docstring, serve-013)."""
+    rules = tuple(profile.required) + tuple(profile.optional)
+    names = [name for name, _ in TOP] + [SNAPSHOT, DECLARATION]
+    return any(rule.matches(name) for name in names for rule in rules)
+
+
+def withhold_files(files, covered=True):
     """(files with comment text and SQL literals withheld, counts). The input mapping is not changed. `bad_input` when
     derive.py would read any configuration file differently after the pass, and `collector_refused` when a line the
     frozen collector withheld whole may hide a rule or setting (serve/faithful.py `check`, the server's own check, run
-    here on the collector's bytes before anything else; module docstring)."""
+    here on the collector's bytes before anything else; module docstring). With `covered` false (a profile whose inputs
+    name no PostgreSQL file, `covers`) the files are returned byte for byte and the counts cover no file."""
     counts = empty_counts()
     new = {name: bytes(data) for name, data in files.items()}
+    if not covered:                                              # serve-013: nothing here is a PostgreSQL input
+        counts[FILES_KEY] = 0
+        return new, counts
     faithful.check(new, as_collected=True)
     counts['not_observed'] = len(faithful.markers.scan(new))   # RF-28 markers: kept byte for byte, never a comment
     cont = continuation(new)
     reach = _reach(new, cont)
-    for name, grammar in sorted(grammars(new, cont).items()):
+    read = grammars(new, cont)
+    counts[FILES_KEY] = len(read) + sum(1 for n in (SNAPSHOT, DECLARATION) if n in new)   # serve-013: files covered
+    for name, grammar in sorted(read.items()):
         reached = reach.get(name, set())
         base = new[name]
         marked = set()
@@ -553,14 +579,18 @@ def withhold_files(files):
     return new, counts
 
 
-def apply(collected):
+def apply(collected, profile=None):
     """Withhold in a `bundle.Collected` in place; returns it with `withheld` set to the counts. This is the runner's one
     entry to the pass (api and local mode; a connection or an artefacts directory): before any byte changes, the
     collector's REDACTION-MANIFEST.json (`collected.records`, never uploaded) must bind its sidecar to the bytes as
     collected for every file in which a collector marker may hide a rule or setting (serve/faithful.py `check_binding`,
-    refutation 005, WH-4); then `withhold_files` runs the count, reason and location checks and the pass."""
-    faithful.check_binding(collected.files, (collected.records or {}).get(faithful.MANIFEST))
-    collected.files, collected.withheld = withhold_files(collected.files)
+    refutation 005, WH-4); then `withhold_files` runs the count, reason and location checks and the pass. `profile` is
+    the allow-list the bundle was read under; the pass and the binding apply only when it `covers` PostgreSQL inputs
+    (serve-013). None keeps the pass on, as before."""
+    covered = True if profile is None else covers(profile)
+    if covered:
+        faithful.check_binding(collected.files, (collected.records or {}).get(faithful.MANIFEST))
+    collected.files, collected.withheld = withhold_files(collected.files, covered=covered)
     return collected
 
 
@@ -569,8 +599,13 @@ def _n(count, one, many):
 
 
 def describe(counts):
-    """One plain sentence, counts only."""
+    """One plain sentence, counts only. A bundle in which the pass covered no file (serve-013: the HTTP profile's
+    response heads carry no configuration comments or SQL literals) says so rather than counting zero of each; counts
+    recorded before `files` existed read as before."""
     c = dict(empty_counts(), **(counts or {}))
+    if (counts or {}).get(FILES_KEY) == 0 and not any(c[k] for k in COUNT_KEYS):
+        return ('Withheld in the runner before anything was sent: nothing to withhold; none of the files sent is a '
+                'PostgreSQL configuration or pg_hba file.')
     text = ('Withheld in the runner before anything was sent: %s and %s.'
             % (_n(c['comments'], 'configuration comment', 'configuration comments'),
                _n(c['literals'], 'string literal in SQL expressions', 'string literals in SQL expressions')))

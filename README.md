@@ -1,10 +1,14 @@
 # Assure GitHub Action
 
-This Action checks a PostgreSQL server against an Assure profile from your own GitHub Actions workflow. It is for teams that run PostgreSQL and want a repeatable record of which reliability and safety obligations hold, which are broken and which could not be observed.
+This Action checks a PostgreSQL server or a set of HTTP endpoints against an Assure profile from your own GitHub Actions workflow. It is for teams that run PostgreSQL and want a repeatable record of which reliability and safety obligations hold, which are broken and which could not be observed.
 
 The Action collects facts in your runner. The check runs on Symbolia's server at `api.symbolia.ai`. The Action writes the verdict back into your runner.
 
-**Served today:** both PostgreSQL profiles. The intent-free profile, `postgresql-observed-baseline`, needs no declaration. `postgresql-declared-model` reads your server against a declaration you write and needs a directory of collected files. Supported PostgreSQL majors are 14 to 18. Real-run evidence exists for PostgreSQL 18.
+**Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
+
+Supported PostgreSQL majors are 14 to 18. Real-run evidence exists for PostgreSQL 18.
+
+**Checking HTTP endpoints.** `http-observed-baseline` reads the response heads you captured for the endpoints you select, offline: give the Action an artefacts folder holding an endpoint manifest and the heads, and it produces the scope binding itself.
 
 ## What a check claims
 
