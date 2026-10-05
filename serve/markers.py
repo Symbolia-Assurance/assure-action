@@ -1,6 +1,6 @@
 """The RF-28 collector's whole-line marker, recognised exactly as MARKER-CONTRACT-001 states it (accepted at
-coordination heading 1620). Standard library and serve.outcomes only; imports no engine byte, so the public Action tree
-ships it and the server runs it at admission (serve/faithful.py `check`).
+coordination heading 1620). Standard library, serve.outcomes and serve.bundle's `parse_json` only; imports no engine
+byte, so the public Action tree ships it and the server runs it at admission (serve/faithful.py `check`).
 
 The marker. The RF-28 collector replaces a rule, setting or other parsed line it cannot keep by exactly one line:
 
@@ -40,6 +40,14 @@ Which collector wrote the collection (`generation`). The sidecar tells it: the R
 `connection` and `session` (RF-28 (d), (e)) and every `redaction_withheld` row carries `line` and `reason`; an earlier
 sidecar carries neither. `collector` reports the sidecar's `collector.tool_sha256` prefix for the record only; the
 generation is never decided by a digest (the RF-28 freeze may still change it).
+The session facts (RF-28 (e)). The RF-28 sidecar's `session` object records what the collection session reported:
+`read_only_effective` (true, false or null) and `tls` (the backend's own pg_stat_ssl row, each field with its own
+status). `session_lines` turns them into two plain lines for the job summary: "The collection session was read-only:
+yes|no|not recorded" and "TLS to the server: yes (<version>, <cipher>, <bits> bits)|no|not recorded". A value is shown
+only in the shape the collector keeps (the protocol names TLSv1 to TLSv1.3, a cipher name in the closed list
+`TLS_CIPHERS`, an integer bit count); anything else is not shown (refutation 009, B2). The sidecar is parsed with
+serve.bundle `parse_json`, which refuses duplicate keys; a sidecar it refuses gives both lines as "not recorded", never
+the last of a duplicated key (refutation 009, B1). An earlier sidecar has no session record and gives no lines.
 """
 from __future__ import annotations
 
@@ -47,6 +55,7 @@ import json
 import re
 from collections import namedtuple
 
+from .bundle import parse_json
 from .outcomes import Refusal, malformation
 
 PREFIX = '!collect_pg-withheld'
@@ -77,6 +86,36 @@ LINE_REASONS = frozenset({'COMMENT-WITHHELD', 'TRAILING-COMMENT-WITHHELD', 'CONF
 SIDECAR = 'raw/COLLECTION-SIDECAR.json'
 RF28, EARLIER = 'rf28', 'earlier'
 _HEX = re.compile(r'[0-9a-f]{64}')
+_TLS_VERSION = re.compile(r'TLSv1(?:\.[1-3])?')          # the collector's kept shapes (RF-28 (e))
+# The cipher names the job summary shows (refutation 009, B2); any other value is not shown. Sources: the five TLS 1.3
+# suites of RFC 8446 appendix B.4, the OpenSSL names of the common TLS 1.2 suites (openssl-ciphers(1), "TLS v1.2 cipher
+# suites"; pg_stat_ssl reports OpenSSL's name) and the IANA TLS Cipher Suites registry names of the same TLS 1.2 suites.
+TLS_CIPHERS = frozenset({
+    # TLS 1.3 (RFC 8446 B.4; the IANA and OpenSSL names are the same)
+    'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256', 'TLS_AES_128_CCM_SHA256',
+    'TLS_AES_128_CCM_8_SHA256',
+    # TLS 1.2, OpenSSL names
+    'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
+    'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305',
+    'DHE-RSA-AES128-GCM-SHA256', 'DHE-RSA-AES256-GCM-SHA384', 'DHE-RSA-CHACHA20-POLY1305',
+    'ECDHE-ECDSA-AES128-SHA256', 'ECDHE-RSA-AES128-SHA256', 'ECDHE-ECDSA-AES256-SHA384', 'ECDHE-RSA-AES256-SHA384',
+    'ECDHE-ECDSA-AES128-SHA', 'ECDHE-RSA-AES128-SHA', 'ECDHE-ECDSA-AES256-SHA', 'ECDHE-RSA-AES256-SHA',
+    'DHE-RSA-AES128-SHA256', 'DHE-RSA-AES256-SHA256', 'AES128-GCM-SHA256', 'AES256-GCM-SHA384', 'AES128-SHA256',
+    'AES256-SHA256', 'AES128-SHA', 'AES256-SHA',
+    # TLS 1.2, IANA registry names of the same suites
+    'TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256', 'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256',
+    'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384', 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384',
+    'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256', 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+    'TLS_DHE_RSA_WITH_AES_128_GCM_SHA256', 'TLS_DHE_RSA_WITH_AES_256_GCM_SHA384',
+    'TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256', 'TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256',
+    'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256', 'TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384',
+    'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384', 'TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA',
+    'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA', 'TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA', 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA',
+    'TLS_DHE_RSA_WITH_AES_128_CBC_SHA256', 'TLS_DHE_RSA_WITH_AES_256_CBC_SHA256', 'TLS_RSA_WITH_AES_128_GCM_SHA256',
+    'TLS_RSA_WITH_AES_256_GCM_SHA384', 'TLS_RSA_WITH_AES_128_CBC_SHA256', 'TLS_RSA_WITH_AES_256_CBC_SHA256',
+    'TLS_RSA_WITH_AES_128_CBC_SHA', 'TLS_RSA_WITH_AES_256_CBC_SHA',
+})
+NOT_RECORDED = 'not recorded'
 
 Marker = namedtuple('Marker', 'file line reason setting')
 
@@ -215,5 +254,56 @@ def describe(item):
     return 'not observed: %s line %s (%s%s)' % (item.get('file'), item.get('line'), item.get('text') or
                                                plain(item.get('reason')),
                                                '; setting %s' % setting if setting else '')
+
+
+def _observed(tls, key):
+    status = tls.get('field_status') if isinstance(tls.get('field_status'), dict) else {}
+    row = tls.get('pg_stat_ssl') if isinstance(tls.get('pg_stat_ssl'), dict) else {}
+    return row.get(key) if status.get(key) == 'observed' else None
+
+
+def _tls_text(tls):
+    if not isinstance(tls, dict) or tls.get('status') != 'observed':
+        return NOT_RECORDED
+    ssl = _observed(tls, 'ssl')
+    if ssl is False:
+        return 'no'
+    if ssl is not True:
+        return NOT_RECORDED
+    version, cipher, bits = (_observed(tls, k) for k in ('version', 'cipher', 'bits'))
+    parts = [version if isinstance(version, str) and _TLS_VERSION.fullmatch(version) else None,
+             cipher if isinstance(cipher, str) and cipher in TLS_CIPHERS else None,
+             '%d bits' % bits if type(bits) is int and 0 <= bits <= 65536 else None]
+    parts = [x for x in parts if x]
+    return 'yes' + (' (%s)' % ', '.join(parts) if parts else '')
+
+
+def session_lines(files):
+    """The two plain lines of the sidecar's session record (module docstring), or [] for a sidecar without one. A
+    sidecar `parse_json` refuses (a duplicate key, not JSON) gives both lines as "not recorded"."""
+    try:
+        data = files[SIDECAR]
+    except (KeyError, TypeError):
+        return []
+    try:
+        doc = parse_json(bytes(data))
+    except (Refusal, TypeError, ValueError):
+        return ['The collection session was read-only: %s' % NOT_RECORDED, 'TLS to the server: %s' % NOT_RECORDED]
+    session = doc.get('session') if isinstance(doc, dict) else None
+    if not isinstance(session, dict):
+        return []
+    ro = session.get('read_only_effective')
+    ro_text = 'yes' if ro is True else 'no' if ro is False else NOT_RECORDED
+    return ['The collection session was read-only: %s' % ro_text,
+            'TLS to the server: %s' % _tls_text(session.get('tls'))]
+
+
+def session_markdown(lines):
+    """The job summary section for `session_lines`; '' when there are none."""
+    if not lines:
+        return ''
+    return ('\n### The collection session\n\n%s\n\nThe server reported both for the collection session. Behind a '
+            'connection pooler they describe the pooler\'s session to the server.\n'
+            % '\n'.join('- ' + line for line in lines))
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

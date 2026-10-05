@@ -3,13 +3,15 @@
 
 Usage:
   python3.14 -B collect_pg.py --out <dir> --role <collection_role> \
-      --privileges <csv of pg_read_all_settings,pg_read_all_stats,pg_stat_scan_tables,pg_monitor> \
+      --privileges <csv of pg_read_all_settings,pg_read_all_stats; RF-24 (h), ruling 20> \
       --data-dir <path> [--extra-root <dir> ...] [--psql <cmd>]
+      [--role-created-for-run yes|no]      (RF-24 (e): operator-stated; omitted means not stated)
+      [--login-user <name>]                (RF-28 (d): the client login name; omitted means --role)
   python3.14 -B collect_pg.py --emit-queries <path>      (writes the published query list)
 
 Every catalog read is one fixed SELECT from QUERIES (published as QUERIES.json), version-gated 14..18,
 run through the module-level RUNNER callable (sql) -> (returncode, stdout, stderr). The default RUNNER
-is a `psql -X -At -F <US> -w -U <role>` subprocess whose session is forced read-only through
+is a `psql -X -At -F <US> -w -U <login user>` subprocess (RF-28 (d)) whose session is asked to be read-only through
 PGOPTIONS='-c default_transaction_read_only=on'. The first read is the collection role's own pg_roles
 row; a superuser role, a role other than --role, or an unverifiable identity is a typed refusal before
 any other read. Nothing is ever retried, never as another role. An unreadable, unsupported or missing
@@ -26,6 +28,7 @@ No network of its own, no hardware, no writes to any database; standard library 
 import argparse
 import datetime
 import hashlib
+import ipaddress          # RF-28 (e): the client address class
 import json
 import os
 import posixpath
@@ -36,13 +39,17 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, namedtuple      # RF-28 (a): namedtuple for a whole-line withholding
 from pathlib import Path
 from urllib.parse import quote, unquote
 
 FLAGS = {'execution_authorized': False, 'hardware_authorized': False, 'industrial_release_authorized': False,
          'release_allowed': False, 'physical_validation': False, 'simulation': True, 'self_approved': False}
-READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')
+# RF-24 (h): least privilege (DESIGN-RULINGS-002 ruling 20). The collection role may hold exactly these two grants.
+# pg_monitor is a strict superset of them and pg_stat_scan_tables adds lock-taking functions: the frozen collector
+# accepted both; a declared or observed membership in either is now a typed refusal.
+READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')
+BROADER_READ_ROLES = ('pg_monitor', 'pg_stat_scan_tables')
 SEP = '\x1f'
 MAJORS = (14, 18)
 OK_STATUSES = ('observed', 'observed_empty', 'declared_absent')
@@ -57,7 +64,8 @@ SETTINGS_COLLECTED = sorted([
     'primary_slot_name', 'row_security', 'search_path', 'session_preload_libraries',
     'shared_preload_libraries', 'ssl', 'ssl_ca_file', 'ssl_cert_file', 'ssl_crl_file', 'ssl_key_file',
     'ssl_max_protocol_version', 'ssl_min_protocol_version', 'ssl_passphrase_command',
-    'synchronous_commit', 'synchronous_standby_names', 'wal_keep_size', 'wal_level'])
+    'synchronous_commit', 'synchronous_standby_names', 'wal_keep_size', 'wal_level',
+    'unix_socket_directories', 'unix_socket_group', 'unix_socket_permissions'])   # RF-24 (f): socket reachability
 SECRET_VALUE_SETTINGS = ('ssl_passphrase_command',)
 PG_SETTINGS_FIELDS = ('name', 'setting', 'unit', 'source', 'sourcefile', 'sourceline', 'boot_val', 'reset_val',
                       'pending_restart')
@@ -81,10 +89,28 @@ _HBA_COMMON = [('line_number', 'h.line_number'), ('type', 'h.type'), ('database'
 _IDENT_COMMON = [('line_number', 'i.line_number'), ('map_name', 'i.map_name'), ('sys_name', 'i.sys_name'),
                  ('pg_username', 'i.pg_username'), ('error', 'i.error')]
 _SUB_COMMON = [('subname', 's.subname'), ('subowner', 'pg_catalog.pg_get_userbyid(s.subowner)'),
-               ('subenabled', 's.subenabled'), ('subconninfo', 's.subconninfo'), ('subslotname', 's.subslotname'),
+               ('subenabled', 's.subenabled'), ('subslotname', 's.subslotname'),   # RF-24 (a): no subconninfo
                ('subsynccommit', 's.subsynccommit'), ('subpublications', 's.subpublications'),
                ('database', 'd.datname')]
 _SUB_SOURCE = ('pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid')
+# RF-24 (a): the subconninfo-free rows travel under their own snapshot key. The frozen derive reads
+# catalog_snapshot.json#subscriptions as rows whose subconninfo was observed (its M8 conninfo defaults would then
+# become premises); under this key it keeps the pg_subscription source missing, as on every least-privilege run.
+SUB_KEY = 'subscriptions_observed'
+# RF-24 (a) (b): fields the collector never reads under least privilege (DESIGN-RULINGS-002 ruling 20). Each is
+# written into catalog_snapshot.json collection.not_observed_fields, so its absence is typed, never a silent gap.
+NOT_OBSERVED_FIELDS = {
+    'roles[].has_password': {
+        'status': 'not_observed',
+        'reason': 'not computed: whether a role has a stored credential is readable only from the superuser-only '
+                  'catalog pg_authid (pg_roles shows a constant mask), and the collector reads no credential hash '
+                  '(rulings 17 and 20)'},
+    SUB_KEY + '[].subconninfo': {
+        'status': 'not_observed',
+        'reason': 'never selected: the column holds connection strings that can carry credentials and is withheld '
+                  'from non-superusers by column privilege; every other pg_subscription column is read (rulings 17 '
+                  'and 20)'},
+}
 _MEMBER_COMMON = [('roleid', 'pg_catalog.pg_get_userbyid(m.roleid)'),
                   ('member', 'pg_catalog.pg_get_userbyid(m.member)'),
                   ('grantor', 'pg_catalog.pg_get_userbyid(m.grantor)'), ('admin_option', 'm.admin_option')]
@@ -113,6 +139,18 @@ QUERIES = [
        "JOIN pg_catalog.pg_roles b ON b.oid = m.roleid JOIN pg_catalog.pg_roles u ON u.oid = m.member "
        "WHERE u.rolname = current_user",
        'the grants actually provisioned to the collection role (compared with --privileges in the sidecar)'),
+    _q('session_settings', None, [], 14, 18, 'control',                                                          # RF-28 (e)
+       "SELECT json_build_object('transaction_read_only', pg_catalog.current_setting('transaction_read_only'), "  # RF-28 (e)
+       "'default_transaction_read_only', pg_catalog.current_setting('default_transaction_read_only'), "           # RF-28 (e)
+       "'client_addr', pg_catalog.inet_client_addr()::text)",                                                     # RF-28 (e)
+       'session fact, observed only: the effective read-only settings and the client address of this session '    # RF-28 (e)
+       '(a failure is a recorded gap, never a refusal)'),                                                          # RF-28 (e)
+    _q('session_tls', None, ['pg_stat_ssl'], 14, 18, 'control',                                                  # RF-28 (e)
+       "SELECT json_build_object('row', (SELECT json_build_object('ssl', s.ssl, 'version', s.version, "           # RF-28 (e)
+       "'cipher', s.cipher, 'bits', s.bits) FROM pg_catalog.pg_stat_ssl s "                                       # RF-28 (e)
+       "WHERE s.pid = pg_catalog.pg_backend_pid()))",                                                             # RF-28 (e)
+       "session fact, observed only: this backend's own pg_stat_ssl row, row null when the backend has none "     # RF-28 (e)
+       '(a failure is a recorded gap, never a refusal)'),                                                          # RF-28 (e)
     _q('file_locations', None, ['pg_settings'], 14, 18, 'control',
        "SELECT coalesce(json_object_agg(s.name, s.setting ORDER BY s.name), '{}'::json) FROM pg_catalog.pg_settings s "
        "WHERE s.name IN ('config_file', 'hba_file', 'ident_file', 'data_directory')",
@@ -130,8 +168,10 @@ QUERIES = [
              ('rolcreaterole', 'r.rolcreaterole'), ('rolcreatedb', 'r.rolcreatedb'),
              ('rolreplication', 'r.rolreplication'), ('rolbypassrls', 'r.rolbypassrls'),
              ('rolcanlogin', 'r.rolcanlogin'), ('rolconnlimit', 'r.rolconnlimit'),
-             ('rolvaliduntil', 'r.rolvaliduntil')], 'pg_catalog.pg_roles r', 'r.rolname'),
-       'roles (pg_roles; the password column is never selected)'),
+             ('rolvaliduntil', 'r.rolvaliduntil'), ('bootstrap', 'r.oid = 10')],   # RF-24 (b): bootstrap flag
+            'pg_catalog.pg_roles r', 'r.rolname'),
+       'roles (pg_roles; the password column is never selected; bootstrap marks the bootstrap superuser, oid 10; '
+       'RF-24 (b))'),
     _q('memberships_14_15', 'memberships', ['pg_auth_members'], 14, 15, 'catalog_snapshot',
        _agg(_MEMBER_COMMON, 'pg_catalog.pg_auth_members m', _MEMBER_ORDER),
        'role memberships, majors 14-15 (no inherit_option/set_option columns)'),
@@ -207,13 +247,13 @@ QUERIES = [
             'pg_catalog.pg_publication_namespace pn JOIN pg_catalog.pg_publication p ON p.oid = pn.pnpubid '
             'JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid', 'p.pubname, n.nspname'),
        'schemas named by publications (catalog exists from major 15)'),
-    _q('subscriptions_14_15', 'subscriptions', ['pg_subscription'], 14, 15, 'catalog_snapshot',
+    _q('subscriptions_14_15', SUB_KEY, ['pg_subscription'], 14, 15, 'catalog_snapshot',   # RF-24 (a): own key
        _agg(_SUB_COMMON, _SUB_SOURCE, 's.subname'),
-       'subscriptions, majors 14-15 (subconninfo password stripped before retention)'),
-    _q('subscriptions_16_18', 'subscriptions', ['pg_subscription'], 16, 18, 'catalog_snapshot',
+       'subscriptions, majors 14-15 (subconninfo is never selected; RF-24 (a))'),
+    _q('subscriptions_16_18', SUB_KEY, ['pg_subscription'], 16, 18, 'catalog_snapshot',   # RF-24 (a): own key
        _agg(_SUB_COMMON + [('subpasswordrequired', 's.subpasswordrequired'), ('subrunasowner', 's.subrunasowner')],
             _SUB_SOURCE, 's.subname'),
-       'subscriptions, majors 16-18 (subconninfo password stripped before retention)'),
+       'subscriptions, majors 16-18 (subconninfo is never selected; RF-24 (a))'),
     _q('subscription_rels', 'subscription_rels', ['pg_subscription_rel', 'pg_subscription', 'pg_class'], 14, 18,
        'catalog_snapshot',
        _agg([('subname', 's.subname::text'), ('relname', 'c.relname::text'), ('schema', 'n.nspname::text'),
@@ -275,8 +315,8 @@ def render_queries():
 _PSQL = {'argv': None, 'env': None}
 
 
-def build_psql_command(psql, role):
-    argv = shlex.split(psql or 'psql') + ['-X', '-At', '-F', SEP, '-w', '-v', 'ON_ERROR_STOP=1', '-U', role]
+def build_psql_command(psql, login):          # RF-28 (d): -U takes the login name (--login-user, default --role)
+    argv = shlex.split(psql or 'psql') + ['-X', '-At', '-F', SEP, '-w', '-v', 'ON_ERROR_STOP=1', '-U', login]   # RF-28 (d)
     env = dict(os.environ)
     prior = env.get('PGOPTIONS', '').strip()
     env['PGOPTIONS'] = (prior + ' ' if prior else '') + '-c default_transaction_read_only=on'
@@ -412,6 +452,100 @@ KV_RE = re.compile(r"(\s*)([A-Za-z_]\w*)(\s*=\s*)('(?:[^'\\]|\\.)*'?|\S*)")
 URI_RE_FU2 = re.compile(r'^(\s*postgres(?:ql)?://)([^@/?#]*@)?([^?#]*)(\?[^#]*)?(#.*)?$', re.S)
 HBA_OPTION_RE = re.compile(r'(\s+)(ldapbindpasswd|radiussecrets|radiussecret)=("[^"]*"|\S*)', re.I)
 REDACTED_LINE = '# [collect_pg: line withheld, an authentication secret pattern could not be stripped field by field]'
+# RF-28 (a): REDACTED_LINE above now appears only in error text inside the sidecar; no retained file holds it. A
+# withheld rule, setting or other parsed line is written as a whole-line marker that is NOT a comment in the file's
+# grammar (MARKER-CONTRACT-001.md). It starts with '!': no setting name and no pg_hba record type or include keyword
+# starts with it, so the frozen parse_conf reports 'unparseable line' and the frozen parse_hba 'malformed record'. It
+# holds the physical line number, a closed reason code and, for a setting whose name is safe, that name; it holds no
+# '=', quote, comma or '#'. A withheld COMMENT line stays a comment (WITHHELD_COMMENT): it decides nothing.
+MARKER_PREFIX = '!collect_pg-withheld'                                                    # RF-28 (a)
+MARKER_RE = re.compile(r'!collect_pg-withheld line ([1-9][0-9]{0,8}) reason ([A-Z][A-Z0-9-]+)'
+                       r'(?: setting ([a-z_][a-z0-9_.]{0,62}))?')                         # RF-28 (a)
+MARKER_SETTING_RE = re.compile(r'[a-z_][a-z0-9_.]{0,62}')                                 # RF-28 (a)
+MARKER_REASONS = {                                                                        # RF-28 (a): closed list
+    'HBA-UNTERMINATED-QUOTE': 'pg_hba: a double quote opens a token that does not close on the line',
+    'HBA-POSITIONAL': 'pg_hba: the record type, field count or a positional field is not retainable',
+    'HBA-OVER-LENGTH': 'pg_hba: the logical record is longer than HBA_LINE_MAX characters',
+    'HBA-SECRET-LEFT': 'pg_hba: a secret pattern is left after options were withheld',
+    'HBA-CONTROL-CHARACTER': 'pg_hba: the line holds a control or line-separator character',
+    'HBA-CONTINUATION': 'pg_hba: a physical line of a backslash-continued record that is withheld',
+    'CONF-UNPARSED-LINE': 'postgresql.conf: a line that is not a setting and holds a secret pattern',
+    'CONF-UNTERMINATED-VALUE': 'postgresql.conf: a quoted value that does not close on the line',
+    'CONF-TRAILING-TEXT': 'postgresql.conf: text that is not a comment follows the value',
+    'CONF-SECRET-LEFT': 'postgresql.conf: a secret pattern is left after the value was withheld',
+    'CONF-CONTROL-CHARACTER': 'postgresql.conf: the line holds a control or line-separator character',
+    'PLAIN-SECRET-PATTERN': 'other parsed file (@file list, pg_ident.conf): the line holds a secret pattern',
+    'PLAIN-CONTROL-CHARACTER': 'other parsed file: the line holds a control or line-separator character',
+    'MARKER-COLLISION': 'any grammar: the source line itself starts with the marker prefix',
+    'HBA-TRAILING-BACKSLASH': 'pg_hba: a retained record would end in a backslash followed by blanks',   # RF-28 (a)
+    'PLAIN-TRAILING-BACKSLASH': 'other parsed file: a line ends in a backslash followed by blanks',     # RF-28 (a)
+}
+LINE_REASONS = {                                                                          # RF-28 (b): closed list
+    'COMMENT-WITHHELD': 'a comment line replaced whole by WITHHELD_COMMENT; it stays a comment',
+    'TRAILING-COMMENT-WITHHELD': 'a trailing comment replaced by WITHHELD_COMMENT; the line before it is kept',
+    'CONF-VALUE-WITHHELD': "a setting value replaced in place by '<withheld: structured value>'",
+    'HBA-OPTION-WITHHELD': "a pg_hba auth-option replaced in place by '<withheld option>'",
+    'JSON-VALUE-WITHHELD': 'a value inside a JSON output file (no line number)',
+}
+COLLISION_LABEL = 'line:withheld (source line in the collector marker form)'              # RF-28 (a)
+Whole = namedtuple('Whole', 'reason setting comment')     # RF-28 (a): a line withheld whole, before its number is known
+
+
+def marker_line(number, reason, setting=None):
+    """RF-28 (a): the marker for physical line `number`; `setting` is shown only when it is a safe name."""
+    if reason not in MARKER_REASONS or not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise ValueError('marker_line needs a line number of 1 or more and a reason from MARKER_REASONS')
+    text = '%s line %d reason %s' % (MARKER_PREFIX, number, reason)
+    if isinstance(setting, str) and MARKER_SETTING_RE.fullmatch(setting):
+        text += ' setting ' + setting
+    return text
+
+
+def parse_marker(text):
+    """RF-28 (a): (line, reason, setting or None) for a line that is exactly a marker, else None."""
+    match = MARKER_RE.fullmatch(text) if isinstance(text, str) else None
+    if not match or match.group(2) not in MARKER_REASONS:
+        return None
+    return int(match.group(1)), match.group(2), match.group(3)
+
+
+def _starts_marker(body):
+    """RF-28 (a): True when a line, after blanks, starts with the marker prefix."""
+    return body.lstrip(' \t\r').startswith(MARKER_PREFIX)
+
+
+BACKSLASH_BLANK_LABEL = 'line:withheld (backslash followed by blanks at the end of the line)'    # RF-28 (a)
+
+
+def _backslash_blank(text):
+    """RF-28 (a) FIX-2: True when a line ends in a backslash followed by blanks. The server joins a pg_hba line only
+    when its last character is a backslash; the frozen parse_hba joins when line.rstrip() ends in one (Python's
+    rstrip also removes U+00A0, U+3000 and other blanks). A retained line of this shape would join the next line in
+    that reader, and a marker there would be read as comment text, so no retained line ends this way."""
+    return not text.endswith('\\') and text.rstrip().endswith('\\')
+
+
+def _inline_reason(label):
+    """RF-28 (b): the reason code of a label withheld inside a retained line."""
+    if label.startswith('hba option:'):
+        return 'HBA-OPTION-WITHHELD'
+    if ':comment:withheld_whole' in label:
+        return 'TRAILING-COMMENT-WITHHELD'
+    return 'CONF-VALUE-WITHHELD'
+
+
+def _line_text(new, number, found, record):
+    """RF-28 (a) (b): the retained text of physical line `number` (a marker or the comment form for a Whole), and one
+    (line, label, reason) per label in `record` when a list is given."""
+    if isinstance(new, Whole):
+        reason = 'COMMENT-WITHHELD' if new.comment else new.reason
+        text = WITHHELD_COMMENT if new.comment else marker_line(number, new.reason, new.setting)
+    else:
+        text, reason = new, None
+    if record is not None:
+        for label in found:
+            record.append((number, label, reason or _inline_reason(label)))
+    return text
 
 # ---- follow-up 4: the inversion rule. Retain only values positively known to be safe; withhold everything else
 # WHOLE. Nothing is ever stripped out of a value any more.
@@ -475,8 +609,11 @@ def hba_body(line):
 
 
 def conf_body(line):
-    """A postgresql.conf physical line without its '\\n' and trailing '\\r' (whitespace to guc-file.l)."""
-    return (line[:-1] if line.endswith('\n') else line).rstrip('\r')
+    """A postgresql.conf physical line without its '\\n' and exactly ONE trailing '\\r'. RF-28 (a) FIX-2: as hba_body;
+    a further '\\r' stays in the body, so the line is withheld (LINE_UNSAFE_RE) and every marker number stays the
+    reader's own line number (read_text() reads '\\r\\r\\n' as two lines)."""
+    body = line[:-1] if line.endswith('\n') else line                           # RF-28 (a)
+    return body[:-1] if body.endswith('\r') else body                           # RF-28 (a)
 # documented literal spellings retained for one setting each (the only exceptions to SAFE_VALUE_RE)
 SAFE_LITERALS = {'listen_addresses': re.compile(r'\*'), 'search_path': re.compile(r'"\$user"')}
 STRUCTURE_WORDS = ('password', 'secret', 'token', 'passphrase')
@@ -519,6 +656,9 @@ LIBPQ_KEYWORDS = frozenset((
 # every retained byte for each of them (and for fragments of them) before the run may finish.
 SELFCHECK_MIN = 6
 _SECRETS = {'whole': set(), 'needles': set(), 'short': set()}
+# RF-27 (e): database and user tokens (quotes removed) of the retained pg_hba records of this run, @file
+# references excepted. A pg_hba_file_rules item equal to one of them is already in a retained file.
+_HBA_RETAINED = set()
 CONNINFO_SPACE = ' \t\n\r\v\f'          # libpq uses C isspace(), not Unicode whitespace
 LOOSE_SECRET_RE = re.compile(r"(?i)(?:(?:ssl)?password|passfile|pg(?:ssl)?password)\s*=\s*")
 
@@ -526,6 +666,7 @@ LOOSE_SECRET_RE = re.compile(r"(?i)(?:(?:ssl)?password|passfile|pg(?:ssl)?passwo
 def _reset_secrets():
     for bucket in _SECRETS.values():
         bucket.clear()
+    _HBA_RETAINED.clear()                # RF-27 (e): retained pg_hba identifiers belong to one run
 
 
 def _note_secret(value, command=False):
@@ -923,25 +1064,43 @@ def _note_withheld(value, command=False):
     _note_loose(value)
 
 
+def _conf_comment(body):
+    """RF-28 (a): a comment line in the postgresql.conf grammar: '#' after spaces and tabs only (B-18-config-setting:
+    'Hash marks (#) designate the remainder of the line as a comment')."""
+    return body.lstrip(' \t').startswith('#')
+
+
+def _conf_setting(key):
+    """RF-28 (a): the setting name a marker shows (lower case, as the label does), or None when it is not safe."""
+    name = key.lower()
+    return name if MARKER_SETTING_RE.fullmatch(name) else None
+
+
 def _redact_conf_line(body):
+    """(new, fields). RF-28 (a): `new` is the retained text, or a Whole when the line is withheld whole."""
+    if _starts_marker(body):                                                      # RF-28 (a)
+        return Whole('MARKER-COLLISION', None, False), [COLLISION_LABEL]          # RF-28 (a)
     match = CONF_LINE_RE.match(body)
     if not match:
         if body.strip() and not _text_ok(body):
             _note_loose(body)
-            return REDACTED_LINE, ['line:line:withheld_whole']
+            return Whole('CONF-UNPARSED-LINE', None, _conf_comment(body)), ['line:line:withheld_whole']   # RF-28 (a)
         return body, []
     prefix, key, sep, rest = match.groups()
     commented = '#' in prefix
+    comment = commented and _conf_comment(body)                                   # RF-28 (a)
+    setting = None if commented else _conf_setting(key)                           # RF-28 (a)
     label = ('#' if commented else '') + key.lower()
     if commented and '=' not in sep:          # prose comment, not a commented-out assignment
         if _text_ok(body):
             return body, []
         _note_loose(body)
-        return REDACTED_LINE, ['line:comment:withheld_whole']
+        return Whole('CONF-UNPARSED-LINE', None, comment), ['line:comment:withheld_whole']   # RF-28 (a)
     lead, raw, value, quoted, tail, closed = _conf_value_parts(rest)
     if not closed:
         _note_withheld(rest[len(lead) + 1:], command=secret_guc(key)[0])
-        return REDACTED_LINE, ['%s:%s:withheld_whole' % (label, key.lower())]
+        return Whole('CONF-UNTERMINATED-VALUE', setting, comment), [               # RF-28 (a)
+            '%s:%s:withheld_whole' % (label, key.lower())]
     found = []
     if value_withheld(key, value):
         _note_withheld(value, command=secret_guc(key)[0])
@@ -950,30 +1109,36 @@ def _redact_conf_line(body):
     stripped = tail.strip()
     if stripped and not stripped.startswith('#'):
         _note_loose(tail)
-        return REDACTED_LINE, found + ['%s:%s:withheld_whole' % (label, key.lower())]
+        return Whole('CONF-TRAILING-TEXT', setting, comment), found + [            # RF-28 (a)
+            '%s:%s:withheld_whole' % (label, key.lower())]
     if stripped and not _text_ok(stripped):
         _note_loose(tail)
         tail = ' ' + WITHHELD_COMMENT
         found.append('%s:comment:withheld_whole' % label)
     new = prefix + key + sep + lead + raw + tail
     if has_secret(new.replace("'" + WITHHELD_VALUE + "'", "''")):
-        return REDACTED_LINE, found + ['line:line:withheld_whole']
+        return Whole('CONF-SECRET-LEFT', setting, comment), found + ['line:line:withheld_whole']   # RF-28 (a)
     return new, found
 
 
-def redact_conf_text(text):
+def redact_conf_text(text, record=None):                                         # RF-28 (b)
     """postgresql.conf grammar, line by line (guc-file.l lexer and GUC_scanstr); line count unchanged. Follow-up 4:
     a value is retained as written only when value_withheld() is False for its decoded form; otherwise the WHOLE
-    value is replaced by '<withheld: structured value>'. Nothing is ever stripped out of a value."""
+    value is replaced by '<withheld: structured value>'. Nothing is ever stripped out of a value.
+    RF-28 (a): a line withheld whole is a marker (or the comment form for a comment); RF-28 (b): `record`, when a
+    list, receives one (line, label, reason) per withheld label."""
     lines, fields = [], []
-    for line in server_lines(text):
+    for number, line in enumerate(server_lines(text), 1):                        # RF-28 (a)
         body = conf_body(line)
         new, found = _redact_conf_line(body)
-        if new != REDACTED_LINE and LINE_UNSAFE_RE.search(new):
+        if not isinstance(new, Whole) and LINE_UNSAFE_RE.search(new):             # RF-28 (a)
             _note_loose(body)
-            new, found = REDACTED_LINE, found + ['line:line:withheld_whole']
+            match = CONF_LINE_RE.match(body)                                      # RF-28 (a)
+            setting = _conf_setting(match.group(2)) if match and '#' not in match.group(1) else None   # RF-28 (a)
+            new, found = Whole('CONF-CONTROL-CHARACTER', setting, _conf_comment(body)), found + [   # RF-28 (a)
+                'line:line:withheld_whole']
         fields.extend(found)
-        lines.append(new + line[len(body):])
+        lines.append(_line_text(new, number, found, record) + line[len(body):])   # RF-28 (a) (b)
     return ''.join(lines), fields
 
 
@@ -1089,8 +1254,57 @@ def _hba_plain(line, field, allow_list=False):
     return all(tok and ' ' not in tok and SAFE_VALUE_RE.fullmatch(tok) for tok, _, _ in tokens)
 
 
+# RF-27 (a): the database and user fields (fields 1 and 2 of every authentication record) are identifiers by the
+# pg_hba grammar (premise-pins-001/sources/B-14..B-18-auth-pg-hba-conf.html): quoted names, comma lists, +role,
+# @file, /regex (16 and later; a literal name before 16) and the keywords. Each token is retained byte for byte,
+# quotes included, when it is non-empty, within HBA_TOKEN_MAX characters, and free of control, line-separator and
+# undecodable (surrogate-escaped) characters. A logical record longer than HBA_LINE_MAX is withheld whole.
+HBA_TOKEN_MAX = 512           # RF-27 (a): characters of one raw database or user token, quotes included
+HBA_LINE_MAX = 4096           # RF-27 (a): characters of one logical record (continued lines joined)
+HBA_IDENTIFIER_UNSAFE_RE = re.compile(r'[\x00-\x1f\x7f-\x9f  \udc80-\udcff]')   # RF-27 (a)
+HBA_IDENTIFIER_FIELDS = ((1, 'database'), (2, 'user'))      # RF-27 (a)
+
+
+def _hba_identifier(field):
+    """RF-27 (a): True when every token of a database or user field is retainable as an identifier."""
+    for token, _, raw in field[2]:
+        if not token or len(raw) > HBA_TOKEN_MAX or HBA_IDENTIFIER_UNSAFE_RE.search(raw):
+            return False
+    return True
+
+
+def hba_token_forms(field):
+    """RF-27 (b): the opaque forms of one database or user field, no values: 'quoted' (the raw token holds a
+    double quote), 'file' (the raw token starts with an unquoted @ and names a file), 'regex' (the token the
+    server reads starts with /; a regular expression on 16 and later, per the pinned PostgreSQL 16 page)."""
+    forms = set()
+    for token, _, raw in field[2]:
+        if '"' in raw:
+            forms.add('quoted')
+        if raw.startswith('@') and len(token) > 1:
+            forms.add('file')
+        if token.startswith('/'):
+            forms.add('regex')
+    return sorted(forms)
+
+
+HBA_HEXLIKE_RE = re.compile(r'0[xX][0-9A-Fa-f]*|[0-9A-Fa-f.]+')     # RF-27 (g)
+
+
+def _hba_address_uncertain(field):
+    """RF-27 (g): True when the address (before any /len) looks numeric but does not fully match HBA_IP_RE: it
+    starts with 0x, or holds only hex digits and dots. No pinned source says whether the server reads it as a
+    number (and then expects a mask field) or as a host name, so the field count is not established."""
+    if len(field[2]) != 1:
+        return False
+    address = field[2][0][0].split('/', 1)[0]
+    return bool(HBA_HEXLIKE_RE.fullmatch(address)) and not HBA_IP_RE.fullmatch(address)
+
+
 def _hba_positional(line, fields):
-    """Number of positional fields when the record's positional fields are all retainable, else None."""
+    """Number of positional fields when the record's positional fields are all retainable, else None.
+    RF-27 (a): the database and user fields pass the identifier rule; type, address, mask and method keep the
+    strict plain rule, so the field count (and with it the method position) is the one the server reads."""
     if not fields:
         return 0
     first = fields[0][2][0][0] if len(fields[0][2]) == 1 and not fields[0][2][0][1] else None
@@ -1099,15 +1313,70 @@ def _hba_positional(line, fields):
     if first not in HBA_TYPES:
         return None
     count = 4 if first == 'local' else 5
+    if first != 'local' and len(fields) >= 4 and _hba_address_uncertain(fields[3]):   # RF-27 (g)
+        return None
     if first != 'local' and len(fields) >= 4 and len(fields[3][2]) == 1 and '/' not in fields[3][2][0][0] \
             and HBA_IP_RE.fullmatch(fields[3][2][0][0]):
         count = 6                                   # an address without /len is followed by a netmask field
     if len(fields) < count:
         return None
     for index in range(count):
-        if not _hba_plain(line, fields[index], allow_list=index in (1, 2)):
+        if index in (1, 2):                         # RF-27 (a): identifier rule for database and user
+            if not _hba_identifier(fields[index]):
+                return None
+            continue
+        if not _hba_plain(line, fields[index]):     # RF-27 (a): type, address, mask, method stay strict
             return None
     return count
+
+
+def _hba_identifier_spans(fields):
+    """RF-27 (a): the (start, end) spans of the database and user fields when the record starts with an unquoted
+    record type and both fields pass the identifier rule; else []. The server reads these two fields by
+    position, before any address, mask, method or auth-option, so they hold names and never an option."""
+    if len(fields) < 3 or len(fields[0][2]) != 1 or fields[0][2][0][1] or fields[0][2][0][0] not in HBA_TYPES:
+        return []
+    if not all(_hba_identifier(fields[index]) for index, _ in HBA_IDENTIFIER_FIELDS):
+        return []
+    return [fields[index][:2] for index, _ in HBA_IDENTIFIER_FIELDS]
+
+
+def _hba_mask_identifiers(text, fields):
+    """RF-27 (a): the text with the database and user field spans blanked (offsets kept). The secret-pattern
+    backstop and the self-check noting read this masked text: an identifier is the server's name, so it is
+    neither scanned as an option nor remembered as a secret value (that would refuse a run retaining it)."""
+    for start, end in _hba_identifier_spans(fields):
+        text = text[:start] + ' ' * (end - start) + text[end:]
+    return text
+
+
+def _note_hba_withheld(body):
+    """RF-27 (a): remember the secret values of a withheld record for the self-check, identifiers excepted."""
+    fields = _hba_scan(body)[0]
+    spans = _hba_identifier_spans(fields)
+    for field in fields:
+        if field[:2] not in spans:
+            _note_hba_tokens(field[2])
+    _note_loose(_hba_mask_identifiers(body, fields))
+
+
+def _hba_masked_bodies(joined, bodies):
+    """RF-27 (a): the physical pieces of a continued record with the identifier spans blanked, or None when a
+    continuation joint falls inside the database or user field (a split the collector does not follow)."""
+    pieces = [body[:-1] if body.endswith('\\') else body for body in bodies]
+    joints, offset = [], 0
+    for piece in pieces[:-1]:
+        offset += len(piece)
+        joints.append(offset)
+    fields = _hba_scan(joined)[0]
+    spans = _hba_identifier_spans(fields)
+    if any(start < joint < end for start, end in spans for joint in joints):
+        return None
+    masked, out, offset = _hba_mask_identifiers(joined, fields), [], 0
+    for piece in pieces:
+        out.append(masked[offset:offset + len(piece)])
+        offset += len(piece)
+    return out
 
 
 def _hba_value_ok(name, value):
@@ -1157,26 +1426,33 @@ def _note_hba_tokens(tokens):
 def _redact_hba_line(body):
     """(new_body, fields) for one logical line. Positional fields are kept only when _hba_positional accepts
     them, options only through hba_option_ok; every other option is replaced WHOLE by '<withheld option>', and a
-    line that is not unambiguously tokenisable, or whose positional fields are not retainable, is withheld whole."""
+    line that is not unambiguously tokenisable, or whose positional fields are not retainable, is withheld whole.
+    RF-28 (a): a line withheld whole is returned as a Whole; redact_hba_text writes its marker."""
+    if _starts_marker(body):                                                      # RF-28 (a)
+        return Whole('MARKER-COLLISION', None, False), [COLLISION_LABEL]          # RF-28 (a)
     fields, comment, unterminated = _hba_scan(body)
     if unterminated:
         for field in fields:
             _note_hba_tokens(field[2])
         _note_loose(body)
-        return REDACTED_LINE, ['line:withheld (unterminated quote: not tokenisable unambiguously)']
+        return Whole('HBA-UNTERMINATED-QUOTE', None, False), [                     # RF-28 (a)
+            'line:withheld (unterminated quote: not tokenisable unambiguously)']
     found = []
     tail = body[comment:] if comment is not None else ''
     if not fields:
         if tail and not _text_ok(tail):
             _note_loose(tail)
-            return REDACTED_LINE, ['line:comment:withheld_whole']
+            return Whole('COMMENT-WITHHELD', None, True), ['line:comment:withheld_whole']   # RF-28 (a)
         return body, []
+    if len(body) > HBA_LINE_MAX:                    # RF-27 (a): over the line bound means withheld
+        _note_hba_withheld(body)                    # RF-27 (a)
+        return Whole('HBA-OVER-LENGTH', None, False), [                            # RF-28 (a)
+            'line:record:withheld_whole (over the length bound)']
     count = _hba_positional(body, fields)
     if count is None:
-        for field in fields:
-            _note_hba_tokens(field[2])
-        _note_loose(body)
-        return REDACTED_LINE, ['line:record:withheld_whole (positional fields not retainable)']
+        _note_hba_withheld(body)                    # RF-27 (a)
+        return Whole('HBA-POSITIONAL', None, False), [                             # RF-28 (a)
+            'line:record:withheld_whole (positional fields not retainable)']
     new = body
     if tail and not _text_ok(tail):
         _note_loose(tail)
@@ -1188,10 +1464,30 @@ def _redact_hba_line(body):
         _note_hba_tokens(tokens)
         new = new[:start] + WITHHELD_OPTION + new[end:]
         found.extend('hba option:%s:withheld_whole' % _hba_option_label(tok.partition('=')[0]) for tok, _, _ in tokens)
-    if has_secret(new.replace(WITHHELD_OPTION, '')):
-        _note_loose(new)
-        return REDACTED_LINE, found + ['line:withheld (secret pattern left after withholding options)']
+    if has_secret(_hba_mask_identifiers(new, fields).replace(WITHHELD_OPTION, '')):   # RF-27 (a)
+        _note_loose(_hba_mask_identifiers(new, fields))                                # RF-27 (a)
+        return Whole('HBA-SECRET-LEFT', None, False), found + [                        # RF-28 (a)
+            'line:withheld (secret pattern left after withholding options)']
     return new, found
+
+
+def _hba_comment(body):
+    """RF-28 (a): True when a physical line holds no field in the pg_hba grammar (blank or comment only), as
+    _hba_scan reads it (hba.c next_token: blanks are ' ', '\\t', '\\r'). Only such a line keeps the comment form."""
+    fields, _, unterminated = _hba_scan(body)
+    return not fields and not unterminated
+
+
+def _hba_backslash_blank(body, new, found):
+    """RF-28 (a) FIX-2: a retained pg_hba line `new` (source `body`) that ends in a backslash followed by blanks. A
+    comment line becomes the comment form; a record loses its trailing comment to WITHHELD_COMMENT (the server's
+    meaning is unchanged, the text was a comment); a record with no comment is withheld whole."""
+    if _hba_comment(body):
+        return Whole('COMMENT-WITHHELD', None, True), found + ['line:comment:withheld_whole']
+    _, comment, _ = _hba_scan(new)
+    if comment is not None:
+        return new[:comment] + WITHHELD_COMMENT, found + ['line:comment:withheld_whole']
+    return Whole('HBA-TRAILING-BACKSLASH', None, False), found + [BACKSLASH_BLANK_LABEL]
 
 
 def _hba_groups(text):
@@ -1208,36 +1504,67 @@ def _hba_groups(text):
         yield group, bodies, [line[len(body):] for line, body in zip(group, bodies)]
 
 
-def redact_hba_text(text):
+def redact_hba_text(text, record=None):                                          # RF-28 (b)
     """pg_hba.conf as hba.c reads it: every logical line through _redact_hba_line. A logical line that spans
     several physical lines is kept byte for byte only when nothing in it is withheld; otherwise every physical
-    line of it is withheld whole. The line count is unchanged."""
+    line of it is withheld whole. The line count is unchanged.
+    RF-28 (a): each withheld physical line is a marker with its own line number (the comment form only for a line
+    with no field); RF-28 (b): `record`, when a list, receives one (line, label, reason) per withheld label."""
     lines, fields = [], []
+    number = 0                                                                    # RF-28 (a)
     for group, bodies, eols in _hba_groups(text):
+        first, number = number + 1, number + len(group)                            # RF-28 (a)
         if len(group) == 1:
             new, found = _redact_hba_line(bodies[0])
-            if new != REDACTED_LINE and LINE_UNSAFE_RE.search(new):
+            if not isinstance(new, Whole) and LINE_UNSAFE_RE.search(new):         # RF-28 (a)
                 _note_loose(bodies[0])
-                new, found = REDACTED_LINE, found + ['line:withheld (control or line-separator character)']
+                new, found = Whole('HBA-CONTROL-CHARACTER', None, _hba_comment(bodies[0])), found + [   # RF-28 (a)
+                    'line:withheld (control or line-separator character)']
+            if not isinstance(new, Whole) and _backslash_blank(new):              # RF-28 (a) FIX-2
+                new, found = _hba_backslash_blank(bodies[0], new, found)          # RF-28 (a) FIX-2
             fields.extend(found)
-            lines.append(new + eols[0])
+            lines.append(_line_text(new, first, found, record) + eols[0])          # RF-28 (a) (b)
             continue
         joined = ''.join(body[:-1] if body.endswith('\\') else body for body in bodies)
         new, found = _redact_hba_line(joined)
-        if not found and new == joined and not any(has_secret(body) or LINE_UNSAFE_RE.search(body)
-                                                   for body in bodies):
+        masked = _hba_masked_bodies(joined, bodies)                         # RF-27 (a)
+        if not found and new == joined and masked is not None and not any(
+                has_secret(part) or LINE_UNSAFE_RE.search(body) for part, body in zip(masked, bodies)) \
+                and not _backslash_blank(bodies[-1]):                             # RF-28 (a) FIX-2
             lines.extend(group)
             continue
-        for field in hba_fields(joined):
-            _note_hba_tokens(field[2])
-        _note_loose(joined)
-        for body in bodies:
-            _note_loose(body.rstrip('\\'))
+        _note_hba_withheld(joined)                                           # RF-27 (a)
+        for part in (masked or [body.rstrip('\\') for body in bodies]):     # RF-27 (a)
+            _note_loose(part)
         reason = 'line:withheld (backslash continuation joins a withheld line: %d physical lines)' % len(group)
-        for eol in eols:
-            lines.append(REDACTED_LINE + eol)
+        for offset, (body, eol) in enumerate(zip(bodies, eols)):                   # RF-28 (a)
+            whole = Whole('HBA-CONTINUATION', None, _hba_comment(body))             # RF-28 (a)
+            lines.append(_line_text(whole, first + offset, [reason], record) + eol)   # RF-28 (a) (b)
             fields.append(reason)
     return ''.join(lines), fields
+
+
+def hba_identifier_forms(text):
+    """RF-27 (b): for a RETAINED pg_hba text, one entry per retained authentication record whose database or user
+    field holds a quoted, @file or /regex token: {line (first physical line of the record), forms, fields:
+    {database: [...], user: [...]}}. Forms only, never a value, so the checker can tell opaque tokens without
+    re-parsing. Withheld records (markers, RF-28 (a)) and plain records have no entry."""
+    out, number = [], 0
+    for group, bodies, _ in _hba_groups(text):
+        number += 1
+        first, number = number, number + len(group) - 1
+        if len(group) == 1 and _starts_marker(bodies[0]):                          # RF-28 (a)
+            continue
+        joined = ''.join(body[:-1] if body.endswith('\\') else body for body in bodies)
+        fields, _, unterminated = _hba_scan(joined)
+        count = _hba_positional(joined, fields)
+        if unterminated or not count or count < 4:
+            continue
+        per_field = {name: hba_token_forms(fields[index]) for index, name in HBA_IDENTIFIER_FIELDS}
+        forms = sorted(set(per_field['database']) | set(per_field['user']))
+        if forms:
+            out.append({'line': first, 'forms': forms, 'fields': per_field})
+    return out
 
 
 def structural_check_text(text, grammar):
@@ -1248,7 +1575,9 @@ def structural_check_text(text, grammar):
     if grammar == 'conf':
         for number, physical in enumerate(server_lines(text), 1):
             line = conf_body(physical)
-            if line == REDACTED_LINE:
+            if _starts_marker(line):                                              # RF-28 (a)
+                if (parse_marker(line) or (0,))[0] != number:                     # RF-28 (a): exact, own number
+                    hits.append(number)
                 continue
             probe = line.replace("'" + WITHHELD_VALUE + "'", "''").replace(WITHHELD_COMMENT, '')
             match = CONF_LINE_RE.match(probe)
@@ -1260,14 +1589,17 @@ def structural_check_text(text, grammar):
         number = 0
         for group, bodies, _ in _hba_groups(text):
             number += 1
-            if len(group) == 1 and bodies[0] == REDACTED_LINE:
+            if len(group) == 1 and _starts_marker(bodies[0]):                     # RF-28 (a)
+                if (parse_marker(bodies[0]) or (0,))[0] != number:                # RF-28 (a): exact, own number
+                    hits.append(number)
                 continue
             joined = ''.join(body[:-1] if body.endswith('\\') else body for body in bodies)
             probe = joined.replace(WITHHELD_OPTION, '<withheld_option>').replace(WITHHELD_COMMENT, '')
             fields, comment, unterminated = _hba_scan(probe)
             count = _hba_positional(probe, fields)
             bad = unterminated or (comment is not None and not _text_ok(probe[comment:])) or count is None \
-                or any(LINE_UNSAFE_RE.search(body) for body in bodies)
+                or any(LINE_UNSAFE_RE.search(body) for body in bodies) \
+                or _backslash_blank(bodies[-1])                                   # RF-28 (a) FIX-2
             for start, end, tokens in fields[count or 0:]:
                 if probe[start:end] != '<withheld_option>' and not hba_option_ok(probe[start:end], tokens):
                     bad = True
@@ -1278,20 +1610,48 @@ def structural_check_text(text, grammar):
     return hits
 
 
-def redact_plain_text(text):
+def redact_plain_text(text, record=None):                                        # RF-28 (b)
+    """RF-28 (a): @file lists, pg_ident.conf and other files read with the pg_hba tokeniser. A withheld line is a
+    marker, or the comment form when it holds no field; RF-28 (b): `record` as in redact_hba_text."""
     lines, fields = [], []
-    for line in server_lines(text):
+    for number, line in enumerate(server_lines(text), 1):                        # RF-28 (a)
         body = hba_body(line)
-        if has_secret(body) or LINE_UNSAFE_RE.search(body):
-            lines.append(REDACTED_LINE + line[len(body):])
-            fields.append('line:unparsed secret pattern')
+        if _starts_marker(body):                                                  # RF-28 (a)
+            whole, found = Whole('MARKER-COLLISION', None, False), [COLLISION_LABEL]   # RF-28 (a)
+        elif has_secret(body) or LINE_UNSAFE_RE.search(body):
+            _note_withheld(body)                     # RF-27 (h): the self-check learns what is withheld
+            code = 'PLAIN-CONTROL-CHARACTER' if LINE_UNSAFE_RE.search(body) else 'PLAIN-SECRET-PATTERN'   # RF-28 (a)
+            whole, found = Whole(code, None, _hba_comment(body)), ['line:unparsed secret pattern']        # RF-28 (a)
+        elif _backslash_blank(body):                                              # RF-28 (a) FIX-2
+            comment = _hba_comment(body)                                          # RF-28 (a) FIX-2
+            whole = Whole('PLAIN-TRAILING-BACKSLASH', None, comment)              # RF-28 (a) FIX-2
+            found = ['line:comment:withheld_whole' if comment else BACKSLASH_BLANK_LABEL]   # RF-28 (a) FIX-2
         else:
             lines.append(line)
+            continue                                                              # RF-28 (a)
+        fields.extend(found)                                                      # RF-28 (a)
+        lines.append(_line_text(whole, number, found, record) + line[len(body):])  # RF-28 (a) (b)
     return ''.join(lines), fields
 
 
 CONFIG_LIST_KEYS = ('setconfig', 'proconfig', 'useconfig', 'rolconfig')
 CONNINFO_FIELDS = ('subconninfo',)
+# RF-28 (c): pg_proc.proconfig 'search_path=<list>' is the fact the definer-function obligations read. Its value is
+# an identifier list (schema names, quoted or not), so it is retained byte for byte when it is at most
+# SEARCH_PATH_MAX characters, holds no control, line-separator or undecodable character, and shows no secret pattern
+# (has_secret: a URI with userinfo, a valued secret keyword, a passphrase command). A quoted identifier can hold any
+# printable text, so a value that shows a secret pattern takes the existing rule and is withheld and noted. Only the
+# exact spelling 'search_path=' at the start of a proconfig entry takes this rule; every other entry, and search_path
+# in setconfig, useconfig or rolconfig, keeps the existing rule.
+SEARCH_PATH_MAX = 2048                                                                    # RF-28 (c)
+
+
+def _function_search_path(item):
+    """RF-28 (c): True for a proconfig entry 'search_path=<value>' that is retained byte for byte."""
+    if not isinstance(item, str) or not item.startswith('search_path='):
+        return False
+    value = item[len('search_path='):]
+    return len(value) <= SEARCH_PATH_MAX and not HBA_IDENTIFIER_UNSAFE_RE.search(value) and not has_secret(item)
 
 
 def _hba_option_item(item, path, fields):
@@ -1308,6 +1668,31 @@ def _hba_option_item(item, path, fields):
         fields.append('%s.options:%s:withheld_whole' % (path, _hba_option_label(name)))
         return WITHHELD_OPTION
     return redact_tree(item, path + '.options[]', fields)
+
+
+def note_hba_retained(text):
+    """RF-27 (e): remember the database and user tokens, quotes removed, of every retained authentication record
+    in a RETAINED pg_hba text. A token whose raw text starts with an unquoted '@' is an @file reference: the server
+    expands it to the file's content (unpinned), so it admits nothing. Withheld records hold no fields."""
+    for group, bodies, _ in _hba_groups(text):
+        joined = ''.join(body[:-1] if body.endswith('\\') else body for body in bodies)
+        fields, _, unterminated = _hba_scan(joined)
+        count = None if unterminated else _hba_positional(joined, fields)
+        if not count or count < 4 or not _hba_identifier_spans(fields):
+            continue
+        for index, _ in HBA_IDENTIFIER_FIELDS:
+            _HBA_RETAINED.update(token for token, _, raw in fields[index][2] if not raw.startswith('@'))
+
+
+def _hba_identifier_item(name, path, fields):
+    """RF-27 (c), narrowed by RF-27 (e): one pg_hba_file_rules database or user_name item, as the server parsed
+    it. It keeps the identifier rule (within HBA_TOKEN_MAX, no control, line-separator or undecodable character,
+    never remembered as a secret value) only when it equals a token note_hba_retained saw in a retained file.
+    Every other item, such as a name expanded from @file content, takes the RF-24 path item by item."""
+    if isinstance(name, str) and name in _HBA_RETAINED and len(name) <= HBA_TOKEN_MAX \
+            and not HBA_IDENTIFIER_UNSAFE_RE.search(name):
+        return name
+    return _redact_list([name], path, fields)[0]      # RF-27 (e): the RF-24 path for this one item
 
 
 def _string_leaf(value, path, name, fields):
@@ -1342,6 +1727,9 @@ def redact_tree(value, path, fields, config=False):
             if key == 'options' and isinstance(item, list) and 'pg_hba_file_rules' in path:
                 out[key] = [_hba_option_item(option, path, fields) for option in item]
                 continue
+            if key in ('database', 'user_name') and isinstance(item, list) and 'pg_hba_file_rules' in path:
+                out[key] = [_hba_identifier_item(name, '%s.%s' % (path, key), fields) for name in item]   # RF-27 (c)
+                continue
             if isinstance(item, str):
                 out[key] = _string_leaf(item, '%s.%s' % (path, key), key, fields)
                 continue
@@ -1357,6 +1745,9 @@ def redact_tree(value, path, fields, config=False):
 def _redact_list(value, path, fields, config=False):
     out = []
     for item in value:
+        if config and path.endswith('.proconfig') and _function_search_path(item):     # RF-28 (c)
+            out.append(item)                                                         # RF-28 (c)
+            continue                                                                 # RF-28 (c)
         if isinstance(item, str) and re.match(r'(?i)(%s)\s*=' % '|'.join(HBA_SECRET_OPTIONS), item):
             _note_secret(item.split('=', 1)[1].strip('"'))
             fields.append('%s[]:%s:withheld_whole' % (path, item.split('=', 1)[0].strip().lower()))
@@ -1545,6 +1936,18 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 
 
+def file_stat(path):
+    """RF-24 (d): the one stat of a copied configuration file, taken after its read (patchable in tests)."""
+    return os.stat(path)
+
+
+def mtime_ns_record(ns):
+    """RF-24 (d): an st_mtime_ns as the integer and as UTC text with all nine fractional digits."""
+    whole, fraction = divmod(ns, 10 ** 9)
+    stamp = datetime.datetime.fromtimestamp(whole, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+    return {'st_mtime_ns': ns, 'utc': '%s.%09d+00:00' % (stamp, fraction)}
+
+
 def clean_error(text):
     text = (text or '').strip()
     new, _ = redact_string(text)
@@ -1595,7 +1998,7 @@ class Collector:
         self.args, self.local_dd = args, local_dd
         self.roots = list(roots or [os.path.realpath(local_dd)])
         self.entries, self.files, self.server_to_raw = [], {}, {}
-        self.timing = {'query_elapsed_ms': {}, 'file_mtimes': {}}
+        self.timing = {'query_elapsed_ms': {}, 'file_mtimes': {}, 'file_mtimes_ns': {}}   # RF-24 (d)
         self.results = {}
         self.server_dd = None
         self.major = None
@@ -1682,11 +2085,15 @@ class Collector:
             return
         self.files[raw_rel] = {'bytes': data, 'server': server_path, 'grammar': grammar}
         self.server_to_raw[posixpath.normpath(server_path)] = raw_rel
-        try:
+        try:   # RF-24 (d): ONE stat gives both precisions; a failed stat is a typed not-observed mtime, never silent
+            stat = file_stat(local)
+        except OSError as error:
+            self.timing['file_mtimes_ns']['raw/' + raw_rel] = {'status': 'not_observed',
+                                                          'error_class': type(error).__name__}
+        else:   # RF-24 (d): the nanosecond mtime sits beside the frozen second-precision one
             self.timing['file_mtimes']['raw/' + raw_rel] = datetime.datetime.fromtimestamp(
-                os.stat(local).st_mtime, datetime.timezone.utc).isoformat(timespec='seconds')
-        except OSError:
-            pass
+                stat.st_mtime, datetime.timezone.utc).isoformat(timespec='seconds')   # RF-24 (d): same stat
+            self.timing['file_mtimes_ns']['raw/' + raw_rel] = mtime_ns_record(stat.st_mtime_ns)   # RF-24 (d)
         self.file_entry(raw_rel, server_path, 'observed' if data else 'observed_empty', None, via)
         text = data.decode('utf-8', 'surrogateescape')
         for number, kind, target in self.directives(grammar, text):
@@ -1703,24 +2110,30 @@ class Collector:
                 if match and match.group(1).lower() in ('include', 'include_if_exists', 'include_dir'):
                     out.append((number, match.group(1).lower(), conf_value(match.group(3))))
             return out
-        pending, start = '', 0
-        for number, physical in enumerate(server_lines(text), 1):
-            line = hba_body(physical)
-            if not pending:
-                start = number
-            if self.major >= 16 and line.rstrip().endswith('\\'):
-                pending += line.rstrip()[:-1] + ' '
+        # RF-27 (f): the scan reads the logical records the redaction reads: _hba_groups joins a backslash
+        # continuation on every major (pinned on B-14..B-18), and _hba_scan builds the fields as next_field_expand
+        # does, so a comma list with a blank after the comma is one field. An @file target is a token whose raw text
+        # starts with an unquoted '@' (the 'file' form of hba_token_forms); the target is the token without it.
+        number = 0
+        for group, bodies, _ in _hba_groups(text):
+            number += 1
+            start, number = number, number + len(group) - 1
+            joined = ''.join(body[:-1] if body.endswith('\\') else body for body in bodies)
+            fields = _hba_scan(joined)[0]
+            if not fields:
                 continue
-            tokens, pending = hba_tokens(pending + line), ''
-            if not tokens:
+            if grammar == 'plain':      # RF-27 (d): an @file list may name further @files (nested @ is allowed)
+                scope = fields
+            elif fields[0][2][0][0] in HBA_INCLUDES:
+                target = fields[1][2][0][0] if len(fields) > 1 else ''
+                out.append((start, fields[0][2][0][0], target))
                 continue
-            if tokens[0] in ('include', 'include_if_exists', 'include_dir'):
-                out.append((start, tokens[0], tokens[1] if len(tokens) > 1 else ''))
-            elif grammar == 'hba':
-                for field in tokens[1:3]:
-                    for item in field.split(','):
-                        if item.startswith('@') and len(item) > 1:
-                            out.append((start, '@file', item[1:]))
+            else:                       # RF-27 (f): fields 1 and 2 of an hba record
+                scope = fields[1:3] if grammar == 'hba' else []
+            for field in scope:
+                for token, _, raw in field[2]:
+                    if raw.startswith('@') and len(token) > 1:
+                        out.append((start, '@file', token[1:]))
         return out
 
     def follow(self, grammar, server_parent, raw_parent, number, kind, target, depth):
@@ -1775,6 +2188,168 @@ class Collector:
             self.take(grammar, posixpath.join(server_child, name), posixpath.join(raw_child, name), via, depth + 1)
 
 
+# RF-28 (d): the client login name. Through a pooler the login name carries a suffix (for example
+# 'role.project'); the role whose row, attributes and grants are examined stays --role.
+LOGIN_USER_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}')                             # RF-28 (d)
+# RF-28 (e): the session facts, read after the three checks by two control queries of their own: session_settings
+# (no view) and session_tls (pg_stat_ssl). Recorded as observed facts, with no judgement: a pooler may drop the
+# startup option, end TLS itself and connect from its own address. A failed session read is a recorded gap (its
+# query entry), never a refusal. A value of an unexpected shape is never retained: it reads unreadable.
+READ_ONLY_REQUESTED = {'default_transaction_read_only': 'on',
+                       'via': "PGOPTIONS '-c default_transaction_read_only=on'"}          # RF-28 (e)
+SESSION_VALUES = ('on', 'off')                                                            # RF-28 (e)
+TLS_VERSION_RE = re.compile(r'TLSv1(?:\.[1-3])?')                                         # RF-28 (e)
+TLS_CIPHER_RE = re.compile(r'[A-Z0-9][A-Z0-9_-]{0,63}')                                   # RF-28 (e)
+SESSION_READS = ('session_settings', 'session_tls')                                       # RF-28 (e)
+OBSERVED_STATUSES = ('observed', 'observed_empty')                                        # RF-28 (e)
+
+
+def _session_setting(settings, name):
+    """RF-28 (e): one effective setting the session reports: observed ('on' or 'off'), unreadable (any other
+    value, not retained) or not_observed (the object has no such key)."""
+    if name not in settings:
+        return {'status': 'not_observed', 'value': None}
+    value = settings[name]
+    if isinstance(value, str) and value in SESSION_VALUES:
+        return {'status': 'observed', 'value': value}
+    return {'status': 'unreadable', 'value': None}
+
+
+def _tls_field(key, value):
+    """RF-28 (e): (retained value, field status). A server null is observed null; a value of an unexpected shape is
+    unreadable and recorded as null, so null with status observed always means the server returned null."""
+    if value is None:
+        return None, 'observed'
+    if key == 'ssl':
+        ok = isinstance(value, bool)
+    elif key == 'bits':
+        ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 65536
+    elif key == 'version':
+        ok = isinstance(value, str) and bool(TLS_VERSION_RE.fullmatch(value))
+    else:
+        ok = isinstance(value, str) and bool(TLS_CIPHER_RE.fullmatch(value))
+    return (value, 'observed') if ok else (None, 'unreadable')
+
+
+def _tls_fact(result):
+    """RF-28 (e): the backend's own pg_stat_ssl row (ssl, version, cipher, bits) from the session_tls read."""
+    status, value, error, error_class = result
+    if status not in OBSERVED_STATUSES:
+        return {'status': 'unreadable', 'error_class': error_class, 'error': error}
+    if 'row' not in value:
+        return {'status': 'not_observed', 'reason': 'the session_tls object has no row key'}
+    row = value['row']
+    if not isinstance(row, dict):
+        return {'status': 'not_observed', 'reason': 'pg_stat_ssl has no row for this backend'}
+    kept, field_status = {}, {}
+    for key in ('ssl', 'version', 'cipher', 'bits'):
+        kept[key], field_status[key] = _tls_field(key, row.get(key))
+    return {'status': 'observed', 'pg_stat_ssl': kept, 'field_status': field_status}
+
+
+def _address_class(identity):
+    """RF-28 (e): the class of inet_client_addr(), never the address: unix_socket (null), loopback, link_local,
+    private, global, or other (anything else, or text that is not an address)."""
+    if 'client_addr' not in identity:
+        return {'status': 'not_observed', 'value': None}
+    text = identity['client_addr']
+    if text is None:
+        return {'status': 'observed', 'value': 'unix_socket'}
+    try:
+        address = ipaddress.ip_interface(text).ip if isinstance(text, str) else None
+    except ValueError:
+        address = None
+    if address is None:
+        klass = 'other'
+    elif address.is_loopback:
+        klass = 'loopback'
+    elif address.is_link_local:
+        klass = 'link_local'
+    elif address.is_private:
+        klass = 'private'
+    elif address.is_global:
+        klass = 'global'
+    else:
+        klass = 'other'
+    return {'status': 'observed', 'value': klass}
+
+
+def read_session(collector):
+    """RF-28 (e): run session_settings and session_tls once each, record each as a query entry, and return the
+    sidecar 'session' record. A failed read is that query's gap; it never refuses the run."""
+    results = {}
+    for qid in SESSION_READS:
+        query = by_id(qid)
+        status, value, error, error_class = collector.run(query)
+        if status in OBSERVED_STATUSES and not isinstance(value, dict):
+            status, value, error, error_class = ('unreadable', None, 'output is not one JSON object',
+                                                 'malformed_output')
+        collector.record_query(query, status, value, error, error_class)
+        results[qid] = (status, value, error, error_class)
+    return session_facts(results)
+
+
+def session_facts(results):
+    """RF-28 (e): the sidecar 'session' record from the two session reads."""
+    status, settings, error, error_class = results['session_settings']
+    names = ('transaction_read_only', 'default_transaction_read_only')
+    if status in OBSERVED_STATUSES:
+        effective = {name: _session_setting(settings, name) for name in names}
+        address = _address_class(settings)
+    else:
+        failed = {'status': 'unreadable', 'value': None, 'error_class': error_class}
+        effective = {name: dict(failed) for name in names}
+        address = dict(failed)
+    seen = [entry['value'] for entry in effective.values() if entry['status'] == 'observed']
+    if any(value != 'on' for value in seen):
+        read_only = False
+    elif len(seen) == len(effective):
+        read_only = True
+    else:
+        read_only = None
+    return {'requested': dict(READ_ONLY_REQUESTED), 'effective': effective, 'read_only_effective': read_only,
+            'tls': _tls_fact(results['session_tls']), 'client_address_class': address,
+            'source': 'two control reads after the identity, version and membership checks: session_settings '
+                      '(effective read-only settings, client address) and session_tls (the backend\'s own '
+                      'pg_stat_ssl row). Each query runs in its own psql session with the same options, so these '
+                      'are the facts of such a session.',
+            'reading': 'observed facts only; the checker gives them a reading. A read-write session is a gap '
+                       '(session:read_only), not a refusal, in this revision. A failed session read is the gap of '
+                       'its query entry.'}
+
+
+def session_gaps(session):
+    """RF-28 (e): the typed gap entries for the session facts (a read-write session, a value of an unexpected
+    shape). A failed session read is already a gap: its query entry."""
+    effective = session['effective']
+    if session['read_only_effective'] is False:
+        return [{'kind': 'session', 'target': 'session:read_only', 'status': 'unsupported',
+                 'error': 'the runner requested default_transaction_read_only=on; the session reports '
+                          'transaction_read_only=%s and default_transaction_read_only=%s (a pooler may drop the '
+                          'startup option); recorded, not refused' % (
+                              effective['transaction_read_only']['value'],
+                              effective['default_transaction_read_only']['value']),
+                 'error_class': 'read_only_not_effective'}]
+    if any(entry['status'] == 'unreadable' and 'error_class' not in entry for entry in effective.values()):
+        return [{'kind': 'session', 'target': 'session:read_only', 'status': 'unreadable',
+                 'error': 'the session reported a read-only setting in an unexpected form (not retained)',
+                 'error_class': 'malformed_output'}]
+    return []
+
+
+# RF-24 (e): the collection role's creation fact. The collector itself never creates it; whether the role was made
+# for this run is known only to whoever provisioned it, so it is recorded as operator-stated or not stated.
+ROLE_CREATION_BASIS = ('collect_pg runs only single SELECT statements in a read-only session; it creates, alters '
+                       'and grants nothing')
+
+
+def role_creation(args):
+    stated = getattr(args, 'role_created_for_run', None)
+    return {'by_collector': False, 'by_collector_basis': ROLE_CREATION_BASIS,
+            'for_run': None if stated is None else stated == 'yes',
+            'for_run_source': 'not_stated' if stated is None else 'operator_flag'}
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog='collect_pg.py', add_help=True)
     parser.add_argument('--out', required=True)
@@ -1783,6 +2358,8 @@ def parse_args(argv):
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--extra-root', action='append', default=[])
     parser.add_argument('--psql', default='psql')
+    parser.add_argument('--role-created-for-run', choices=('yes', 'no'), default=None)   # RF-24 (e)
+    parser.add_argument('--login-user', default=None)                                    # RF-28 (d)
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -1790,8 +2367,19 @@ def parse_args(argv):
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,62}', args.role) or args.role.upper() == 'PUBLIC' \
             or args.role.startswith('pg_'):
         raise Refusal('invalid_arguments', '--role must be an identifier that is neither PUBLIC nor pg_-prefixed', 2)
+    if args.login_user is None:                                                   # RF-28 (d): default is the role
+        args.login_user, args.login_user_source = args.role, 'default_role'        # RF-28 (d)
+    elif LOGIN_USER_RE.fullmatch(args.login_user):                                 # RF-28 (d)
+        args.login_user_source = 'operator_flag'                                   # RF-28 (d)
+    else:                                                                          # RF-28 (d)
+        raise Refusal('invalid_arguments', '--login-user must be a name of 1 to 128 characters: a letter or '
+                      'underscore, then letters, digits, underscores, dots or hyphens (RF-28 (d))', 2)
     privileges = [item.strip() for item in args.privileges.split(',') if item.strip()]
     bad = [item for item in privileges if item not in READ_ONLY_ROLES]
+    broader = [item for item in bad if item in BROADER_READ_ROLES]   # RF-24 (h)
+    if broader:   # RF-24 (h): accepted by the frozen collector, broader than ruling 20 allows
+        raise Refusal('invalid_arguments', '--privileges names %s, broader than the least-privilege grants of '
+                      'ruling 20 (only: %s)' % (', '.join(broader), ', '.join(READ_ONLY_ROLES)), 2)
     if not privileges or bad or len(set(privileges)) != len(privileges):
         raise Refusal('invalid_arguments', '--privileges must list, without duplicates, only: ' +
                       ', '.join(READ_ONLY_ROLES) + (' (refused entries: %s)' % ', '.join(bad) if bad else ''), 2)
@@ -1900,7 +2488,7 @@ def check_identity(collector, role):
 
 
 def check_memberships(collector):
-    """The collection role's direct role memberships must lie within the four read-only collection roles."""
+    """The collection role's direct role memberships must lie within READ_ONLY_ROLES (RF-24 (h): the two of ruling 20)."""
     query = by_id('collector_memberships')
     status, value, error, error_class = collector.run(query)
     if status not in ('observed', 'observed_empty') or not isinstance(value, list) or \
@@ -1908,6 +2496,10 @@ def check_memberships(collector):
         raise Refusal('collection_role_unverified', 'the collection role memberships could not be read from '
                       'pg_auth_members (%s): %s' % (status, error or 'not a list of role names'))
     outside = sorted(set(value) - set(READ_ONLY_ROLES))
+    if outside and set(outside) <= set(BROADER_READ_ROLES):   # RF-24 (h): read-only, but broader than ruling 20
+        raise Refusal('collection_role_not_least_privilege', 'the collection role is a direct member of %s, broader '
+                      'than the least-privilege grants of ruling 20 (%s); nothing is collected'
+                      % (', '.join(outside), ', '.join(READ_ONLY_ROLES)))
     if outside:
         raise Refusal('collection_role_not_read_only', 'the collection role is a direct member of %s, outside the '
                       'read-only collection roles (%s); nothing is collected' % (', '.join(outside),
@@ -1940,11 +2532,27 @@ def main(argv=None):
     return run_staged(args, out, started)
 
 
+def withheld_row_list(manifest, line_records):
+    """RF-28 (b): the sidecar redaction_withheld rows. The field names file, field and count are kept; each row gains
+    line and reason. A text file the collector parses has one row per (line, field, reason); a JSON output file
+    keeps one row per field with line null and reason JSON-VALUE-WITHHELD. Per (file, field) the counts sum to the
+    REDACTION-MANIFEST.json entry."""
+    def kept(field):
+        return 'withheld' in field or 'unparsed' in field
+    counts = Counter((file, number, field, reason) for file, record in line_records.items()
+                     for number, field, reason in record if kept(field))
+    rows = [{'file': file, 'field': field, 'count': count, 'line': number, 'reason': reason}
+            for (file, number, field, reason), count in counts.items()]
+    rows += [{'file': file, 'field': field, 'count': count, 'line': None, 'reason': 'JSON-VALUE-WITHHELD'}
+             for (file, field), count in manifest.items() if kept(field) and file not in line_records]
+    return sorted(rows, key=lambda row: (row['file'], row['line'] or 0, row['field'], row['reason']))
+
+
 def _collect(args, out, started, state):
     """The collection itself. `out` is the STAGING directory; a Refusal (or any exception) raised here makes
     run_staged remove it and refuse. Returns (exit code, the status message printed after publishing)."""
     if RUNNER is psql_runner:
-        _PSQL['argv'], _PSQL['env'] = build_psql_command(args.psql, args.role)
+        _PSQL['argv'], _PSQL['env'] = build_psql_command(args.psql, getattr(args, 'login_user', args.role))   # RF-28 (d)
     collector = Collector(args, str(Path(args.data_dir).resolve()), args.roots)
     state['collector'] = collector
     try:
@@ -1964,13 +2572,15 @@ def _collect(args, out, started, state):
     except Refusal:
         raise
     collector.major = major
+    session = read_session(collector)                                            # RF-28 (e)
+    collector.entries.extend(session_gaps(session))                               # RF-28 (e)
     server = {'major': major, 'server_version': value.get('server_version'),
               'server_version_num': value.get('server_version_num')}
 
     # ---- every other applicable query, once each, in published order
     raw_results = {'collector_memberships': member_result}
     for query in QUERIES:
-        if query['id'] in ('collector_identity', 'server_version', 'collector_memberships'):
+        if query['id'] in ('collector_identity', 'server_version', 'collector_memberships') + SESSION_READS:  # RF-28 (e)
             continue
         if not query['min_major'] <= major <= query['max_major']:
             continue
@@ -2046,15 +2656,21 @@ def _collect(args, out, started, state):
     raw = out / 'raw'
     raw.mkdir(parents=True, exist_ok=True)
     (raw / 'clients').mkdir(exist_ok=True)
+    identifier_forms = []                          # RF-27 (b): sidecar hba_identifier_forms
+    line_records = {}                              # RF-28 (b): per-line withheld rows of each text file
     for raw_rel in sorted(collector.files):
         item = collector.files[raw_rel]
         text = item['bytes'].decode('utf-8', 'surrogateescape')
         redactor = {'conf': redact_conf_text, 'hba': redact_hba_text}.get(item['grammar'], redact_plain_text)
-        new, fields = redactor(item['bytes'])      # split with bytes.split(b'\\n'), each line decoded afterwards
+        record = line_records.setdefault('raw/' + raw_rel, [])                      # RF-28 (b)
+        new, fields = redactor(item['bytes'], record=record)   # RF-28 (b); split at b'\n', each line decoded afterwards
         note_fields('raw/' + raw_rel, fields)
         target = raw / raw_rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(new.encode('utf-8', 'surrogateescape') if fields else item['bytes'])
+        if item['grammar'] == 'hba':          # RF-27 (b): forms of the retained records, no values
+            identifier_forms.extend(dict(file='raw/' + raw_rel, **entry) for entry in hba_identifier_forms(new))
+            note_hba_retained(new)                  # RF-27 (e): the view keeps only these identifiers
 
     # ---- command line closure
     command = flagged({'schema': 'symbolia.rf06.command-line.v1',
@@ -2111,17 +2727,21 @@ def _collect(args, out, started, state):
                                and raw_results[q['key']][0] == 'unreadable'
                                and q['min_major'] <= major <= q['max_major'] for view in q['views'][:1]})
     snapshot = flagged({'collection': {'role': args.role, 'privileges': args.privilege_list,
-                                       'unreadable_views': unreadable_views}})
+                                       'unreadable_views': unreadable_views,
+                                       'server_version_num': server['server_version_num'],   # RF-24 (c)
+                                       'role_creation': role_creation(args),                 # RF-24 (e)
+                                       'not_observed_fields':                                # RF-24 (a) (b)
+                                           json.loads(json.dumps(NOT_OBSERVED_FIELDS))}})
     for key in CATALOG_KEYS:
         if ok(key):
             snapshot[key] = raw_results[key][1]
     assembled = []
-    if ok('subscriptions') and ok('subscription_rels') and isinstance(snapshot.get('subscriptions'), list):
-        for sub in snapshot['subscriptions']:
+    if ok(SUB_KEY) and ok('subscription_rels') and isinstance(snapshot.get(SUB_KEY), list):   # RF-24 (a)
+        for sub in snapshot[SUB_KEY]:
             if isinstance(sub, dict):
                 sub['tables'] = [row.get('relname') for row in snapshot['subscription_rels']
                                  if isinstance(row, dict) and row.get('subname') == sub.get('subname')]
-        assembled.append('subscriptions[].tables from subscription_rels (both reads succeeded)')
+        assembled.append(SUB_KEY + '[].tables from subscription_rels (both reads succeeded)')   # RF-24 (a)
     fields = []
     snapshot = redact_tree(snapshot, 'catalog_snapshot', fields)
     note_fields('raw/catalog_snapshot.json', [f[len('catalog_snapshot.'):] for f in fields])
@@ -2210,6 +2830,7 @@ def _collect(args, out, started, state):
         isinstance(memberships[1], list) else None
     entries = sorted(collector.entries, key=lambda e: (e['kind'], e['target']))
     gaps = [e for e in entries if e['status'] not in OK_STATUSES]
+    withheld_rows = withheld_row_list(manifest, line_records)                     # RF-28 (b)
     sidecar = flagged({
         'schema': 'symbolia.rf06.collection-sidecar.v1',
         'status_vocabulary': ['observed', 'observed_empty', 'declared_absent', 'unreadable', 'missing', 'unsupported'],
@@ -2227,9 +2848,12 @@ def _collect(args, out, started, state):
                        '(--data-dir, --extra-root); anything else is refused and recorded unsupported',
         'locations': where, 'entries': entries, 'gap_count': len(gaps), 'complete': not gaps,
         'assembled': assembled,
-        'redaction_withheld': [{'file': file, 'field': field, 'count': count}
-                               for (file, field), count in sorted(manifest.items())
-                               if 'withheld' in field or 'unparsed' in field],
+        'redaction_withheld': withheld_rows,          # RF-28 (b): one row per withheld line, with line and reason
+        'connection': {'login_user': getattr(args, 'login_user', args.role),              # RF-28 (d)
+                       'login_user_source': getattr(args, 'login_user_source', 'default_role'),
+                       'role_examined': args.role},
+        'session': session,                           # RF-28 (e)
+        'hba_identifier_forms': identifier_forms,     # RF-27 (b)
         'loaded_identity': {'status': 'not_observed',
                             'reason': 'pg_hba_file_rules and pg_file_settings parse the current files on disk; the '
                                       'collector reads no view of the rules the server last loaded, so loaded-versus-'
@@ -2252,7 +2876,8 @@ def _collect(args, out, started, state):
     timing = flagged({'schema': 'symbolia.rf06.timing.v1', 'started_at': started, 'finished_at': now(),
                       'query_elapsed_ms': collector.timing['query_elapsed_ms'],
                       'file_mtimes': collector.timing['file_mtimes'],
-                      'server_times': times[1] if times[0] == 'observed' else None})
+                      'server_times': times[1] if times[0] == 'observed' else None,
+                      'config_file_mtimes_ns': collector.timing['file_mtimes_ns']})   # RF-24 (d)
     (out / 'TIMING.json').write_text(dump(timing), encoding='utf-8')
     # ---- every check runs on the complete staging directory before anything is published
     structural = structural_check_out(out, {('raw/' + rel): item['grammar'] for rel, item in collector.files.items()})

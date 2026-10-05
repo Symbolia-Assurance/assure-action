@@ -30,18 +30,25 @@ machines read, none refused`; an envelope without `machines`, from an older serv
 Exit codes: 0 policy met, 1 policy failed, 2 bad input, 3 nothing was checked (no verdict, the input-integrity gate
 stopped the check, or machines were refused and allow-partial is not set), a typed refusal or a delivery failure (`api_unreachable`, `api_error`); an outcome with no exit code
 of its own (for example `unauthenticated`) exits 3. Every failure writes the failure envelope at the output path, its
-summary and one `::error` line. The key, the connection, its password and the collector's raw output are never printed,
+summary and one `::error` line. The summary names a check only when the check reached the server: the server's check id
+is kept in `detail.check_id` (from its failure envelope, or from a verdict that came back and then could not be used);
+a refusal the API answered says which request it refused (`detail.answered`, set by the client): the profile list
+(`GET /v1/profiles`, before anything is collected: nothing was sent), the upload (the files were sent and not kept) or
+a poll (the check was sent; the failure file carries the id from the 202); a refusal in the runner reads "No check was
+sent." (`serve.render.check_line`). The key, the connection, its password and the collector's raw output are never printed,
 and customer text reaches stdout only escaped as workflow-command data.
 
 Before anything is checked or sent, `action.withhold` withholds every configuration comment and every string literal in
 the policy expressions, in every mode and for a connection or an artefacts directory alike (the customer's directory is
 never changed); the counts are printed and added to the job summary. First, `action.withhold.apply` checks that the
 collector's REDACTION-MANIFEST.json (read beside raw/, never uploaded) binds its sidecar to the bytes as collected
-(refutation 005, WH-4). In api mode the verdict's shape is checked before it
+(refutation 005, WH-4). When the collector's sidecar records the session facts (the collector this Action ships
+does), the job summary states them in two plain lines: whether the collection session was read-only, and TLS to the
+server as the server reported it (`serve.markers.session_lines`). In api mode the verdict's shape is checked before it
 is rendered: a malformed verdict is `api_error` (exit 3), with the failure file and the step outputs written.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
-`action.withhold`, `serve` (flags), `serve.bundle`, `serve.outcomes` and `serve.render`.
+`action.withhold`, `serve` (flags), `serve.bundle`, `serve.markers`, `serve.outcomes` and `serve.render`.
 """
 from __future__ import annotations
 
@@ -59,7 +66,7 @@ if str(_ROOT) not in sys.path:
 
 from action import withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, VERDICT_SCHEMA, Client, allow_list  # noqa: E402
-from serve import FLAGS, bundle, render  # noqa: E402
+from serve import FLAGS, bundle, markers, render  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
@@ -198,7 +205,7 @@ class _Scrub:
         return s
 
     def refusal(self, e):
-        detail = {k: (self(v) if isinstance(v, str) else v) for k, v in e.detail.items()}
+        detail = {k: (self(v) if isinstance(v, str) and k != 'answered' else v) for k, v in e.detail.items()}
         return Refusal(e.outcome, self(e.reason), **detail)
 
 
@@ -215,7 +222,7 @@ def _mode(env):
     return m
 
 
-def _inputs(env, conn, conn_error, collect):
+def _inputs(env, conn, conn_error, collect, collector_dir=None):
     profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
     artefacts = _plain(env, 'INPUT_ARTEFACTS')
     has_conn = bool(str(env.get('INPUT_CONNECTION') or '').strip())
@@ -238,7 +245,8 @@ def _inputs(env, conn, conn_error, collect):
                           'files under raw/')
         return out
     out['role'] = collect.check_role(_plain(env, 'INPUT_COLLECTION_ROLE'), conn)
-    out['privileges'] = collect.check_privileges(_plain(env, 'INPUT_COLLECTION_PRIVILEGES'))
+    out['privileges'] = collect.check_privileges(_plain(env, 'INPUT_COLLECTION_PRIVILEGES'),
+                                                 collect.pin_generation(collector_dir))
     out['data_dir'] = collect.check_data_dir(data_dir_text)
     out['config_dirs'] = collect.check_config_dirs(config_dirs_text)
     return out
@@ -283,7 +291,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         say(_mask(v))
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
-    state = {'mode': None, 'scratch': None, 'withheld': None}
+    state = {'mode': None, 'scratch': None, 'withheld': None, 'session': []}
 
     def outputs(outcome, code):
         try:
@@ -294,7 +302,10 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     def failed(e):
         e = scrub.refusal(e)
         code = e.exit if e.exit is not None else 3
-        cid = e.detail.get('check_id')
+        server_cid = state.get('server_check_id')
+        if 'check_id' not in e.detail and isinstance(server_cid, str) and CHECK_ID_RE.fullmatch(server_cid):
+            e.detail['check_id'] = server_cid          # a verdict came back, so the check reached the server
+        cid = e.detail.get('check_id') or e.detail.get('sent_check_id')    # a refused poll: the id from the 202
         doc = failure_envelope(cid if isinstance(cid, str) and CHECK_ID_RE.fullmatch(cid) else check_id, e)
         try:
             _write_file(out_path, bundle.dumps(doc))
@@ -329,6 +340,12 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
                     psql=psql, path=env.get('PATH') or '/usr/bin:/bin',
                     timeout=collect.DEFAULT_TIMEOUT if collect_timeout is None else collect_timeout)
 
+    def session(files):
+        """The session facts the collector's sidecar records, as plain lines for the log and the job summary."""
+        state['session'] = markers.session_lines(files)
+        for line in state['session']:
+            say('Assure: ' + _cmd_data(line))
+
     def run_local():
         absent = Refusal('bad_input', 'local mode is not available in this distribution; use mode: api')
         if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'local_mode.py')):
@@ -342,13 +359,13 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             raise out_error
         from action import collect                             # after the pin, like every local-mode import
         conn, conn_error = connection(collect)
-        inputs = _inputs(env, conn, conn_error, collect)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir)
         state['scratch'] = _scratch(env)
         verdict, ignored, state['withheld'] = local_mode.run(
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
             collect_kw=None if inputs['artefacts'] else collect_kw(collect, inputs), scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
-            on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)))
+            on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)), on_collected=session)
         return verdict, ignored
 
     def run_api():
@@ -356,7 +373,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             raise out_error
         collect = load_collect() if conn_text.strip() else None
         conn, conn_error = connection(collect) if collect is not None else (None, None)
-        inputs = _inputs(env, conn, conn_error, collect)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
@@ -374,10 +391,13 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs))
         state['withheld'] = collected.withheld
         say('Assure: ' + withhold.describe(collected.withheld))
+        session(collected.files)
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         body = bundle.request_body(inputs['profile'], collected.files, lim)
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
         verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, body=body, **extra)
+        if isinstance(verdict, dict):
+            state['server_check_id'] = verdict.get('check_id')
         check_verdict(verdict)
         return verdict, list(collected.ignored)
 
@@ -403,6 +423,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         summary = render.summary_markdown(verdict)
         if state['withheld'] is not None:
             summary += withhold.summary_markdown(state['withheld'])
+        summary += markers.session_markdown(state['session'])
         notes = render.annotations(verdict)
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))

@@ -17,7 +17,8 @@ Rules:
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
   retried the same way. `rate_limited` waits for `Retry-After` once when it is at most 60 s. A typed failure envelope
   is raised as a Refusal with the server's outcome, reason and check id (an outcome name this client does not know is
-  `api_error`); `unauthenticated`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
+  `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
+  poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
 - `fail_on` is passed through as the customer wrote it; the server checks it against the profile and decides the exit.
@@ -58,6 +59,7 @@ RETRY_TYPED = frozenset({'server_busy'})
 CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')
 _TEXT_CAP = 300
+_CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id'})    # set by the client only, never by a server
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -174,8 +176,12 @@ class Client:
             raise _Delivery('error', 'the API answer is not bounded JSON') from None
 
     @staticmethod
-    def _typed(doc, status):
-        """The Refusal for a failure envelope."""
+    def _typed(doc, status, route):
+        """The Refusal for a failure envelope. A known outcome carries `detail.answered = route`, the request the API
+        answered: 'profiles' (`GET /v1/profiles`, before anything is collected or sent), 'check' (`POST /v1/checks`,
+        the upload left the runner) or 'poll' (`GET /v1/checks/{id}`, the check was sent). It is set last, so the
+        server's own detail can neither unset nor change it; a server `sent_check_id` is dropped (only the client's
+        own 202 gives one) (refutation-010 G1, round 2 G1)."""
         name = doc.get('outcome')
         cid = doc.get('check_id')
         detail = {}
@@ -187,13 +193,14 @@ class Client:
         extra = doc.get('detail')
         if isinstance(extra, dict):
             for k, v in list(extra.items())[:16]:
-                if isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) and k != 'check_id' \
+                if isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) and k not in _CLIENT_KEYS \
                         and (v is None or isinstance(v, (bool, int, float)) or isinstance(v, str)):
                     detail[k] = _clip(v) if isinstance(v, str) else v
+        detail['answered'] = route       # which request the API answered: the page says what left the runner
         return Refusal(name, _clip(doc.get('reason')), **detail)
 
-    def _call(self, method, path, body=None, headers=None):
-        """Send with retries on the same route. Returns (status, doc) for 200 and 202 with a parsed object; raises the
+    def _call(self, method, path, body=None, headers=None, *, route):
+        """Send with retries on the same route (`route` names it for `_typed`). Returns (status, doc) for 200 and 202 with a parsed object; raises the
         typed Refusal for a failure envelope, `api_unreachable` or `api_error` once the attempts are spent."""
         waited_retry_after = False
         attempt = 0
@@ -212,7 +219,7 @@ class Client:
                         raise
                     raise Refusal('api_error', 'the API answered %d without a failure envelope' % status) from None
                 if isinstance(doc, dict) and doc.get('schema') == FAILURE_SCHEMA:
-                    refusal = self._typed(doc, status)
+                    refusal = self._typed(doc, status, route)
                     if refusal.outcome == 'rate_limited' and not waited_retry_after:
                         wait = _retry_after(retry_after)
                         if wait is not None and wait <= MAX_RETRY_AFTER_S:
@@ -246,7 +253,7 @@ class Client:
     # ---------- the routes ----------
     def profiles(self):
         """The `GET /v1/profiles` answer (the served profiles' input allow-lists and the global limits)."""
-        status, doc = self._call('GET', '/v1/profiles')
+        status, doc = self._call('GET', '/v1/profiles', route='profiles')
         if status != 200:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
@@ -266,7 +273,7 @@ class Client:
         if query:
             path += '?' + urllib.parse.urlencode(query)
         idem = secrets.token_hex(16)
-        status, doc = self._call('POST', path, body, {'Idempotency-Key': idem})
+        status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
         polls = 0
         while status == 202:
             cid = doc.get('check_id')
@@ -277,7 +284,12 @@ class Client:
                               % (int(self.total_wait_s), cid), check_id=cid)
             self.sleep(self.poll_s[min(polls, len(self.poll_s) - 1)])
             polls += 1
-            status, doc = self._call('GET', '/v1/checks/' + cid)
+            try:
+                status, doc = self._call('GET', '/v1/checks/' + cid, route='poll')
+            except Refusal as e:
+                if e.detail.get('answered') == 'poll' and 'check_id' not in e.detail:
+                    e.detail['sent_check_id'] = cid          # the poll was refused; the 202 named the check
+                raise
         if doc.get('schema') != VERDICT_SCHEMA:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
         return doc

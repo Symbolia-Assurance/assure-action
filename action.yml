@@ -36,7 +36,7 @@ inputs:
     required: false
     default: ''
   collection-privileges:
-    description: The read-only roles granted to the collection role, comma separated. On Supabase, grant and give pg_monitor.
+    description: The read-only roles granted to the collection role, comma separated; pg_read_all_settings, pg_read_all_stats or both. The collector refuses broader roles such as pg_monitor.
     required: false
     default: pg_read_all_settings,pg_read_all_stats
   data-dir:

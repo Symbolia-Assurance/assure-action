@@ -28,6 +28,28 @@ An envelope whose profile is scoped by another unit (`scope_observed`, serve/env
 scope reduced)" after the scope phrase when a unit was removed from the accepted scope; each refused unit is listed
 under "<Label> not <verb>" with its reason, and the policy reason `scope_refused` has its own plain line. For a
 machine-scoped envelope `first_line` is `machines_line`, unchanged.
+
+SELFHOSTED-001 (the self-hosted lab run, 5 Oct 2026):
+- A reason the checker writes as a bound comparison, "domain bound exceeded (users 5 > 6 or databases 4 > 3)", prints
+  every comparison, true or false. The checker's text is shown unchanged; a serving-side gloss follows it, naming only
+  the bounds actually exceeded: "in plain words: domain bound exceeded: databases 4 (cap 3)" (`bound_gloss`).
+- A `fails` row whose reason is empty (the declared profile's rows) shows its witness from the envelope's `readings`
+  (`witnesses` or `witness` of that obligation), bounded and escaped like any reason (`witness_text`).
+- A failure page names a check only when the check reached the server: the server's check id came back in
+  `detail.check_id`. A refusal in the runner before anything was sent reads "No check was sent."; an `api_unreachable`
+  or `api_error` with no check id from the server reads "No check id came back from the API." (`check_line`).
+
+Refutation-010 (5 Oct 2026):
+- G1: a typed refusal the API answered without a check id (the client marks it `detail.answered`) reads "The API
+  refused the request before a check started; the collected files were sent and not kept." The upload left the
+  runner, so "No check was sent." is kept for refusals raised in the runner.
+- Round 2 G1: the client marks which request the API answered (`detail.answered`: 'profiles', 'check' or 'poll').
+  A refusal of `GET /v1/profiles`, which comes before anything is collected (a wrong or revoked key, a rate limit),
+  reads "The API refused the request for the profile list before anything was collected; nothing from your system
+  was sent."; a refused poll reads "Check <id>. The check was sent; the API refused the poll for its result."
+  (`check_line`).
+- F1: a `bad_input` caused by a workflow input (fail-on, allow-partial, the artefacts path, another named input) shows
+  that input's next step under "What to do" (`next_step`); the envelope's `action` is unchanged.
 """
 from __future__ import annotations
 
@@ -76,6 +98,92 @@ def _extra_reason(row):
     equal on every verdict (contract section 5), and the summary would otherwise say each one twice."""
     reason = row.get('reason')
     return bool(reason) and str(reason) != str(row.get('status_text') or '')
+
+
+# The checker's bound text (assure/.../derive_observed.py): "domain bound exceeded (users 5 > 6 or databases 4 > 3)".
+_BOUND_RE = re.compile(r'domain bound exceeded \(([a-z_ ]+ [0-9]+ > [0-9]+(?: or [a-z_ ]+ [0-9]+ > [0-9]+)*)\)')
+_BOUND_PART_RE = re.compile(r'([a-z_ ]+?) ([0-9]+) > ([0-9]+)')
+
+
+def bound_gloss(reason):
+    """'in plain words: domain bound exceeded: databases 4 (cap 3)' for a checker reason that lists bound comparisons,
+    naming only the bounds whose count is over the cap; None when the reason lists none or none is exceeded."""
+    m = _BOUND_RE.search('' if reason is None else str(reason))
+    if m is None:
+        return None
+    over = []
+    for part in m.group(1).split(' or '):
+        p = _BOUND_PART_RE.fullmatch(part.strip())
+        if p and int(p.group(2)) > int(p.group(3)):
+            over.append('%s %s (cap %s)' % (p.group(1).strip(), p.group(2), p.group(3)))
+    return 'in plain words: domain bound exceeded: %s' % ', '.join(over) if over else None
+
+
+def _reason(reason):
+    """An escaped, bounded reason, with the bound gloss after it when it has one."""
+    gloss = bound_gloss(reason)
+    return esc(reason) + ('; %s' % esc(gloss) if gloss else '')
+
+
+MAX_WITNESSES = 5
+# The witness fields shown first, in this order; a witness with none of them shows its own scalar fields.
+_WITNESS_KEYS = ('path', 'command', 'outcome', 'old_row', 'new_row', 'role', 'capability', 'object', 'owner', 'reason')
+_FLAG_KEYS = frozenset({'execution_authorized', 'hardware_authorized', 'industrial_release_authorized',
+                        'physical_validation', 'release_allowed', 'self_approved', 'simulation'})
+
+
+def _scalar(v):
+    return isinstance(v, (str, int, float)) and not isinstance(v, bool)
+
+
+def _one_witness(w):
+    if _scalar(w):
+        return str(w)
+    if not isinstance(w, dict):
+        return None
+    items = [(k, w[k]) for k in _WITNESS_KEYS if _scalar(w.get(k))]
+    if not items:
+        items = [(k, v) for k, v in sorted(w.items(), key=lambda kv: str(kv[0]))
+                 if isinstance(k, str) and k not in _FLAG_KEYS and _scalar(v)][:6]
+    return ', '.join('%s %s' % (k.replace('_', ' '), v) for k, v in items) or None
+
+
+def witness_text(envelope, row):
+    """'witness: path postgres:direct, command SELECT, outcome allowed, ...' (or 'witnesses: a; b; and N more') for a
+    row from the obligation's `witnesses` list or `witness` object in the envelope's `readings`; None when there is
+    none. Never raises: a reading of another shape gives None."""
+    try:
+        rd = (envelope.get('readings') or {}).get(row.get('machine'))
+        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
+        obs = rd.get('obligations') if isinstance(rd, dict) else None
+        ob = None
+        if isinstance(obs, dict):
+            ob = obs.get(row.get('id'))
+        elif isinstance(obs, list):
+            ob = next((o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None)
+        if not isinstance(ob, dict):
+            return None
+        ws = ob.get('witnesses')
+        ws = ws if isinstance(ws, list) else ([ob['witness']] if isinstance(ob.get('witness'), dict) else [])
+        parts = [p for p in (_one_witness(w) for w in ws[:MAX_WITNESSES]) if p]
+        if not parts:
+            return None
+        more = len(ws) - MAX_WITNESSES
+        return '%s: %s%s' % ('witness' if len(ws) == 1 else 'witnesses', '; '.join(parts),
+                             '; and %d more' % more if more > 0 else '')
+    except (AttributeError, TypeError):
+        return None
+
+
+def _row_extra(env, r):
+    """The bracketed text after a row's status text: its reason when that adds something, or for a `fails` row with
+    no reason, its witness; None when neither."""
+    if _extra_reason(r):
+        return _reason(r.get('reason'))
+    if r.get('status') == 'fails':
+        w = witness_text(env, r)
+        return esc(w) if w else None
+    return None
 
 
 def _machines(env):
@@ -211,8 +319,9 @@ def summary_markdown(envelope):
         for r in group:
             where = esc(r.get('machine')) + (' ' + esc(r.get('id')) if r.get('id') is not None else '')
             line = '- %s: %s' % (where, esc(r.get('status_text')))
-            if _extra_reason(r):
-                line += ' (%s)' % esc(r.get('reason'))
+            extra = _row_extra(env, r)
+            if extra:
+                line += ' (%s)' % extra
             out.append(line)
     if machines is not None and machines.get('source') == 'inferred' and not machines['refused']:
         out += ['', 'The checker did not report which machines it refused; which machines were read is inferred from the '
@@ -223,7 +332,7 @@ def summary_markdown(envelope):
             out += ['The checker did not report which machines it refused; this list is inferred from the readings.', '']
         for r in machines['refused']:
             r = r if isinstance(r, dict) else {}
-            out.append('- %s: %s' % (esc(r.get('machine')), esc(r.get('reason'))))
+            out.append('- %s: %s' % (esc(r.get('machine')), _reason(r.get('reason'))))
     sc = _scope(env)
     if sc is not None and sc['refused']:
         out += ['', '### %s not %s' % (esc(str(sc.get('label') or 'units').capitalize()),
@@ -273,7 +382,10 @@ def annotations(envelope):
         title = 'Assure %s %s' % (label(r.get('status')), where)
         msg = str(r.get('status_text') or '')
         if _extra_reason(r):
-            msg += ' (%s)' % r.get('reason')
+            gloss = bound_gloss(r.get('reason'))
+            msg += ' (%s%s)' % (r.get('reason'), '; %s' % gloss if gloss else '')
+        elif r.get('status') == 'fails' and witness_text(envelope, r):
+            msg += ' (%s)' % witness_text(envelope, r)
         lines.append('::%s title=%s::%s' % (level, _cmd_prop(title), _cmd_data(msg)))
     return lines
 
@@ -300,15 +412,110 @@ def _malformation_line(m):
                                                        (' (%s)' % ', '.join(where)) if where else '', m.get('expected'))
 
 
+NOT_SENT = 'No check was sent.'
+NO_ID_BACK = 'No check id came back from the API.'
+API_REFUSED = 'The API refused the request before a check started; the collected files were sent and not kept.'
+PROFILES_REFUSED = ('The API refused the request for the profile list before anything was collected; nothing from '
+                    'your system was sent.')
+POLL_REFUSED = 'The check was sent; the API refused the poll for its result.'
+ANSWERED = ('profiles', 'check', 'poll')          # the request the API answered, as the client records it
+
+
+def check_line(failure_envelope):
+    """The last line of a failure page, from the request the API answered (`detail.answered`, set by the client):
+    - 'profiles' (`GET /v1/profiles`, before anything was collected): PROFILES_REFUSED;
+    - the server's check id came back (`detail.check_id` equals `check_id`): 'Check <id>.';
+    - 'poll' (`GET /v1/checks/{id}` refused without the id): 'Check <id>. ' + POLL_REFUSED, the id from the 202
+      (`detail.sent_check_id`), or POLL_REFUSED alone when it is not known;
+    - 'check' (`POST /v1/checks`, the upload left the runner): API_REFUSED;
+    - a delivery failure, or an `answered` mark this renderer does not know: NO_ID_BACK (the request may have left
+      the runner);
+    - no mark, a refusal in the runner before anything was sent: NOT_SENT."""
+    f = failure_envelope
+    cid = f.get('check_id')
+    detail = f.get('detail') if isinstance(f.get('detail'), dict) else {}
+    answered = detail.get('answered')
+    typed = f.get('outcome') not in ('api_unreachable', 'api_error')
+    if answered == 'profiles' and typed:
+        return PROFILES_REFUSED
+    if isinstance(cid, str) and cid and detail.get('check_id') == cid:
+        return 'Check %s.' % esc(cid)
+    if answered == 'poll' and typed:
+        sent = detail.get('sent_check_id')
+        if isinstance(sent, str) and re.fullmatch(r'[0-9a-f]{32}', sent) and sent == cid:
+            return 'Check %s. %s' % (sent, POLL_REFUSED)
+        return POLL_REFUSED
+    if answered == 'check' and typed:
+        return API_REFUSED
+    if not typed or 'answered' in detail:
+        return NO_ID_BACK
+    return NOT_SENT
+
+
+# Refutation-010 F1: a bad_input whose cause is a workflow input, not a file, gets a next step naming the input instead
+# of the files sentence. Matched on the fixed reason text the Action writes; the step is fixed text.
+_INPUT_STEPS = (
+    (re.compile(r'fail-on '), 'Set fail-on in the workflow step to a comma list of statuses (for example '
+                              'fails,deviates) or to never, then run again.'),
+    (re.compile(r'allow-partial '), 'Set allow-partial in the workflow step to true or false, then run again.'),
+    (re.compile(r'no raw/ directory under the artefacts path|the raw directory is a link or not a directory'),
+     'Point artefacts in the workflow step at the directory that holds raw/ (a path relative to the workspace, or '
+     'absolute), then run again.'),
+    (re.compile(r'(?:mode|output|api-url|api-key|data-dir|config-dirs|collection-role|collection-privileges'
+                r'|connection)\b|set exactly one of connection and artefacts|the user in the connection'
+                r'|local mode is not available'),
+     'Fix the workflow step input the reason names, then run again.'),
+)
+
+
+def next_step(failure_envelope):
+    """The 'What to do' text: the input's own step for a bad_input caused by a workflow input, else `action`."""
+    f = failure_envelope
+    detail = f.get('detail') if isinstance(f.get('detail'), dict) else {}
+    if f.get('outcome') == 'bad_input' and 'answered' not in detail:
+        reason = str(f.get('reason') or '')
+        for pattern, text in _INPUT_STEPS:
+            if pattern.match(reason):
+                return text
+    return f.get('action')
+
+
+# SELFHOSTED-001: a fixed next step for the connection errors a first run meets. Matched on the error text psql gives;
+# the hint itself is fixed text and never repeats a name from the reason.
+_HINTS = (
+    ('collector_cannot_connect', re.compile(r'permission denied for database'),
+     'Grant the collection role CONNECT on the database: GRANT CONNECT ON DATABASE <your database> TO <the collection '
+     'role>; (quick start section 2).'),
+    ('collector_cannot_connect', re.compile(r'no pg_hba\.conf entry'),
+     'Add a pg_hba.conf rule for the collection role from the runner\'s address, then reload the server (quick start '
+     'section 2).'),
+    ('collector_cannot_connect', re.compile(r'root certificate file|certificate verify failed'),
+     'sslmode=verify-full needs a server certificate the runner trusts: give it with sslrootcert=, or use '
+     'sslmode=require (quick start section 3).'),
+)
+
+
+def hint_line(failure_envelope):
+    """'Next step: ...' for a failure whose reason matches a known first-run error, or None."""
+    f = failure_envelope
+    reason = str(f.get('reason') or '')
+    for outcome, pattern, text in _HINTS:
+        if f.get('outcome') == outcome and pattern.search(reason):
+            return 'Next step: %s' % text
+    return None
+
+
 def failure_markdown(failure_envelope):
     f = failure_envelope
+    hint = hint_line(f)
     return '\n'.join(['## Assure: no reading', '',
                       'Outcome: %s.' % esc(f.get('outcome')), '',
                       'Reason: %s' % esc(f.get('reason')), '',
-                      'What to do: %s' % esc(f.get('action')), ''] +
+                      'What to do: %s' % esc(next_step(f)), ''] +
+                     ([esc(hint), ''] if hint else []) +
                      ([esc(_malformation_line(f['detail'].get('malformation'))), '']
                       if isinstance(f.get('detail'), dict) and _malformation_line(f['detail'].get('malformation'))
                       else []) +
-                     ['Check %s.' % esc(f.get('check_id'))]) + '\n'
+                     [check_line(f)]) + '\n'
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

@@ -5,7 +5,8 @@
   `passfile`), duplicates, control characters and oversize input are `bad_input`; an error never quotes a value.
 - `mask_commands`: the `::add-mask::` lines for every secret value, printed before anything else.
 - `verify_collector(dir)`: every file of `COLLECTOR-PIN.json` re-hashed, links refused, and the pinned `collect_pg.py`
-  equal to the frozen digest. Any difference is `engine_digest_mismatch`.
+  equal to the frozen digest, with the pin's `generation` the one bound to that digest. Any difference is
+  `engine_digest_mismatch`.
 - `check_config_dirs(text)`: the `config-dirs` input (line-break or colon separated directories holding configuration
   files outside the data directory) as resolved paths; each becomes one `--extra-root` argument item.
 - `collect(...)`: runs `collect_pg.py` as a child process with an argument list (never a shell), an explicit minimal
@@ -13,7 +14,8 @@
   ASSURE_COLLECTION_ROLE when the login name differs from the role; the collector adds PGOPTIONS itself), stdin closed, its own process group and a wall clock. Its output is captured to files, read bounded, and never
   echoed: only a typed outcome with a bounded, sanitised reason leaves this module. Exit 0 or 1: collected (gaps become
   `not observed` readings); exit 3: REFUSAL.json gives `collector_refused`, or `collector_cannot_connect` when the first
-  query could not reach the server; exit 2 or anything else: `checker_error`. The collector's `out/raw/*`,
+  query could not reach the server; exit 2 or anything else: `checker_error`. A refusal with a known next step
+  (`collection_role_mismatch` for a pooler login, `collection_role_not_least_privilege`) names it. The collector's `out/raw/*`,
   `out/COLLECTION-SIDECAR.json` and `out/TIMING.json` become `raw/...` names loaded through `bundle.from_directory`, so the
   bounds of an artefacts directory apply. `out/REDACTION-MANIFEST.json` stays beside raw/, where `from_directory` reads
   it as a runner-only record (never uploaded). Then `action/withhold.py` `apply` checks that the manifest binds the
@@ -24,16 +26,34 @@ The collector's `--psql` command is this file in `--psql-shim` mode in front of 
 a progress file and then replaces itself with psql, so on a wall-clock expiry the Action knows whether the collector was
 still on its first query (cannot connect) or later (timeout).
 
+The collector generation. COLLECTOR-PIN.json names it (`generation`), and the name is bound to the collector's digest
+(`COLLECTOR_GENERATIONS`; refutation 009, G1): `rf28` exactly when the pinned `collect_pg.py` is the RF-28 digest, where
+the field is mandatory, and `rf19` exactly when it is the RF-19 digest, where a pin without the field is `rf19` (the
+collector shipped up to this swap). Any other combination, a digest of no known generation included, is
+`engine_digest_mismatch` before anything runs, so an edited pin cannot select the RF-19 path for RF-28 bytes. `rf28` is
+the collector that writes a withheld rule or setting as a marker line, takes `--login-user` and records the session's
+read-only and TLS facts; it is the one this tree ships. The pin's `previous` block records the digests of the collector
+it replaced (a record only; nothing is verified against it).
+
 The login name and the collection role. `collection-role` is the role's name inside the database: the collector checks
 it against `current_user` and `session_user`, and that check is the authority. The connection's `user` is the login
 name. They differ behind a connection pooler that routes on the login name (Supabase's pooler logs in
-`<role>.<project-ref>` and the session's role is `<role>`). The frozen collector always runs psql with `-U <role>`, so
-when the two differ the Action sets ASSURE_LOGIN_USER (the login name) and ASSURE_COLLECTION_ROLE (the role) in the
-collector child's environment, never on a command line, and the shim replaces the value after the collector's one `-U`
-(which must be the role) with the login name. That is the shim's only change to psql's arguments: every other argument
-passes byte for byte, as an argument list, never through a shell. It removes those two variables from psql's
-environment and changes nothing else in it. Without ASSURE_LOGIN_USER the arguments pass unchanged. When the variable
-is set and the collector's arguments do not hold exactly one `-U <role>` before `-c`, psql is not run (exit 2).
+`<role>.<project-ref>` and the session's role is `<role>`).
+- `rf28`: the collector's own option. When the two differ the Action passes `--login-user <login name>` as one argument
+  item; the collector gives it to psql as `-U` and still checks `--role` against current_user and session_user. The
+  shim changes no argument and the collector child's environment carries no login variable.
+- `rf19`: that collector always runs psql with `-U <role>`, so when the two differ the Action sets ASSURE_LOGIN_USER
+  (the login name) and ASSURE_COLLECTION_ROLE (the role) in the collector child's environment, never on a command
+  line, and the shim replaces the value after the collector's one `-U` (which must be the role) with the login name.
+  That is the shim's only change to psql's arguments: every other argument passes byte for byte, as an argument list,
+  never through a shell. It removes those two variables from psql's environment and changes nothing else in it.
+  Without ASSURE_LOGIN_USER the arguments pass unchanged. When the variable is set and the collector's arguments do not
+  hold exactly one `-U <role>` before `-c`, psql is not run (exit 2).
+
+The granted roles. `rf28` accepts only pg_read_all_settings and pg_read_all_stats (it refuses pg_monitor and
+pg_stat_scan_tables before any read, exit 2, and a role that is a member of either, exit 3), so the Action refuses
+any other name in `collection-privileges` as `bad_input` before the collector runs. `rf19` also accepted pg_monitor and
+pg_stat_scan_tables.
 """
 from __future__ import annotations
 
@@ -99,7 +119,12 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'
+FROZEN_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'      # rf28
+RF19_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'        # the pin's `previous`
+RF19, RF28 = 'rf19', 'rf28'
+GENERATIONS = (RF19, RF28)
+# The generation each collector digest is (refutation 009, G1): the pin's `generation` must name it.
+COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF28, RF19_COLLECTOR_SHA256: RF19}
 COLLECTOR_DIR = Path(__file__).resolve().parent / 'collector'
 COLLECTOR = 'collect_pg.py'
 PIN_NAME = 'COLLECTOR-PIN.json'
@@ -113,7 +138,12 @@ DEFAULT_TIMEOUT = 300
 DEFAULT_CONNECT_TIMEOUT = '10'
 APP_NAME = 'assure-action'
 DEFAULT_PRIVILEGES = 'pg_read_all_settings,pg_read_all_stats'
-READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')
+READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')   # rf19
+LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28
+ROLES_BY_GENERATION = {RF19: READ_ONLY_ROLES, RF28: LEAST_PRIVILEGE_ROLES}
+# A collector refusal with a fixed next step (no customer text in it).
+NEXT_STEPS = {'collection_role_not_least_privilege': 'grant the collection role only pg_read_all_settings and '
+                                                     'pg_read_all_stats, and revoke the broader role'}
 ROLE_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,62}')       # the frozen collector's own --role rule
 # The login name: the role rule's characters, with room for a pooler's routing suffix after a role of 63 characters.
 LOGIN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}')
@@ -362,15 +392,13 @@ def _hash_regular(path, name):
         os.close(fd)
 
 
-def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
-    """Verify the collector directory against its COLLECTOR-PIN.json; return {collector_sha256, files}."""
-    d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
-    try:
-        st = os.lstat(d)
-    except OSError:
-        raise _mismatch('', 'the collector directory is missing') from None
-    if not stat.S_ISDIR(st.st_mode):
-        raise _mismatch('', 'the collector directory is a link or not a directory')
+def _hex_files(files):
+    return (isinstance(files, dict) and bool(files)
+            and all(isinstance(k, str) and NAME_RE.fullmatch(k) and isinstance(v, str)
+                    and re.fullmatch(r'[0-9a-f]{64}', v) for k, v in files.items()))
+
+
+def _read_pin(d):
     pin_path = d / PIN_NAME
     try:
         pst = os.lstat(pin_path)
@@ -382,18 +410,57 @@ def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
         doc = parse_json(pin_path.read_bytes())
     except Refusal:
         raise _mismatch(PIN_NAME, 'malformed') from None
-    ok = (isinstance(doc, dict) and set(doc) == {'schema', 'files', 'source', 'flags'} and doc['schema'] == PIN_SCHEMA
-          and doc['flags'] == FLAGS and isinstance(doc['files'], dict) and COLLECTOR in doc['files']
-          and all(isinstance(k, str) and NAME_RE.fullmatch(k) and isinstance(v, str)
-                  and re.fullmatch(r'[0-9a-f]{64}', v) for k, v in doc['files'].items()))
+    required, optional = {'schema', 'files', 'source', 'flags'}, {'generation', 'previous'}
+    prev = doc.get('previous') if isinstance(doc, dict) else None
+    ok = (isinstance(doc, dict) and required <= set(doc) <= required | optional and doc['schema'] == PIN_SCHEMA
+          and doc['flags'] == FLAGS and _hex_files(doc['files']) and COLLECTOR in doc['files']
+          and doc.get('generation', RF19) in GENERATIONS
+          and (prev is None or (isinstance(prev, dict) and prev.get('generation') in GENERATIONS
+                                and _hex_files(prev.get('files')) and set(prev) <= {'generation', 'files', 'source'})))
     if not ok:
         raise _mismatch(PIN_NAME, 'malformed')
+    return doc
+
+
+def _bound_generation(doc):
+    """The generation the pinned collector digest is, which the pin's `generation` must name (module docstring);
+    `engine_digest_mismatch` otherwise. A missing field is `rf19` only for the RF-19 digest."""
+    bound = COLLECTOR_GENERATIONS.get(doc['files'][COLLECTOR])
+    if bound is None:
+        raise _mismatch(COLLECTOR, 'the pin names a collector of no known generation')
+    named = doc.get('generation', RF19 if bound == RF19 else None)
+    if named != bound:
+        raise _mismatch(PIN_NAME, 'the generation does not match the collector digest')
+    return bound
+
+
+def pin_generation(collector_dir=None):
+    """The verified generation of the collector directory (`verify_collector`, without the frozen-digest test). A pin
+    that cannot be verified gives `rf28`, the stricter rule for the inputs; `collect` refuses that pin before anything
+    runs."""
+    try:
+        return verify_collector(collector_dir, frozen_sha256=None)['generation']
+    except Refusal:
+        return RF28
+
+
+def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
+    """Verify the collector directory against its COLLECTOR-PIN.json; return {collector_sha256, files, generation}."""
+    d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
+    try:
+        st = os.lstat(d)
+    except OSError:
+        raise _mismatch('', 'the collector directory is missing') from None
+    if not stat.S_ISDIR(st.st_mode):
+        raise _mismatch('', 'the collector directory is a link or not a directory')
+    doc = _read_pin(d)
     if frozen_sha256 is not None and doc['files'][COLLECTOR] != frozen_sha256:
         raise _mismatch(COLLECTOR, 'the pin does not name the frozen collector')
+    generation = _bound_generation(doc)
     for name in sorted(doc['files']):
         if _hash_regular(d / name, name) != doc['files'][name]:
             raise _mismatch(name, 'digest differs')
-    return {'collector_sha256': doc['files'][COLLECTOR], 'files': dict(doc['files'])}
+    return {'collector_sha256': doc['files'][COLLECTOR], 'files': dict(doc['files']), 'generation': generation}
 
 
 # ---------- inputs ----------
@@ -420,21 +487,40 @@ def check_role(role, conn):
     return role
 
 
-def login_env(conn, role):
-    """The collector child's extra environment for a login name that differs from the role: {} when they are equal or
-    the connection names no user. `bad_input` for a name outside its rule."""
+def _login_name(conn, role):
+    """The login name when it differs from the role, else None. `bad_input` for a name outside its rule."""
     user = conn.user if conn is not None else None
     if not user or user == role:
-        return {}
+        return None
     if not _plain_name(user, LOGIN_RE) or not _plain_name(role, ROLE_RE):
         raise Refusal('bad_input', 'the user in the connection or collection-role is outside the name rule')
-    return {LOGIN_ENV: user, ROLE_ENV: role}
+    return user
 
 
-def check_privileges(text):
+def login_env(conn, role):
+    """rf19: the collector child's extra environment for a login name that differs from the role (the shim's `-U`
+    rewrite): {} when they are equal or the connection names no user."""
+    user = _login_name(conn, role)
+    return {} if user is None else {LOGIN_ENV: user, ROLE_ENV: role}
+
+
+def login_args(conn, role):
+    """rf28: the collector's own `--login-user <login name>` argument items when the login name differs from the role;
+    [] when they are equal or the connection names no user."""
+    user = _login_name(conn, role)
+    return [] if user is None else ['--login-user', user]
+
+
+def check_privileges(text, generation=RF28):
+    """The `collection-privileges` input for the collector `generation`; `bad_input` for a repeat or a name that
+    collector does not accept."""
+    roles = ROLES_BY_GENERATION.get(generation, LEAST_PRIVILEGE_ROLES)
     items = [p.strip() for p in (text if text and text.strip() else DEFAULT_PRIVILEGES).split(',') if p.strip()]
-    if not items or len(set(items)) != len(items) or any(p not in READ_ONLY_ROLES for p in items):
-        raise Refusal('bad_input', 'collection-privileges must list, without repeats, only: %s' % ', '.join(READ_ONLY_ROLES))
+    if not items or len(set(items)) != len(items) or any(p not in roles for p in items):
+        broader = sorted(set(items) & (set(READ_ONLY_ROLES) - set(roles)))
+        raise Refusal('bad_input', 'collection-privileges must list, without repeats, only: %s%s' % (
+            ', '.join(roles), ('; the collector this Action ships refuses %s as broader than it needs'
+                               % ', '.join(broader)) if broader else ''))
     return ','.join(items)
 
 
@@ -568,7 +654,7 @@ def _refused(out, stdout_text, conn, rc, role=None):
     if not doc:
         return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc)
     text = sanitise('%s: %s' % (kind, reason or 'no reason given'), conn)
-    step = _pooler_step(kind, reason, conn, role)
+    step = _pooler_step(kind, reason, conn, role) or NEXT_STEPS.get(kind, '')
     if step:                                   # the next step is kept whole; the collector's reason gives way
         step = sanitise(step, conn)            # 'collector_refused: ' precedes it in the 300-character ::error line
         room = max(REASON_CAP - len('collector_refused: ') - len(step) - 2, 40)
@@ -605,9 +691,13 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
             limits=LIMITS):
     """Verify and run the collector into `scratch`; return the bundle (`bundle.Collected`). Every fault is a Refusal."""
     d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
-    verify_collector(d, frozen_sha256)
+    generation = verify_collector(d, frozen_sha256)['generation']
     env = child_env(conn, path=path)
-    env.update(login_env(conn, role))               # only when the login name differs from the role
+    if generation == RF28:                          # the collector's own option, one argument item
+        login = login_args(conn, role)
+    else:                                           # rf19: the shim's -U rewrite, out of band
+        login = []
+        env.update(login_env(conn, role))           # only when the login name differs from the role
     path = path or '/usr/bin:/bin'
     psql_path = resolve_psql(psql, path)
     scratch = Path(scratch)
@@ -622,6 +712,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
             '--data-dir', str(data_dir), '--psql', shim]
     for root in extra_roots:                        # config-dirs: each one argument item, never through a shell
         argv += ['--extra-root', str(root)]
+    argv += login
     with open(stdout_p, 'wb') as so, open(stderr_p, 'wb') as se:
         proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=so, stderr=se,
                                 cwd=str(scratch), start_new_session=True, close_fds=True)

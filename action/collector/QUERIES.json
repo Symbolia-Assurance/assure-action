@@ -51,6 +51,28 @@
       "purpose": "the grants actually provisioned to the collection role (compared with --privileges in the sidecar)"
     },
     {
+      "id": "session_settings",
+      "key": null,
+      "views": [],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT json_build_object('transaction_read_only', pg_catalog.current_setting('transaction_read_only'), 'default_transaction_read_only', pg_catalog.current_setting('default_transaction_read_only'), 'client_addr', pg_catalog.inet_client_addr()::text)",
+      "purpose": "session fact, observed only: the effective read-only settings and the client address of this session (a failure is a recorded gap, never a refusal)"
+    },
+    {
+      "id": "session_tls",
+      "key": null,
+      "views": [
+        "pg_stat_ssl"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "control",
+      "sql": "SELECT json_build_object('row', (SELECT json_build_object('ssl', s.ssl, 'version', s.version, 'cipher', s.cipher, 'bits', s.bits) FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()))",
+      "purpose": "session fact, observed only: this backend's own pg_stat_ssl row, row null when the backend has none (a failure is a recorded gap, never a refusal)"
+    },
+    {
       "id": "file_locations",
       "key": null,
       "views": [
@@ -93,8 +115,8 @@
       "min_major": 14,
       "max_major": 18,
       "target": "catalog_snapshot",
-      "sql": "SELECT coalesce(json_agg(json_build_object('rolname', r.rolname::text, 'rolsuper', r.rolsuper, 'rolinherit', r.rolinherit, 'rolcreaterole', r.rolcreaterole, 'rolcreatedb', r.rolcreatedb, 'rolreplication', r.rolreplication, 'rolbypassrls', r.rolbypassrls, 'rolcanlogin', r.rolcanlogin, 'rolconnlimit', r.rolconnlimit, 'rolvaliduntil', r.rolvaliduntil) ORDER BY r.rolname), '[]'::json) FROM pg_catalog.pg_roles r",
-      "purpose": "roles (pg_roles; the password column is never selected)"
+      "sql": "SELECT coalesce(json_agg(json_build_object('rolname', r.rolname::text, 'rolsuper', r.rolsuper, 'rolinherit', r.rolinherit, 'rolcreaterole', r.rolcreaterole, 'rolcreatedb', r.rolcreatedb, 'rolreplication', r.rolreplication, 'rolbypassrls', r.rolbypassrls, 'rolcanlogin', r.rolcanlogin, 'rolconnlimit', r.rolconnlimit, 'rolvaliduntil', r.rolvaliduntil, 'bootstrap', r.oid = 10) ORDER BY r.rolname), '[]'::json) FROM pg_catalog.pg_roles r",
+      "purpose": "roles (pg_roles; the password column is never selected; bootstrap marks the bootstrap superuser, oid 10; RF-24 (b))"
     },
     {
       "id": "memberships_14_15",
@@ -239,27 +261,27 @@
     },
     {
       "id": "subscriptions_14_15",
-      "key": "subscriptions",
+      "key": "subscriptions_observed",
       "views": [
         "pg_subscription"
       ],
       "min_major": 14,
       "max_major": 15,
       "target": "catalog_snapshot",
-      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subconninfo', s.subconninfo, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
-      "purpose": "subscriptions, majors 14-15 (subconninfo password stripped before retention)"
+      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
+      "purpose": "subscriptions, majors 14-15 (subconninfo is never selected; RF-24 (a))"
     },
     {
       "id": "subscriptions_16_18",
-      "key": "subscriptions",
+      "key": "subscriptions_observed",
       "views": [
         "pg_subscription"
       ],
       "min_major": 16,
       "max_major": 18,
       "target": "catalog_snapshot",
-      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subconninfo', s.subconninfo, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname, 'subpasswordrequired', s.subpasswordrequired, 'subrunasowner', s.subrunasowner) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
-      "purpose": "subscriptions, majors 16-18 (subconninfo password stripped before retention)"
+      "sql": "SELECT coalesce(json_agg(json_build_object('subname', s.subname, 'subowner', pg_catalog.pg_get_userbyid(s.subowner), 'subenabled', s.subenabled, 'subslotname', s.subslotname, 'subsynccommit', s.subsynccommit, 'subpublications', s.subpublications, 'database', d.datname, 'subpasswordrequired', s.subpasswordrequired, 'subrunasowner', s.subrunasowner) ORDER BY s.subname), '[]'::json) FROM pg_catalog.pg_subscription s LEFT JOIN pg_catalog.pg_database d ON d.oid = s.subdbid",
+      "purpose": "subscriptions, majors 16-18 (subconninfo is never selected; RF-24 (a))"
     },
     {
       "id": "subscription_rels",
@@ -284,7 +306,7 @@
       "min_major": 14,
       "max_major": 18,
       "target": "catalog_snapshot",
-      "sql": "SELECT coalesce(json_agg(json_build_object('name', s.name, 'setting', s.setting, 'unit', s.unit, 'source', s.source, 'sourcefile', s.sourcefile, 'sourceline', s.sourceline, 'boot_val', s.boot_val, 'reset_val', s.reset_val, 'pending_restart', s.pending_restart) ORDER BY s.name), '[]'::json) FROM pg_catalog.pg_settings s WHERE s.name IN ('authentication_timeout', 'config_file', 'data_directory', 'hba_file', 'hot_standby', 'ident_file', 'krb_server_keyfile', 'listen_addresses', 'log_connections', 'max_replication_slots', 'max_slot_wal_keep_size', 'max_wal_senders', 'password_encryption', 'port', 'primary_conninfo', 'primary_slot_name', 'row_security', 'search_path', 'session_preload_libraries', 'shared_preload_libraries', 'ssl', 'ssl_ca_file', 'ssl_cert_file', 'ssl_crl_file', 'ssl_key_file', 'ssl_max_protocol_version', 'ssl_min_protocol_version', 'ssl_passphrase_command', 'synchronous_commit', 'synchronous_standby_names', 'wal_keep_size', 'wal_level')",
+      "sql": "SELECT coalesce(json_agg(json_build_object('name', s.name, 'setting', s.setting, 'unit', s.unit, 'source', s.source, 'sourcefile', s.sourcefile, 'sourceline', s.sourceline, 'boot_val', s.boot_val, 'reset_val', s.reset_val, 'pending_restart', s.pending_restart) ORDER BY s.name), '[]'::json) FROM pg_catalog.pg_settings s WHERE s.name IN ('authentication_timeout', 'config_file', 'data_directory', 'hba_file', 'hot_standby', 'ident_file', 'krb_server_keyfile', 'listen_addresses', 'log_connections', 'max_replication_slots', 'max_slot_wal_keep_size', 'max_wal_senders', 'password_encryption', 'port', 'primary_conninfo', 'primary_slot_name', 'row_security', 'search_path', 'session_preload_libraries', 'shared_preload_libraries', 'ssl', 'ssl_ca_file', 'ssl_cert_file', 'ssl_crl_file', 'ssl_key_file', 'ssl_max_protocol_version', 'ssl_min_protocol_version', 'ssl_passphrase_command', 'synchronous_commit', 'synchronous_standby_names', 'unix_socket_directories', 'unix_socket_group', 'unix_socket_permissions', 'wal_keep_size', 'wal_level')",
       "purpose": "settings with source, sourcefile and sourceline for the fixed setting list"
     },
     {

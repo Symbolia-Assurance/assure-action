@@ -49,12 +49,12 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 | Input | Default | Meaning |
 |---|---|---|
 | `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
-| `api-url` | `https://api.symbolia.ai` | The API address. It must use `https://`. |
+| `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
 | `mode` | `api` | `api`: the check runs on the Assure API. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
 | `connection` | none | A libpq connection string or URI. Pass it from a secret. |
 | `artefacts` | none | A directory of collected files. Use this or `connection`, never both. |
-| `collection-role` | none | The name of the collection role. It must match the user in `connection`. |
+| `collection-role` | the user in `connection` | The role's name inside the database. Set it when a connection pooler's login name differs. |
 | `collection-privileges` | `pg_read_all_settings,pg_read_all_stats` | The roles you granted to the collection role. |
 | `data-dir` | none | Where the runner can read the server's data directory. Used with `connection`. |
 | `config-dirs` | none | Directories outside the data directory that hold configuration files. Used with `connection`. |
@@ -83,6 +83,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 
 ## Read more
 
+- [Beta tester brief: one page for your first run](docs/BETA-TESTER-BRIEF.md)
 - [Full quickstart](docs/QUICKSTART-ACTION.md)
 - [What a verdict claims](docs/SCOPE.md)
 - [Reading a verdict](docs/VERDICTS.md)

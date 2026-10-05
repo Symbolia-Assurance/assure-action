@@ -1,20 +1,28 @@
 # Quickstart: the Assure GitHub Action
 
+> **First run checklist.** Tick all five before the first run.
+>
+> - [ ] The collection role exists, with `CONNECT` on your database (section 2).
+> - [ ] The runner can read the server's configuration files, or has copies it can read (section 6). Managed PostgreSQL: skip this line.
+> - [ ] The connection string works from the runner: `psql '<the connection string>' -c 'SELECT current_user'` prints `assure_collector` (section 3).
+> - [ ] The API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
+> - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
+
 **Served today:** both PostgreSQL profiles. The intent-free profile, `postgresql-observed-baseline`, needs no declaration. `postgresql-declared-model` needs a declaration file in an artefacts directory (section 9).
 
 The Action collects facts about your PostgreSQL server in your own GitHub Actions runner. It sends the collected facts to `api.symbolia.ai` over TLS, with your API key. The check runs on Symbolia's server. The Action writes the verdict the server returns, the job summary and the annotations in your runner.
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence exists for PostgreSQL 18.
 
-**Not yet checkable with the collector this Action ships:** a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) stops the check today with exit 3 (`collector_refused`). PostgreSQL needs quotes around a role or database name with a hyphen or an upper-case letter, so this is not rare. The collector withholds such a rule whole, and Assure cannot read it. The message names the file and the line. What you can do today: remove quotes a name does not need; write an `@file` list's names inline; use a `+group` role in place of a list; list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted.
+**Rules the collector keeps, and rules it withholds.** The collector this Action ships keeps a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) as written, and the check reads it. A rule or setting it still has to withhold, such as a rule with an unclosed quote, becomes a marker line that names its own line number and reason. The check reads that rule or setting as not observed, and the summary lists it as `not observed: <file> line N (<the reason in plain words>)`.
 
-These refusals go away once you collect with the next collector (RF-28). It keeps such rules as written, and writes any rule or setting it still has to withhold as a marker line that names its own line number and reason. The check then reads that rule or setting as not observed, and the summary lists it as `not observed: <file> line N (<the reason in plain words>)`. This Action version still ships the earlier collector, until the next one is accepted, so today these refusals still happen.
+Files collected earlier with the earlier collector, given as `artefacts`, still stop at such a rule with exit 3 (`collector_refused`): that collector withheld it whole, and Assure cannot read it. The message names the file and the line. Collect again with this Action. If you cannot: remove quotes a name does not need; write an `@file` list's names inline; use a `+group` role in place of a list; list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted.
 
 ## What is sent, and what is never read
 
 The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. What leaves the runner:
 
-- settings and rules as written, without comment text: every comment in your configuration files, including commented-out settings, is replaced in the runner with `# <withheld comment>`, and every line keeps its place. A line PostgreSQL cannot parse (an unclosed quote) becomes `<withheld: a line PostgreSQL cannot parse>`, which the check still counts as a broken line; if the check would read it as a working setting or rule, the Action stops, exits 2 (`bad_input`) and names the file and the line, and you fix the line and run again. A `pg_hba.conf` rule or `postgresql.conf` setting the collector had to withhold whole, such as a rule with a quoted or `@file` name, stops the upload with exit 3 (`collector_refused`): that shape cannot be checked yet with the collector this Action ships. With the next collector (RF-28), such a line is a marker the check reads as not observed, and the summary lists it as `not observed: <file> line N (<reason>)`; a marker whose line number is not its own, or whose reason is not one the collector writes, stops the upload with exit 2 (`bad_input`), and a collection that mixes the two collectors' output stops with exit 3 (`collector_refused`). The collector's record of which lines it withheld (`COLLECTION-SIDECAR.json`) must come with its output, with the `REDACTION-MANIFEST.json` from the same run: without them, a file that holds a withheld line cannot be checked, and the upload stops the same way;
+- settings and rules as written, without comment text: every comment in your configuration files, including commented-out settings, is replaced in the runner with `# <withheld comment>`, and every line keeps its place. A line PostgreSQL cannot parse (an unclosed quote) becomes `<withheld: a line PostgreSQL cannot parse>`, which the check still counts as a broken line; if the check would read it as a working setting or rule, the Action stops, exits 2 (`bad_input`) and names the file and the line, and you fix the line and run again. A `pg_hba.conf` rule or `postgresql.conf` setting the collector had to withhold whole is a marker line the check reads as not observed, and the summary lists it as `not observed: <file> line N (<reason>)`. A marker whose line number is not its own, or whose reason is not one the collector writes, stops the upload with exit 2 (`bad_input`), and a collection that mixes this collector's output with the earlier collector's stops with exit 3 (`collector_refused`). In files from the earlier collector, a rule or setting that collector withheld whole stops the upload with exit 3 (`collector_refused`) (section 9). The collector's record of which lines it withheld (`COLLECTION-SIDECAR.json`) must come with its output, with the `REDACTION-MANIFEST.json` from the same run: without them, a file that holds a withheld line cannot be checked, and the upload stops the same way;
 - policy expressions with every string literal withheld: each quoted literal becomes `'<withheld literal N>'` in the runner, and so does each literal in your declaration's `declared_predicate`;
 - no secret-bearing value: the collector withholds every one whole before anything is written, and checks its own output for those values.
 
@@ -53,15 +61,24 @@ Run this as a superuser or a role that can create roles:
 CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
   PASSWORD '<choose a long random password>';
 GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;
+GRANT CONNECT ON DATABASE <your database> TO assure_collector;
+```
+
+The `CONNECT` grant matters when your database revokes `CONNECT` from `PUBLIC` (for example `REVOKE ALL ON DATABASE <your database> FROM PUBLIC`). Without it, the first run stops with `collector_cannot_connect` and the reason `permission denied for database`. Where `PUBLIC` still has `CONNECT`, the grant changes nothing.
+
+Then allow the role to log in from the runner. Add a line to `pg_hba.conf` and reload the server:
+
+```
+host  <your database>  assure_collector  <the runner's address>/32  scram-sha-256
 ```
 
 Rules for this role:
 
 - Create a new role. Use it for nothing else. The checker leaves the collection role out of every reading, so a role your site also uses would hide its own results.
-- Grant it only these two roles, or `pg_monitor` alone where they cannot be granted (section 6). The collector refuses to run if the role is a superuser, has `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, or belongs to any other role.
+- Grant it only these two roles. The collector refuses a broader role: `pg_monitor` or `pg_stat_scan_tables` in `collection-privileges` stops the Action with exit 2 (`bad_input`) before anything runs, and a role that belongs to either stops it with exit 3 (`collector_refused`). The collector also refuses to run if the role is a superuser, has `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, or belongs to any other role.
 - Allow it to log in through `pg_hba.conf` from the runner's address.
 
-The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way.
+The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so (section 8).
 
 ## 3. Store the connection as a secret
 
@@ -71,8 +88,22 @@ Add a second repository secret:
 - Value: a libpq connection string or URI, for example:
 
   ```
-  host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=verify-full
+  host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=require
   ```
+
+`sslmode=require` encrypts the connection but does not check the server's certificate. It works with the self-signed certificate that the Debian and Ubuntu packages set up. `sslmode=verify-full` also checks that the certificate is signed by an authority the runner trusts and names the host you connect to. It is the stronger choice. It needs a certificate the runner trusts: a self-signed server certificate fails it. Give the authority's certificate with `sslrootcert`:
+
+  ```
+  host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=verify-full sslrootcert=/path/to/root.crt
+  ```
+
+Test the string from the runner before the first run. Leave the password out and type it at the prompt, so it stays out of your shell history:
+
+  ```
+  psql 'host=db.example.internal port=5432 dbname=app user=assure_collector sslmode=require' -c 'SELECT current_user'
+  ```
+
+It prints `assure_collector`. If it does not, the Action cannot connect either.
 
 The Action passes the connection to `psql` through environment variables. The connection stays in your runner: it is never sent to the API, put on a command line or logged.
 
@@ -129,18 +160,33 @@ This workflow uses the intent-free profile, which needs no declaration. To check
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
+## Reading your first result
+
+The first line of the job summary, and the Action's last log line, says how much was read: "N of 8 machines read, M refused". A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason.
+
+Exit 3 means one of two things:
+
+- nothing was checked: the summary says "No verdicts", or a typed outcome stopped the check before any reading;
+- a machine was refused. The claim of a check is about the whole system, so a run that read only part of it does not meet the policy by default.
+
+If you accept a partial read, set `allow-partial: true`. A run with refused machines then exits 0 when no reading has a status you fail on, and 1 when one has.
+
+Under the first line, the summary lists every reading under its status, each with its text: why it holds, why it fails, or what could not be read. The verdict file holds the same readings with their premises ([VERDICTS.md](VERDICTS.md)). The Action keeps it at the `output` path; the workflow above uploads it as the `assure-verdict` artifact.
+
+If a reading looks wrong, send Symbolia, through your Symbolia contact, the check id (the line under the heading: "Profile ..., check <id>."), the first line, and the summary text of that reading. Never send your configuration files or your connection string.
+
 ## 5. Inputs
 
 | Input | Default | Meaning |
 |---|---|---|
 | `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
-| `api-url` | `https://api.symbolia.ai` | The API address. It must use `https://`. |
+| `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
 | `mode` | `api` | `api`: the check runs on the Assure API. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
 | `connection` | none | libpq connection string or URI. Pass it from a secret. |
 | `artefacts` | none | A directory of collected files. Use this or `connection`, never both. |
 | `collection-role` | the user in `connection` | The role's name inside the database. The collector checks it against `current_user`. Set it when a connection pooler's login name differs (section 6). |
-| `collection-privileges` | `pg_read_all_settings,pg_read_all_stats` | The roles you granted to the collection role. |
+| `collection-privileges` | `pg_read_all_settings,pg_read_all_stats` | The roles you granted to the collection role: one or both of these two. |
 | `data-dir` | none | A path where the runner can read the server's data directory. Used with `connection`. |
 | `config-dirs` | none | Directories that hold the server's configuration files outside the data directory, one per line or separated by colons. Used with `connection`. |
 | `fail-on` | `fails` | Which statuses fail the job (section 7). The API checks it against the profile and applies it. |
@@ -160,13 +206,56 @@ To read the files, run the Action on a self-hosted runner that can read them:
 - `config-dirs`: directories that hold configuration files outside the data directory. The Debian and Ubuntu packages keep them in `/etc/postgresql/<major>/<cluster>`:
 
   ```yaml
-          data-dir: /var/lib/postgresql/16/main
-          config-dirs: /etc/postgresql/16/main
+          data-dir: /var/lib/postgresql/18/main
+          config-dirs: /etc/postgresql/18/main
   ```
 
   Give one directory per line, or separate them with colons. A path that holds a colon cannot be given here.
 
 The collector reads files only inside `data-dir` and `config-dirs`.
+
+The collector does not copy some include targets. It records each one as "not copied", and the readings that need it read **not observed** or **representation**. These are an absolute `include_dir` in `postgresql.conf`, any absolute include in `pg_hba.conf` or `pg_ident.conf` (an `include`, `include_if_exists` or `include_dir` line on PostgreSQL 16 and later, or an `@file` name), and a relative include that leads above the directory of the main file (`postgresql.conf`, `pg_hba.conf` or `pg_ident.conf`). An absolute `include` or `include_if_exists` in `postgresql.conf` is copied.
+
+### Letting the runner read the server's configuration files
+
+The collector asks the server where each file is (`config_file`, `hba_file`, `ident_file`, `data_directory`) and reads each file at that path. One path is moved: a file inside the server's data directory is read from `data-dir` instead. A file outside the data directory, such as Debian's `/etc/postgresql/18/main/pg_hba.conf`, is read at the server's own path, which must lie inside `config-dirs`.
+
+By default the runner cannot read these files. The data directory is mode 0700, and `pg_hba.conf` and `pg_ident.conf` are 0640, owned by `postgres`. There are three ways forward. The examples use Debian or Ubuntu, PostgreSQL 18 and a runner user named `runner`.
+
+**(a) Run on the database host, with the runner in the `postgres` group.** Put the data directory in PostgreSQL's group-access mode (the same as `initdb --allow-group-access`), with the server stopped, and add the runner user to the group:
+
+```
+sudo systemctl stop postgresql@18-main
+sudo chmod 0750 /var/lib/postgresql/18/main
+sudo chmod -R g+rX /var/lib/postgresql/18/main
+sudo systemctl start postgresql@18-main
+sudo usermod -aG postgres runner
+```
+
+Restart the runner service so the new group applies. With the data directory at 0750 when the server starts, PostgreSQL writes `postgresql.auto.conf` and `postmaster.opts` group-readable (0640) from then on; `pg_hba.conf` and `pg_ident.conf` are already 0640 `postgres:postgres`. Inputs: `data-dir: /var/lib/postgresql/18/main` and `config-dirs: /etc/postgresql/18/main`. This gives every file, always current. The cost: the group also reads every table file in the data directory. Prefer (b).
+
+**(b) Give the runner copies, or read access to these files only.** Copy the files inside the data directory to a directory the runner reads, and pass it as `data-dir`. Leave the files under `/etc` where they are, and give the runner read access to the two that it cannot read:
+
+```
+sudo install -d -m 0750 -o root -g runner /srv/assure-pgdata
+sudo install -p -m 0640 -o root -g runner /var/lib/postgresql/18/main/postgresql.auto.conf /var/lib/postgresql/18/main/postmaster.opts /srv/assure-pgdata/
+sudo setfacl -m u:runner:r /etc/postgresql/18/main/pg_hba.conf /etc/postgresql/18/main/pg_ident.conf
+```
+
+Inputs: `data-dir: /srv/assure-pgdata` and `config-dirs: /etc/postgresql/18/main`. In the Debian layout, `postgresql.conf` and the `conf.d` include directory are usually readable by every user; check with `ls -l`. `-p` keeps each copy's modification time. The runner reads these configuration files and nothing else. The cost: the copies go stale. Copy again after `ALTER SYSTEM` (which rewrites `postgresql.auto.conf`) and after a server restart (which rewrites `postmaster.opts`), and set the ACL again if an editor replaces `pg_hba.conf`. Copying the files to some other directory and naming it in `config-dirs` does not work: the collector looks for each file at the path the server reports.
+
+For a runner on another host, put the copies at the same paths the server uses, and the data-directory files in the `data-dir` copy. Run this on the runner host, in a directory that holds copies of the server's files:
+
+```
+sudo install -d -m 0750 -o root -g runner /etc/postgresql/18/main /etc/postgresql/18/main/conf.d /srv/assure-pgdata
+sudo install -p -m 0640 -o root -g runner postgresql.conf pg_hba.conf pg_ident.conf /etc/postgresql/18/main/
+sudo install -p -m 0640 -o root -g runner conf.d/*.conf /etc/postgresql/18/main/conf.d/
+sudo install -p -m 0640 -o root -g runner postgresql.auto.conf postmaster.opts /srv/assure-pgdata/
+```
+
+When the server keeps every configuration file in its data directory (the layout `initdb` writes), copy all of them, with any include directory at its relative path, into the `data-dir` copy, and leave out `config-dirs`.
+
+**(c) Managed PostgreSQL.** The runner has no access to the server's files. Leave out `data-dir` and `config-dirs`. Every reading that needs a file reads **not observed** or **representation**, with the file named. The readings from the catalog still come back.
 
 ### Managed PostgreSQL and connection poolers
 
@@ -177,21 +266,11 @@ Some managed services put a connection pooler in front of the server, and the po
 
 When the two differ, the Action logs in with the login name and the collector checks the role. If you leave `collection-role` unset behind such a pooler, the collector refuses with `collection_role_mismatch` (`collector_refused`, exit 3), and the reason says which name to set.
 
-On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. Create the role as in section 2, grant `pg_monitor` in their place, and say so in `collection-privileges`:
-
-```sql
-GRANT pg_monitor TO assure_collector;
-```
-
-```yaml
-          connection: ${{ secrets.ASSURE_PG_CONNECTION }}
-          collection-role: assure_collector
-          collection-privileges: pg_monitor
-```
+On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. It can grant `pg_monitor`, and the collector this Action ships refuses `pg_monitor` as broader than it needs (section 2). So this Action version cannot collect from a Supabase database.
 
 Use the session pooler. Assure has run through Supabase's session pooler on port 5432. The collector runs each query in its own `psql` process, one short session per query; a transaction pooler has not been tested.
 
-The collector asks for a read-only session. A pooler may not pass the request on: through Supabase's session pooler the session was not read-only. The collector runs only fixed SELECT statements either way.
+The collector asks for a read-only session. A pooler may not pass the request on: through Supabase's session pooler the session was not read-only. The collector runs only fixed SELECT statements either way. The job summary states whether the session was read-only (section 8).
 
 The runner cannot read a managed server's configuration files, so the readings that need them read **not observed** or **representation**, as above.
 
@@ -246,7 +325,11 @@ The Action sets three outputs: `verdict-path`, `outcome` and `exit-code`.
 ## 8. Where the results appear
 
 - **The verdict file.** JSON at the `output` path, schema `assure.serve.verdict/v1`. It holds every reading with its premises. See [VERDICTS.md](VERDICTS.md).
-- **The job summary.** A table of counts by status, then one line per obligation. It appears on the run page.
+- **The job summary.** A table of counts by status, then one line per obligation. It appears on the run page. When the collector recorded the collection session, the summary ends with two lines, as the server reported them for that session:
+  - `The collection session was read-only: yes`, `no` or `not recorded`;
+  - `TLS to the server: yes (<protocol>, <cipher>, <bits> bits)`, `no` or `not recorded`.
+
+  Behind a connection pooler they describe the pooler's session to the server, not your runner's connection to the pooler. The job log carries the same two lines.
 - **Annotations.** Each `fails` reading is an error annotation. Each `deviates` reading is a warning annotation. At most 50 appear.
 
 When no obligation reaches a verdict, the summary headline reads "No verdicts" and the job stops with exit 3. That means nothing could be checked. It never means "no issues".
@@ -259,9 +342,9 @@ You can collect on one machine and check from another. Set `artefacts` to a dire
 
 The directory must hold files under the names the profile reads. The API lists them for each profile (`GET /v1/profiles`). Files with other names stay in the runner and are listed in a notice. A symbolic link at an expected name is refused.
 
-Give the collector's output directory as it wrote it. The collector writes `raw/` and, beside it, `COLLECTION-SIDECAR.json` and `TIMING.json`. The Action takes those two files from beside `raw/` (or from inside `raw/`, if you moved them there) and sends them as `raw/COLLECTION-SIDECAR.json` and `raw/TIMING.json`. If both places hold a copy and the copies differ, the Action stops with `bad_input`. Do not leave out `COLLECTION-SIDECAR.json`: it is the collector's record of which lines it withheld whole and why. A configuration file that holds a line the collector withheld (`# [collect_pg: line withheld, ...]`) cannot be checked without it, so the Action stops with `collector_refused` and sends nothing: a collector output without its sidecar cannot be checked.
+Give the collector's output directory as it wrote it. The collector writes `raw/` and, beside it, `COLLECTION-SIDECAR.json` and `TIMING.json`. The Action takes those two files from beside `raw/` (or from inside `raw/`, if you moved them there) and sends them as `raw/COLLECTION-SIDECAR.json` and `raw/TIMING.json`. If both places hold a copy and the copies differ, the Action stops with `bad_input`. Do not leave out `COLLECTION-SIDECAR.json`: it is the collector's record of which lines it withheld whole and why. A configuration file that holds a line the earlier collector withheld (`# [collect_pg: line withheld, ...]`) cannot be checked without it, so the Action stops with `collector_refused` and sends nothing: a collector output without its sidecar cannot be checked.
 
-Keep `REDACTION-MANIFEST.json` too. The collector writes it beside `raw/` in the same run as the sidecar. It records the digest of each file as the collector wrote it, and what the collector withheld. When a file holds a withheld line, the Action uses it in the runner to check that the sidecar belongs to these files: the file must be unchanged since collection, and the manifest and the sidecar must record the same withheld lines. If the manifest is missing, records a different digest for such a file, or disagrees with the sidecar, the Action stops with `collector_refused` and sends nothing. Records from another run are caught only when a file that holds a withheld line differs, byte for byte, from that run's file. Records kept from an earlier run of the same server pass if the withheld lines sit at the same places with the same marker, even where a line that was a comment is now a rule. So always use the sidecar and manifest written by the same collector run as `raw/`. The manifest stays in your runner; it is never sent. With the next collector (RF-28), a withheld rule or setting is a marker line that names its own line number and reason, so records from another run cannot hide it: the check reads that line as not observed whatever the records say. That collector's sidecar is recognised by its own fields; a collection that mixes its output with the earlier collector's stops with `collector_refused`.
+Keep `REDACTION-MANIFEST.json` too. The collector writes it beside `raw/` in the same run as the sidecar. It records the digest of each file as the collector wrote it, and what the collector withheld. When a file holds a withheld line, the Action uses it in the runner to check that the sidecar belongs to these files: the file must be unchanged since collection, and the manifest and the sidecar must record the same withheld lines. If the manifest is missing, records a different digest for such a file, or disagrees with the sidecar, the Action stops with `collector_refused` and sends nothing. Records from another run are caught only when a file that holds a withheld line differs, byte for byte, from that run's file. Records kept from an earlier run of the same server pass if the withheld lines sit at the same places with the same marker, even where a line that was a comment is now a rule. So always use the sidecar and manifest written by the same collector run as `raw/`. The manifest stays in your runner; it is never sent. With the collector this Action ships, a withheld rule or setting is a marker line that names its own line number and reason, so records from another run cannot hide it: the check reads that line as not observed whatever the records say. That collector's sidecar is recognised by its own fields; a collection that mixes its output with the earlier collector's stops with `collector_refused`. The earlier collector withheld a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user whole, so its files stop there with `collector_refused`; collect again with this Action.
 
 Line continuation in `pg_hba.conf` (a line ending in `\`) depends on the server's major version. If `raw/declaration.json` gives a major on the other side of 16 from the one the sidecar records, and a `pg_hba.conf` line ends in `\`, the Action stops with `bad_input`. Set the declaration's `major` to the server's major.
 
@@ -281,9 +364,18 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
 
 When the Action cannot produce a verdict, it writes a failure file at the `output` path (schema `assure.serve.failure/v1`) with `outcome`, `reason` and `action`. It also writes the reason to the job summary and one error annotation. When the API gave a check id, the failure file carries it.
 
+The last line of the summary says what left your runner:
+
+- "No check was sent." The Action stopped in your runner. Nothing was sent.
+- "The API refused the request for the profile list before anything was collected; nothing from your system was sent." The Action asks the API for the profile list first. A wrong or revoked key, or a rate limit, is refused there, before the Action collects or sends anything.
+- "The API refused the request before a check started; the collected files were sent and not kept."
+- "Check <id>. The check was sent; the API refused the poll for its result."
+- "Check <id>." The check reached the server. Report this id to Symbolia.
+- "No check id came back from the API." The request may have left your runner; no check id came back.
+
 | Outcome | Exit | What it means | What to do |
 |---|---|---|---|
-| `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://`. | Read the reason and fix the input. |
+| `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://` (plain `http://` only for a loopback host). | Read the reason and fix the input. |
 | `oversize_input` | 2 | A file, the file count or the total size is over the limit. | Remove files the profile does not read. Limits: 4 MiB per file, 64 files, 8 MiB in total. |
 | `unknown_profile` | 2 | The API serves no profile with that name. | Use a profile the API lists. |
 | `unauthenticated` | 3 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
@@ -295,7 +387,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `engine_digest_mismatch` | 3 | The server's engine does not match its pin, so it runs no check. | Report it to Symbolia. |
 | `not_found` | 3 | The API holds no check with that id for this account. | Run the check again. |
 | `collector_cannot_connect` | 3 | The first query could not reach the database, or `psql` is missing. | Check the secret, the network path from the runner and `pg_hba.conf`. Install `postgresql-client`. |
-| `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad, the major is outside 14 to 18, or the role name does not match (behind a connection pooler, the reason says which name to set as `collection-role`; section 6). Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when the collector withheld a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line, which cannot be checked yet, and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file, or its `REDACTION-MANIFEST.json` is missing, records a different digest for that file, or disagrees with the sidecar; the reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. With the next collector (RF-28) the withheld-rule refusals go away (the line reads as not observed), and a collection that mixes the two collectors' output is refused instead. | Read the reason. For a role refusal, recreate the collection role as in section 2. For a missing or mismatched `COLLECTION-SIDECAR.json` or `REDACTION-MANIFEST.json`, give `raw/`, the sidecar and the manifest from one collector run as it wrote them (section 9). For a withheld `pg_hba.conf` rule: remove quotes a name does not need, write an `@file` list's names inline, use a `+group` role in place of a list, or list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted. |
+| `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad (a superuser, or a member of `pg_monitor` or `pg_stat_scan_tables`; the reason says what to grant), the major is outside 14 to 18, or the role name does not match (behind a connection pooler, the reason says which name to set as `collection-role`; section 6). Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when a collection mixes this collector's output with the earlier collector's; when files from the earlier collector hold a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line that collector withheld; and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file, or its `REDACTION-MANIFEST.json` is missing, records a different digest for that file, or disagrees with the sidecar. The reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. | Read the reason. For a role refusal, recreate the collection role as in section 2. For a missing or mismatched `COLLECTION-SIDECAR.json` or `REDACTION-MANIFEST.json`, give `raw/`, the sidecar and the manifest from one collector run as it wrote them (section 9). For a withheld `pg_hba.conf` rule in the earlier collector's files: collect again with this Action. If you cannot: remove quotes a name does not need, write an `@file` list's names inline, use a `+group` role in place of a list, or list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted. |
 | `profile_not_servable` | 3 | The server holds no qualified checker for this profile. | Use a served profile. |
 | `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. | Read the reason. Check that collection completed. |
 | `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. | Report the check id to Symbolia, or submit the check again when the reason says so. |

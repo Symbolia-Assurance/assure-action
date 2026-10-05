@@ -1,15 +1,26 @@
 {
  "schema": "assure.serve.collector-pin/v1",
+ "generation": "rf28",
  "files": {
-  "collect_pg.py": "0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6",
-  "QUERIES.json": "e5076ffa0781815a932ffbe66235de4a0fb9a6ab29254a313ca7d014e586d733",
+  "collect_pg.py": "5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2",
+  "QUERIES.json": "586f59178dd3e11e2540f389bbba3160af95e880e204666351250f27d3fb4eee",
   "SECRET-KEYWORDS.json": "347dda9b029b058d848ef4875e9a82147d12e085e3d71c12937dc7cd68d99983"
  },
  "source": {
-  "collect_pg.py": "Symbolia read-only PostgreSQL collector, accepted follow-up 6, frozen 2026-10-02",
-  "QUERIES.json": "the published query list; the collector writes its own copy into every output",
-  "SECRET-KEYWORDS.json": "the published secret keyword list",
-  "copied": "2026-10-04, byte-exact, sha256 checked"
+  "collect_pg.py": "Symbolia read-only PostgreSQL collector, marker and managed-PostgreSQL revision: a withheld rule or setting is a marker line with its line number and reason; --login-user; the session's read-only and TLS facts recorded",
+  "QUERIES.json": "the published query list of that revision; the collector writes its own copy into every output",
+  "SECRET-KEYWORDS.json": "the published secret keyword list, unchanged",
+  "copied": "2026-10-05, byte-exact, sha256 checked against the revision's freeze record",
+  "gate": "accepted: RF-31 ACCEPTED.json (sha256 2c8559e3f38b1cb0094950719b6f4e5bb41595ac2067ea921ffe8b125d8941a2, accepted 2026-10-05T06:42:28Z) accepts frozen collector sha256 5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2, equal to collect_pg.py here"
+ },
+ "previous": {
+  "generation": "rf19",
+  "files": {
+   "collect_pg.py": "0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6",
+   "QUERIES.json": "e5076ffa0781815a932ffbe66235de4a0fb9a6ab29254a313ca7d014e586d733",
+   "SECRET-KEYWORDS.json": "347dda9b029b058d848ef4875e9a82147d12e085e3d71c12937dc7cd68d99983"
+  },
+  "source": "Symbolia read-only PostgreSQL collector, accepted follow-up 6, frozen 2026-10-02 (shipped 2026-10-04 to this swap)"
  },
  "flags": {
   "execution_authorized": false,
