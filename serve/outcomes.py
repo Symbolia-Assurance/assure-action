@@ -85,11 +85,18 @@ MALFORMATIONS = MappingProxyType({
     # the selected scope a profile row reads from the request (docs/PROFILES.md), bound before the checker runs
     'scope_missing': 'the selected scope this profile checks, as a list of 1 to 256 distinct ids of A-Z, a-z, 0-9, '
                      '_, . and -; a profile whose scope is fixed takes none',
+    # serve-006 gap 1: the selected scope's binding, and a reference to an accepted scope (no store resolves one yet)
+    'scope_binding': 'for a profile that declares a scope binding, an object with one key, the map the profile names, '
+                     'that maps every selected id to its own token of 1 to 63 characters of A-Z, a-z, 0-9, _, . and '
+                     '-; a profile that declares none takes none',
+    'scope_ref': 'no accepted_scope_ref: no accepted scope record can be resolved yet, so a first-run comparison '
+                 'omits it; a profile whose scope is fixed takes none',
 })
 # A field path the malformation may name: request fields, JSON fields the checks read, and derive locators.
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
                     'allow_partial', 'redaction_withheld', 'sanitised_sha256', 'entries', 'major', 'server.major',
-                    'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role'})
+                    'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
+                    'scope_binding', 'accepted_scope_ref'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',

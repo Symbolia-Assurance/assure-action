@@ -24,7 +24,7 @@ inputs:
     required: false
     default: postgresql-observed-baseline
   artefacts:
-    description: A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both.
+    description: A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it.
     required: false
     default: ''
   connection:
@@ -55,6 +55,22 @@ inputs:
     description: true lets a run in which some machines could not be read meet the policy (exit 0 when no reading has a fail-on status). Default false, so such a run exits 3.
     required: false
     default: 'false'
+  scope:
+    description: For a profile whose scope you select (not the PostgreSQL profiles), a JSON file holding the list of selected ids. Sent in the request body, never as a file. Leave empty otherwise.
+    required: false
+    default: ''
+  scope-binding:
+    description: For a profile that binds its selected scope, a JSON file holding the whole scope_binding object - the map from each selected id to its own token under the map name the API lists, and any record the profile lists. The Action checks its keys before collecting and sends it in the request body. Leave empty otherwise. For http-observed-baseline, leave it empty and the Action makes it from your endpoint manifest.
+    required: false
+    default: ''
+  accepted-scope-ref:
+    description: A reference to an accepted scope to compare against. No accepted scope record can be resolved yet, so the Action refuses it (bad_input) before anything is collected or sent; leave it empty for a first-run comparison.
+    required: false
+    default: ''
+  identity-key:
+    description: For http-observed-baseline, how the endpoint identity key reaches the identity producer. Only pipe - the Action makes a fresh key for each job and passes it on a pipe, so no key is ever an input, an environment variable or a file. Never paste a key here.
+    required: false
+    default: pipe
   output:
     description: Where to write the verdict file.
     required: false
@@ -93,6 +109,10 @@ runs:
         INPUT_CONFIG_DIRS: ${{ inputs.config-dirs }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
+        INPUT_SCOPE: ${{ inputs.scope }}
+        INPUT_SCOPE_BINDING: ${{ inputs.scope-binding }}
+        INPUT_ACCEPTED_SCOPE_REF: ${{ inputs.accepted-scope-ref }}
+        INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

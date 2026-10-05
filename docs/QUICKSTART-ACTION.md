@@ -184,13 +184,17 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `mode` | `api` | `api`: the check runs on the Assure API. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
 | `connection` | none | libpq connection string or URI. Pass it from a secret. |
-| `artefacts` | none | A directory of collected files. Use this or `connection`, never both. |
+| `artefacts` | none | A directory of collected files. Use this or `connection`, never both. For `http-observed-baseline` with `scope-binding` empty, the directory holding your endpoint manifest (`manifest.json` and the response heads it names): the Action binds the endpoints and collects them itself. |
 | `collection-role` | the user in `connection` | The role's name inside the database. The collector checks it against `current_user`. Set it when a connection pooler's login name differs (section 6). |
 | `collection-privileges` | `pg_read_all_settings,pg_read_all_stats` | The roles you granted to the collection role: one or both of these two. |
 | `data-dir` | none | A path where the runner can read the server's data directory. Used with `connection`. |
 | `config-dirs` | none | Directories that hold the server's configuration files outside the data directory, one per line or separated by colons. Used with `connection`. |
 | `fail-on` | `fails` | Which statuses fail the job (section 7). The API checks it against the profile and applies it. |
 | `allow-partial` | `false` | `true` accepts a run in which some machines could not be read (section 7). Any other word is `bad_input`. |
+| `scope` | none | A JSON file of selected ids, for a profile whose scope you select. Both PostgreSQL profiles take none. |
+| `scope-binding` | none | A JSON file holding the whole `scope_binding` object, for a profile that binds its scope: the token map under the profile's map name, and any record the profile lists. The Action checks its keys before collecting. Both PostgreSQL profiles take none. For `http-observed-baseline`, leave it empty and the Action makes it. |
+| `identity-key` | `pipe` | For `http-observed-baseline`: how the endpoint identity key reaches the identity producer. Only `pipe`. The Action makes a fresh key for each job, passes it to the producer and then the collector on a pipe, and keeps nothing, so no key is an input, an environment variable or a file and nothing persists between runs; that is fine while no accepted scope exists, since a later comparison with an accepted scope will need a key kept across runs. Any other value is masked and refused before anything is read. |
+| `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 

@@ -16,7 +16,13 @@ is built, named only by allow-listed relative paths, and written by this module 
 - `canonical_json` and `dumps` are the canonical encoder (sorted keys, no spaces, UTF-8, finite standard JSON only): the
   same bytes as the engine's own canonical encoder (a test asserts it), defined here so this module imports no engine
   byte.
-- `request_body` is the upload `{profile, files: {name: base64}}` the Action sends.
+- `request_body` is the upload `{profile, files: {name: base64}[, scope][, scope_binding][, accepted_scope_ref]}` the
+  Action sends; a field left unset is not sent, so a PostgreSQL body is byte for byte what it was. `from_request(...,
+  with_scope=True)` (the API) also returns those three fields when present (serve-006 gap 1); the profile row checks
+  them (`serve.profiles.bind_request`).
+- `context/` under the work directory is the server's own (serve-006 gap 2: the trusted scope context): `check_name`
+  refuses a customer name under it, whatever a profile pattern matches, in any case and in compatibility forms such as
+  fullwidth letters (a case-insensitive filesystem would otherwise put it there).
 
 This module imports the standard library and `serve.outcomes` only. It holds no checker, model or engine logic, so the
 public Action tree ships it: the runner applies the same bounds the server applies again.
@@ -30,6 +36,7 @@ import json
 import math
 import os
 import stat
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +47,10 @@ MAX_NAME = 200
 BESIDE_RAW = ('COLLECTION-SIDECAR.json', 'TIMING.json')
 # Records the frozen collector writes beside raw/ that the runner reads and never uploads (Collected.records).
 RUNNER_ONLY = ('REDACTION-MANIFEST.json',)
+# The work directory's serving-owned top-level directory: the trusted scope context (serve-006 gap 2). Never a customer's.
+SERVING_DIR = 'context'
+# The optional request fields of the selected scope (serve-006 gap 1), each with the malformation kind a null value reads.
+SCOPE_FIELDS = (('scope', 'scope_missing'), ('scope_binding', 'scope_binding'), ('accepted_scope_ref', 'scope_ref'))
 
 
 @dataclass(frozen=True)
@@ -155,18 +166,26 @@ def check_name(name, profile):
     if any(seg in ('', '.', '..') for seg in name.split('/')):
         raise Refusal('bad_input', 'file name has an empty, "." or ".." segment: %s' % shown,
                       malformation=malformation('file_name', field='files'))
+    first = name.split('/', 1)[0]                   # serve-006 gap 2: the server writes context/, never a customer;
+    if first.casefold() == SERVING_DIR or unicodedata.normalize('NFKC', first).casefold() == SERVING_DIR:   # 007 B2
+        raise Refusal('bad_input', 'file name is under %s/, which the server writes: %s' % (SERVING_DIR, shown),
+                      malformation=malformation('file_name', field='files'))
     if _rule_for(name, profile) is None:
         raise Refusal('bad_input', 'file name is not accepted by profile %s: %s' % (profile.id, shown),
                       malformation=malformation('file_name', file=name, field='files'))
     return name
 
 
-def from_request(body, limits=LIMITS):
+def from_request(body, limits=LIMITS, *, with_scope=False):
     """Parse an API body `{profile, files: {name: base64}}` into (profile_id, {name: bytes}). Names are checked later,
-    against the profile, by `materialise`."""
+    against the profile, by `materialise`. With `with_scope` the body may add `scope`, `scope_binding` and
+    `accepted_scope_ref` (serve-006 gap 1), returned as a third item {field: value} holding only the fields sent; a field
+    sent as null is `bad_input`. Their values are checked against the profile row later (`serve.profiles`)."""
     doc = parse_json(body, limits)
-    if not isinstance(doc, dict) or set(doc) != {'profile', 'files'}:
-        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files',
+    optional = {k for k, _ in SCOPE_FIELDS} if with_scope else set()
+    if not isinstance(doc, dict) or not {'profile', 'files'} <= set(doc) <= {'profile', 'files'} | optional:
+        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s'
+                      % (' (and optionally scope, scope_binding and accepted_scope_ref)' if with_scope else ''),
                       malformation=malformation('body_shape'))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
@@ -188,7 +207,17 @@ def from_request(body, limits=LIMITS):
         if len(data) > limits.file_bytes:
             raise Refusal('oversize_input', 'a file is larger than %d bytes' % limits.file_bytes)
         files[name] = data
-    return profile_id, files
+    if not with_scope:
+        return profile_id, files
+    asked = {}
+    for key, kind in SCOPE_FIELDS:
+        if key not in doc:
+            continue
+        if doc[key] is None:
+            raise Refusal('bad_input', '%s is null; leave it out when it is not sent' % key,
+                          malformation=malformation(kind, field=None if key == 'scope' else key))
+        asked[key] = doc[key]
+    return profile_id, files, asked
 
 
 def _read_capped(path, cap):
@@ -445,11 +474,16 @@ def dumps(obj):
     return canonical_json(obj) + b'\n'
 
 
-def request_body(profile_id, files, limits=LIMITS):
-    """The upload body `{profile, files: {name: base64}}`; `oversize_input` when the encoded body passes the body cap."""
-    body = json.dumps({'profile': profile_id,
-                       'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}},
-                      sort_keys=True, separators=(',', ':')).encode('ascii')
+def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None):
+    """The upload body `{profile, files: {name: base64}}`, plus each of `scope`, `scope_binding` and
+    `accepted_scope_ref` that is not None (serve-006 gap 1); `oversize_input` when the encoded body passes the body
+    cap."""
+    doc = {'profile': profile_id,
+           'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}}
+    for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref)):
+        if value is not None:
+            doc[key] = value
+    body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')
     if len(body) > limits.body_bytes:
         raise Refusal('oversize_input', 'the encoded upload is %d bytes; the limit is %d' % (len(body), limits.body_bytes))
     return body

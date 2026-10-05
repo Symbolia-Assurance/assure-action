@@ -271,6 +271,9 @@ def summary_markdown(envelope):
     policy = env.get('policy', {})
     fail_on = policy.get('fail_on') or []
     out = ['## Assure: %s' % _headline(env), '']
+    up_front = scope_notes_line(env)              # serve-012: a selected scope's bound sits under the headline
+    if up_front is not None:
+        out += ['Scope: %s' % esc(up_front), '']
     out.append('Profile %s, check %s.' % (esc(env.get('profile')), esc(env.get('check_id'))))
     reason = policy.get('reason')
     code = esc(policy.get('exit'))
@@ -371,12 +374,27 @@ def _cmd_prop(value):
     return _cmd_data(value).replace(':', '%3A').replace(',', '%2C')
 
 
+def scope_notes_line(envelope):
+    """serve-012: the row's scope notes as one line for an envelope whose scope unit is not a machine (it carries
+    `scope_observed`), else None. That bound (for the HTTP row: freshness, replay, intent-only coverage) is shown under
+    the headline, as the first annotation and in the Action's log, not only at the summary's end. A machine-scoped
+    envelope (both PostgreSQL rows) renders as before."""
+    notes = envelope.get('scope_notes') if isinstance(envelope, dict) else None
+    if _scope(envelope) is None or not isinstance(notes, list) or not notes:
+        return None
+    return ' '.join(str(n) for n in notes)
+
+
 def annotations(envelope):
-    """`::error` for fails and `::warning` for deviates, fails first, at most fifty."""
+    """`::error` for fails and `::warning` for deviates, fails first, at most fifty; first, for a selected scope, one
+    `::notice` with its scope notes (`scope_notes_line`)."""
     rows = envelope.get('rows') or []
     picked = [('error', r) for r in rows if r.get('status') == 'fails']
     picked += [('warning', r) for r in rows if r.get('status') == 'deviates']
     lines = []
+    notes = scope_notes_line(envelope)
+    if notes is not None:
+        lines.append('::notice title=%s::%s' % (_cmd_prop('Assure scope'), _cmd_data(notes)))
     for level, r in picked[:MAX_ANNOTATIONS]:
         where = '%s %s' % (r.get('machine'), r.get('id')) if r.get('id') is not None else str(r.get('machine'))
         title = 'Assure %s %s' % (label(r.get('status')), where)

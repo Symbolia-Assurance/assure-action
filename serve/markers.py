@@ -149,12 +149,19 @@ def starts_marker(body):
     return body.lstrip().startswith(PREFIX)
 
 
+def checker_parts(body):
+    """The lines the checker reads in one '\\n'-line `body`: it splits at every `str.splitlines` boundary (lone '\\r',
+    '\\x0b', '\\x0c', '\\x1c' to '\\x1e', U+0085, U+2028, U+2029). The one place this layer names that boundary set;
+    serve/faithful.py reads the earlier collector's marker through it too (refutation 008, B5)."""
+    return body.splitlines()
+
+
 def _after_other_break(body):
     """True when the checker, which splits at every `str.splitlines` boundary (lone '\\r', '\\x0b', '\\x0c', '\\x1c' to
     '\\x1e', U+0085, U+2028, U+2029), would read a line of this '\\n'-line that begins with the prefix after any
     whitespace (derive_observed `line.lstrip().startswith`), while this layer's line does not start there (refutation
     008, G1). The line's own ending ('\\r\\n') was removed by `physical_lines`."""
-    return any(p.lstrip().startswith(PREFIX) for p in body.splitlines()[1:])
+    return any(p.lstrip().startswith(PREFIX) for p in checker_parts(body)[1:])
 
 
 def _broken(name, number, kind, why):

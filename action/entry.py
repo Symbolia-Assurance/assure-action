@@ -5,7 +5,9 @@ SERVE-001 U2).
 
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
-INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_OUTPUT), with GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
+INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
+INPUT_OUTPUT), with
+GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
 connection or a runner token.
@@ -18,6 +20,22 @@ connection or a runner token.
   is the envelope's `policy.exit` (never derived here). A failure envelope gives its outcome's exit code. `fail-on` is
   sent as written; the server checks it against the profile. `allow-partial` is `true` or `false` (default false; any
   other word is `bad_input`): true lets a run in which some machines could not be read meet the policy.
+  `scope` (a JSON file holding the list of selected ids), `scope-binding` (a JSON file holding the whole binding
+  object, {<map>: {id: token}[, <record>: {...}]}, serve-010) and `accepted-scope-ref` (a string) are sent as
+  request-body fields, never as files and never read from the collected bundle. The binding's keys must be exactly the
+  map and records the API's profile list gives (a profile it lists without a map takes no `scope-binding`, and a
+  profile it lists without a `scope` takes no `scope`: `bad_input` before anything is collected or sent). A non-empty `accepted-scope-ref` is refused in both modes before anything is read, collected
+  or sent, with the API's own reason: no accepted scope record can be resolved yet (serve-007 F2). Unset, nothing is
+  sent (serve-006 gap 1).
+  A profile whose listing names the `identity_binding` record (http-observed-baseline; serve-012) with no
+  `scope-binding` file reads `artefacts` as the caller's endpoint manifest directory (manifest.json and the response
+  heads it names) and takes no connection: the Action makes the binding itself. Before anything is collected it runs
+  the HTTP identity producer with a fresh per-job key on a pipe, then the collector with the same key
+  (`action.http_identity`); the producer's record is sent as the wrapped `scope_binding` and its ids as `scope` (a
+  `scope` input must list exactly them). With a `scope-binding` file (a caller who bound and collected the bundle with
+  a key of their own), `artefacts` is that bundle and the wrapper is sent as written, as for any bound profile. `identity-key` takes only `pipe` (the default); any other value is masked first and refused (`bad_input`)
+  before anything is read. The key is never printed, never in an environment variable or a file, and nothing persists
+  between runs.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -64,16 +82,21 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from action import withhold  # noqa: E402
+from action import http_identity, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, VERDICT_SCHEMA, Client, allow_list  # noqa: E402
 from serve import FLAGS, bundle, markers, render  # noqa: E402
-from serve.outcomes import Refusal  # noqa: E402
+from serve.outcomes import Refusal, malformation  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
 MODES = ('api', 'local')
 MAX_INPUT = 4096
+MAX_SCOPE_FILE = 65536
+# serve-007 F2: the API's own reason (serve.profiles.SCOPE_REF_REASON; a test holds the two equal). The server refuses
+# every accepted-scope-ref, so the Action refuses it before anything is collected, read or sent.
+SCOPE_REF_REASON = ('no accepted scope record can be resolved for this account and profile yet; omit '
+                    'accepted_scope_ref for a first-run comparison')
 MAX_NOTICE_NAMES = 20
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 _FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, ]{0,100}')
@@ -222,20 +245,44 @@ def _mode(env):
     return m
 
 
-def _inputs(env, conn, conn_error, collect, collector_dir=None):
+def _json_input(env, name, kind, field, cwd):
+    """serve-006 gap 1: the JSON value of the file an input names (relative to the working directory, a regular file of
+    at most 64 KiB, never a link), or None when the input is unset. `bad_input` with the malformation `kind`
+    otherwise; the file's text is never shown."""
+    text = _plain(env, name)
+    if not text:
+        return None
+    shown = name[len('INPUT_'):].lower().replace('_', '-')
+    p = Path(text) if Path(text).is_absolute() else Path(cwd or os.getcwd()) / text
+    try:
+        data = bundle._read_capped(p, MAX_SCOPE_FILE)
+        return bundle.parse_json(data)
+    except (OSError, Refusal):
+        raise Refusal('bad_input', '%s must name a readable JSON file of at most %d bytes' % (shown, MAX_SCOPE_FILE),
+                      malformation=malformation(kind, field=field)) from None
+
+
+def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
     profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
     artefacts = _plain(env, 'INPUT_ARTEFACTS')
     has_conn = bool(str(env.get('INPUT_CONNECTION') or '').strip())
     if bool(artefacts) == has_conn:
         raise Refusal('bad_input', 'set exactly one of connection and artefacts (%s set)'
                       % ('both are' if has_conn else 'neither is'))
+    http_identity.parse_key_source(env.get('INPUT_IDENTITY_KEY'))     # serve-012: masked already, refused here
+    if _plain(env, 'INPUT_ACCEPTED_SCOPE_REF'):          # serve-007 F2: before any file is read or collected
+        raise Refusal('bad_input', SCOPE_REF_REASON,
+                      malformation=malformation('scope_ref', field='accepted_scope_ref'))
     fail_on = _plain(env, 'INPUT_FAIL_ON')
     allow_partial = parse_allow_partial(_plain(env, 'INPUT_ALLOW_PARTIAL'))
     data_dir_text = _plain(env, 'INPUT_DATA_DIR')
     config_dirs_text = env.get('INPUT_CONFIG_DIRS')      # line breaks separate items, so it is not read by _plain
     if conn_error is not None:
         raise conn_error
-    out = {'profile': profile, 'fail_on': fail_on, 'artefacts': artefacts or None, 'allow_partial': allow_partial}
+    out = {'profile': profile, 'fail_on': fail_on, 'artefacts': artefacts or None, 'allow_partial': allow_partial,
+           'scope': _json_input(env, 'INPUT_SCOPE', 'scope_missing', None, cwd),
+           'scope_binding': _json_input(env, 'INPUT_SCOPE_BINDING', 'scope_binding', 'scope_binding', cwd),
+           'accepted_scope_ref': None}
     if artefacts:
         if data_dir_text:
             raise Refusal('bad_input', 'data-dir applies only with connection; with artefacts, put the collected '
@@ -286,7 +333,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     check_id = secrets.token_hex(16)
     raw_key = str(env.get('INPUT_API_KEY') or '')
     conn_text = str(env.get('INPUT_CONNECTION') or '')
-    first = [v for v in dict.fromkeys((raw_key, raw_key.strip(), conn_text.strip())) if v]
+    id_key = str(env.get('INPUT_IDENTITY_KEY') or '')
+    pasted = (id_key, id_key.strip()) if id_key.strip() not in ('', http_identity.KEY_SOURCE) else ()
+    first = [v for v in dict.fromkeys((raw_key, raw_key.strip(), conn_text.strip()) + pasted) if v]
     for v in first:                                    # before anything else is printed
         say(_mask(v))
     scrub = _Scrub(first)
@@ -359,7 +408,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             raise out_error
         from action import collect                             # after the pin, like every local-mode import
         conn, conn_error = connection(collect)
-        inputs = _inputs(env, conn, conn_error, collect, collector_dir)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd)
         state['scratch'] = _scratch(env)
         verdict, ignored, state['withheld'] = local_mode.run(
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
@@ -373,14 +422,43 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             raise out_error
         collect = load_collect() if conn_text.strip() else None
         conn, conn_error = connection(collect) if collect is not None else (None, None)
-        inputs = _inputs(env, conn, conn_error, collect, collector_dir)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
         client = (client_factory or Client)(url, raw_key.strip())
         allow = allow_list(client.profiles(), inputs['profile'])
+        if inputs['scope'] is not None and allow.scope is None:     # serve-007 F2: refused before collection
+            raise Refusal('bad_input', 'profile %s checks a fixed scope and takes no scope' % inputs['profile'],
+                          malformation=malformation('scope_missing'))
+        binding = inputs['scope_binding']
+        # serve-012: with no scope-binding file, the Action makes the binding with the identity producer
+        identity = http_identity.declares_identity(allow) and binding is None
+        if identity and not inputs['artefacts']:
+            raise Refusal('bad_input', 'profile %s reads an endpoint manifest: set artefacts to the directory holding '
+                          'manifest.json and the response heads it names (it takes no connection)' % inputs['profile'])
+        if binding is not None:      # serve-010: the file is the wrapper; its keys are the listing's map and records
+            name = (allow.scope or {}).get('binding')
+            if name is None:
+                raise Refusal('bad_input', 'profile %s takes no scope-binding' % inputs['profile'],
+                              malformation=malformation('scope_binding', field='scope_binding'))
+            keys = {name} | set(allow.scope.get('records') or ())
+            if not isinstance(binding, dict) or set(binding) != keys:
+                raise Refusal('bad_input', 'scope-binding for profile %s must be an object with exactly the keys %s'
+                              % (inputs['profile'], ', '.join(sorted(keys))),
+                              malformation=malformation('scope_binding', field='scope_binding'))
         lim = limits if limits is not None else allow.limits
-        if inputs['artefacts']:
+        scope = inputs['scope']
+        if identity:
+            art = Path(inputs['artefacts'])
+            state['scratch'] = _scratch(env)
+            # resolved: the producer and the collector open every component with no-follow, and a runner's temporary
+            # directory may sit behind a link (macOS /var)
+            produced, binding = http_identity.produce_and_collect(
+                root, (art if art.is_absolute() else Path(cwd) / art).resolve(), state['scratch'].resolve(), scope=scope)
+            scope = sorted(binding['endpoint_tokens'])
+            collected = withhold.apply(bundle.from_directory(produced, allow, lim))
+        elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             collected = withhold.apply(bundle.from_directory(art if art.is_absolute() else Path(cwd) / art, allow,
                                                              lim))
@@ -393,9 +471,10 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         say('Assure: ' + withhold.describe(collected.withheld))
         session(collected.files)
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
-        body = bundle.request_body(inputs['profile'], collected.files, lim)
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
-        verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, body=body, **extra)
+        verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, limits=lim,
+                                scope=scope, scope_binding=binding,
+                                accepted_scope_ref=inputs['accepted_scope_ref'], **extra)
         if isinstance(verdict, dict):
             state['server_check_id'] = verdict.get('check_id')
         check_verdict(verdict)
@@ -442,6 +521,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         more = len(ignored) - len(names)
         say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
             len(ignored), inputs_profile, ', '.join(names), (' and %d more' % more) if more else '')))
+    bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line
+    if bound is not None:
+        say('Assure: scope: %s' % _cmd_data(bound))
     line = render.first_line(verdict)
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))

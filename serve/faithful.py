@@ -438,11 +438,18 @@ def _bodies(data):
 
 
 def redacted_lines(data):
-    """The 1-based numbers of the collector's whole-line marker lines."""
-    return [n for n, body in enumerate(_bodies(data), 1) if body == REDACTED_LINE]
+    """The 1-based numbers (PostgreSQL's, at '\\n') of the lines that hold the collector's whole-line marker, once for
+    every marker the checker reads in that line: it splits at every boundary of `markers.checker_parts` (a lone CR, a
+    vertical tab, a form feed, ...: the RF-28 reader's set), so the marker before, after or between such breaks is a
+    line of its own, and two of them are two (refutation 008, B5; serve-009 R1, R2). A mid-line mention is not."""
+    return [n for n, body in enumerate(_bodies(data), 1)
+            for part in markers.checker_parts(body) if part == REDACTED_LINE]
 
 
 def _lines_text(numbers):
+    """The lines named once each, in order of first appearance (serve-009: two markers in one line count twice and are
+    named once)."""
+    numbers = list(dict.fromkeys(numbers))
     return ', '.join('line %d' % n for n in numbers[:12]) + (' and %d more' % (len(numbers) - 12)
                                                             if len(numbers) > 12 else '')
 
@@ -573,9 +580,10 @@ def check_file(name, kinds, data, fields, why_absent, located, *, as_collected=F
         budgets.append(_hba_comment_rows(fields, data, as_collected))
     comments = max(budgets) if budgets else 0
     if len(marks) > comments:
-        _refuse(name, 'the collector withheld whole %d lines (%s), and its record of why (COLLECTION-SIDECAR.json) '
+        # REFUTATION-SERVE-009 B2: the count is of markers (two can share a line), the lines are named once each
+        _refuse(name, 'the collector left %d whole-line marker%s (on %s), and its record of why (COLLECTION-SIDECAR.json) '
                 'shows %s withheld whole, so a withheld rule or setting may be among them, which the check would '
-                'read as absent. %s' % (len(marks), _lines_text(marks),
+                'read as absent. %s' % (len(marks), '' if len(marks) == 1 else 's', _lines_text(marks),
                                         'no comment' if not comments else
                                         ('only %d comment%s' % (comments, '' if comments == 1 else 's')),
                                         NEXT_STEP_SIDECAR), first, 'marker_unaccounted')

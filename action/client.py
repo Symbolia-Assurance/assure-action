@@ -23,12 +23,17 @@ Rules:
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
 - `fail_on` is passed through as the customer wrote it; the server checks it against the profile and decides the exit.
   `allow_partial=True` adds `allow_partial=1` to the query; false sends nothing (the server's default).
+- `scope`, `scope_binding` (the body's form, {<map>: {id: token}[, <record>: {...}]}, serve-010) and
+  `accepted_scope_ref` are request-body fields when given, never `files` entries; unset, the body is byte for byte what
+  it was. The server checks them against the profile row (serve-006 gap 1).
 Every failure is a typed Refusal; nothing here returns a pass that did not come from the server.
 
 `allow_list(listing, profile_id)` builds a profile's allow-list from `GET /v1/profiles`: exact paths and full-match
 patterns, each with a byte cap, plus the API's global limits. It has the attributes `serve.bundle` reads (`id`,
 `required`, `optional`, rules with `path`, `pattern`, `max_bytes`, `matches`), so `serve.bundle.from_directory` and
-`check_files` bound an upload in the runner with the same rules the server applies again.
+`check_files` bound an upload in the runner with the same rules the server applies again. Its `scope` is the listing's
+`{max_ids, binding[, records]}` for a row whose scope comes with the request (the binding map's name and the record
+names, so the Action can check the keys of the `scope_binding` it sends), else None.
 """
 from __future__ import annotations
 
@@ -258,12 +263,17 @@ class Client:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
 
-    def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False):
+    def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
+               scope_binding=None, accepted_scope_ref=None, limits=None):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
-        other end is a Refusal. `body` is the encoded upload when the caller has already built it."""
+        other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
+        built here under `limits` (default the serving limits) with the scope fields that are not None."""
         started = self.clock()
         if body is None:
-            body = bundle.request_body(profile_id, files)
+            body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
+                                       scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref)
+        elif (scope, scope_binding, accepted_scope_ref) != (None, None, None):
+            raise ValueError('pass the scope fields or a built body, not both')
         path = '/v1/checks'
         query = {}
         if fail_on:
@@ -323,6 +333,7 @@ class AllowList:
     required: tuple
     optional: tuple
     limits: bundle.Limits = bundle.LIMITS
+    scope: dict | None = None
 
 
 def _bad_listing(why):
@@ -368,6 +379,28 @@ def _limits(doc):
     return bundle.Limits(**doc)
 
 
+SCOPE_NAME_RE = re.compile(r'[a-z][a-z0-9_]{0,31}')
+
+
+def _scope(doc):
+    """serve-006 gap 1: a listed row's `scope` ({max_ids, binding[, records]}), or None when the row lists none.
+    `records` (serve-010) is the list of binding-record names the wrapper must carry beside the map."""
+    if doc is None:
+        return None
+    if (not isinstance(doc, dict) or not {'max_ids', 'binding'} <= set(doc) <= {'max_ids', 'binding', 'records'}
+            or type(doc['max_ids']) is not int or not 1 <= doc['max_ids'] <= 256
+            or not (doc['binding'] is None or (isinstance(doc['binding'], str) and SCOPE_NAME_RE.fullmatch(doc['binding'])))):
+        raise _bad_listing('a profile scope must be {max_ids: 1 to 256, binding: a lower-case name or null[, records]}')
+    out = {'max_ids': doc['max_ids'], 'binding': doc['binding']}
+    if 'records' in doc:
+        rec = doc['records']
+        if (doc['binding'] is None or not isinstance(rec, list) or not rec or len(set(rec)) != len(rec)
+                or not all(isinstance(n, str) and SCOPE_NAME_RE.fullmatch(n) and n != doc['binding'] for n in rec)):
+            raise _bad_listing('a profile scope records list must name distinct binding records')
+        out['records'] = list(rec)
+    return out
+
+
 def allow_list(listing, profile_id):
     """The allow-list of `profile_id` from a `GET /v1/profiles` answer. `unknown_profile` when the API does not list
     it; `api_error` when the answer is malformed."""
@@ -385,7 +418,7 @@ def allow_list(listing, profile_id):
                 or len(inputs['required']) + len(inputs['optional']) > MAX_RULES):
             raise _bad_listing('profile %s has no inputs {required, optional}' % profile_id)
         return AllowList(profile_id, tuple(_rule(r, True) for r in inputs['required']),
-                         tuple(_rule(r, False) for r in inputs['optional']), limits)
+                         tuple(_rule(r, False) for r in inputs['optional']), limits, _scope(row.get('scope')))
     raise Refusal('unknown_profile', 'the API serves no profile %s' % profile_id)
 
 
