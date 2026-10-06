@@ -604,8 +604,9 @@ def describe(counts):
     recorded before `files` existed read as before."""
     c = dict(empty_counts(), **(counts or {}))
     if (counts or {}).get(FILES_KEY) == 0 and not any(c[k] for k in COUNT_KEYS):
-        return ('Withheld in the runner before anything was sent: nothing to withhold; none of the files sent is a '
-                'PostgreSQL configuration or pg_hba file.')
+        return ('Withheld in the runner before anything was sent: nothing to withhold — the withholding pass covers '
+                'PostgreSQL configuration and pg_hba files and the SQL literals in the catalog snapshot and the '
+                'declaration, and this profile\'s inputs name none of them.')
     text = ('Withheld in the runner before anything was sent: %s and %s.'
             % (_n(c['comments'], 'configuration comment', 'configuration comments'),
                _n(c['literals'], 'string literal in SQL expressions', 'string literals in SQL expressions')))

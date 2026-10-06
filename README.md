@@ -1,8 +1,12 @@
 # Assure GitHub Action
 
-This Action checks a PostgreSQL server or a set of HTTP endpoints against an Assure profile from your own GitHub Actions workflow. It is for teams that run PostgreSQL and want a repeatable record of which reliability and safety obligations hold, which are broken and which could not be observed.
+Assure checks the software your code runs on. From your own GitHub Actions workflow it reads your PostgreSQL server or your site's HTTP responses and tells you, obligation by obligation, what holds, what is disproven, and what it could not establish and why. The check reads green only when nothing it examined is disproven, and the first line of every result says how much it could see.
 
-The Action collects facts in your runner. The check runs on Symbolia's server at `api.symbolia.ai`. The Action writes the verdict back into your runner.
+The Action collects facts in your runner. The check runs on Symbolia's server at `api.symbolia.ai`. The verdict comes back into your runner and, on a pull request, onto the pull request as annotations.
+
+**Install.** Give this to your agent: `skills/assure/SKILL.md`. It knows the supported routes, what the Action needs from your repository, and where it stops. Pin the Action at the commit you fetched this file from. If you prefer to do it by hand, the quickstart below is the same path.
+
+Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
 **Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
 
@@ -10,9 +14,11 @@ Known-vulnerability scanners check your code against a list of what has broken b
 
 Assure is the check that reads green only when nothing it examined is disproven. It tells you the bounds of what it has established, and why it matters. In an age where machines generate code at a volume nobody can read, Assure shows that each change maintains its baseline security and reliability, and stays true to any formalised requirements.
 
-Supported PostgreSQL majors are 14 to 18. Real-run evidence exists for PostgreSQL 18.
+- `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote.
+- `postgresql-declared-model`: your server against a declaration you write (`raw/declaration.json`). Plain-sentence requirements in a `requirements.md` will be read on every pull request as this profile's human surface; this release does not read them yet.
+- `http-observed-baseline`: the response heads you captured for the endpoints you select, offline; the Action produces the scope binding itself.
 
-**Checking HTTP endpoints.** `http-observed-baseline` reads the response heads you captured for the endpoints you select, offline: give the Action an artefacts folder holding an endpoint manifest and the heads, and it produces the scope binding itself.
+PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQL 17 and 18.
 
 ## What a check claims
 
@@ -35,9 +41,12 @@ You need:
 - Python 3.14 on the runner and, to collect over a connection, the PostgreSQL client (`psql`);
 - a collection role with read access to settings and statistics only, if you collect over a connection.
 
-The declared profile reads collected files. Put the collector's output in a directory that holds `raw/`, add your declaration as `raw/declaration.json`, then add this step:
+The declared profile reads collected files. Put the collector's output in a directory that holds `raw/`, add your declaration as `raw/declaration.json`, commit the directory, then add these steps. The checkout step puts the directory on the runner; for a directory made by an earlier job, fetch it with `actions/download-artifact` instead.
 
 ```yaml
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
       - name: Assure check
         id: assure
         uses: Symbolia-Assurance/assure-action@<full commit sha>
@@ -50,7 +59,9 @@ The declared profile reads collected files. Put the collector's output in a dire
 
 Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a commit cannot.
 
-The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, collecting over a connection, managed PostgreSQL, the complete workflow file and every typed outcome.
+Put the commit of `Symbolia-Assurance/assure-action` you fetched this file from, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
+
+The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, collecting over a connection, managed PostgreSQL, running the collector yourself, complete workflow files that run on pull requests and on pushes to your default branch, the HTTP captures, and every typed outcome.
 
 ## Inputs
 

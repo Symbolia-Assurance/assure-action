@@ -32,7 +32,7 @@ After the collector finishes, and before anything is checked or sent, the Action
 - **String literals in SQL expressions.** In row-level security policy expressions (`polqual` and `polwithcheck`), and in the `declared_predicate` of your declaration, every quoted string literal is replaced with `'<withheld literal N>'`. N numbers the different literals of one upload, so two equal literals get the same N. The rest of the expression is sent as written: column and other identifiers (quoted ones too), operators, casts, and numeric constants such as the `4821` in `pin = 4821`. An expression the Action cannot parse safely is withheld whole as one marker. No other SQL expression is collected: no view definitions, function bodies or column defaults.
 - **Structured secret values** stay withheld whole by the collector, as above.
 
-The Action does the same to an `artefacts` directory you made yourself. It works on the bytes it read, so your directory is not changed. The job log and the job summary state how many comments and literals were withheld, and how many lines were marked. They show the counts only. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold; none of the files sent is a PostgreSQL configuration or pg_hba file".
+The Action does the same to an `artefacts` directory you made yourself. It works on the bytes it read, so your directory is not changed. The job log and the job summary state how many comments and literals were withheld, and how many lines were marked. They show the counts only. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold — the withholding pass covers PostgreSQL configuration and pg_hba files and the SQL literals in the catalog snapshot and the declaration, and this profile's inputs name none of them".
 
 What still leaves the runner, as written:
 
@@ -48,6 +48,8 @@ What still leaves the runner, as written:
 The Action sends the collected facts, after the withholding above, to `api.symbolia.ai` over HTTPS, with your API key, and the check runs on Symbolia's server. It sends only the files the profile reads, each within its size limit; it checks this in your runner before sending. Your database connection string and password stay in your runner.
 
 The Action writes the verdict file, the job summary and the annotations in your runner. The job summary stays in your workflow run, under your own GitHub retention settings. The verdict file stays on the runner unless you upload it as a workflow artifact. The summary and the annotations show the reason for each reading, and for each `fails` reading its witness. Both can hold role, object and path names from your system, bounded and escaped. They appear in your own CI log, which anyone can read for a public repository.
+
+The `assure` agent skill (`skills/assure/` in the Action repository) is documentation only: it sends nothing itself.
 
 ## On the server
 

@@ -1,0 +1,2 @@
+source: aaf5e22ad9592157767c777d53958bc83e63845a; served profiles: postgresql-observed-baseline, postgresql-declared-model, http-observed-baseline
+pin: read it from the checkout you fetched this file from (git -C assure-action rev-parse HEAD); never put the source commit in a uses: line. If this folder was copied without its checkout, ask the operator for the pinned Action commit; never guess one.

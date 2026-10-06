@@ -31,7 +31,7 @@ Every verdict is tied to the exact engine (`engine.commit`) and the exact input 
 
 - Anything beyond the rules Symbolia holds today, including whether the database is fit for its purpose. Readings cover the 40 obligations only.
 - Anything about obligations that read needs intent, not observed, missing baseline, missing method or representation.
-- Other databases in the cluster. Database-scoped obligations read only the database you connected to. Their text names it ("in database <db>"). Other connectable databases appear as the qualifier "other connectable databases not collected: <names>". On a default server this includes `template1`. While another connectable database exists, PRIV-2-OB reads not observed.
+- Other databases in the cluster. Database-scoped obligations read only the database you connected to. Their text names it ("in database \<db>"). Other connectable databases appear as the qualifier "other connectable databases not collected: \<names>". On a default server this includes `template1`. While another connectable database exists, PRIV-2-OB reads not observed.
 - The rules the server has loaded. Client-authentication readings use the configured `pg_hba.conf` file. They carry the qualifier "configured rules; loaded identity not observed". HBA-6 reads not observed.
 - Password presence and stored-hash type. Readings on scram or md5 rules carry "password presence not observed".
 - The collection role. It is left out of every domain. Facts about it appear as observations and are never counted. Use a new role for collection, so it hides none of your site's results.
@@ -40,7 +40,7 @@ Every verdict is tied to the exact engine (`engine.commit`) and the exact input 
 
 ## PostgreSQL versions
 
-The collector and checker accept majors 14 to 18. The major comes from the observed `server_version_num`. Most baseline rows are documented for PostgreSQL 18. At another major, a reading that needs such a row reads missing baseline. Real-run evidence exists for PostgreSQL 18 only.
+The collector and checker accept majors 14 to 18. The major comes from the observed `server_version_num`. Most baseline rows are documented for PostgreSQL 18. At another major, a reading that needs such a row reads missing baseline. Real-run evidence exists for PostgreSQL 17 and 18.
 
 ## Managed PostgreSQL
 
