@@ -71,6 +71,10 @@ inputs:
     description: For http-observed-baseline, how the endpoint identity key reaches the identity producer. Only pipe - the Action makes a fresh key for each job and passes it on a pipe, so no key is ever an input, an environment variable or a file. Never paste a key here.
     required: false
     default: pipe
+  report:
+    description: true asks the Assure API for the plain-language report of the check's claim tree (api mode only; your account's tier must include it). The job summary then carries the report after the first line, or the summary and the reason it was withheld. The verdict, its file and the exit code never change. Default false.
+    required: false
+    default: 'false'
   output:
     description: Where to write the verdict file.
     required: false
@@ -90,6 +94,12 @@ outputs:
   exit-code:
     description: The verdict's policy exit (0 policy met or never, 1 policy failed, 3 nothing was checked or machines were refused), 2 bad input, 3 typed refusal or API failure.
     value: ${{ steps.assure.outputs.exit-code }}
+  report-status:
+    description: With report true, written, withheld or refused. Empty otherwise.
+    value: ${{ steps.assure.outputs.report-status }}
+  report-url:
+    description: With report true, the report page on the API (open it with your API key). Empty otherwise.
+    value: ${{ steps.assure.outputs.report-url }}
 
 runs:
   using: composite
@@ -113,6 +123,7 @@ runs:
         INPUT_SCOPE_BINDING: ${{ inputs.scope-binding }}
         INPUT_ACCEPTED_SCOPE_REF: ${{ inputs.accepted-scope-ref }}
         INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
+        INPUT_REPORT: ${{ inputs.report }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

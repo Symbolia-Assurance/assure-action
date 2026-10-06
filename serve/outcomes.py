@@ -28,6 +28,9 @@ _TABLE = {
     'not_found': (404, None, 'Check the check id, because no check with that id exists for this account.'),
     'secret_in_input': (422, 2, 'Remove the secret the reason names from the input, then send it again; nothing was stored.'),
     'store_unavailable': (503, None, 'Try again in a minute, because the result store cannot be reached just now.'),
+    # serve-014: the account's tier does not include the claim-tree report (refused before any model call).
+    'tier_excludes': (403, None, 'Ask Symbolia to move this account to a tier that includes the report, or leave the '
+                                 'report off.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),

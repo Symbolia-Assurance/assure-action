@@ -4,6 +4,7 @@ that opens a network connection.
     c = Client(base_url, api_key)
     listing = c.profiles()                                  # GET /v1/profiles
     envelope = c.submit(profile_id, files, fail_on)          # POST /v1/checks, then GET /v1/checks/{id} while 202
+    record = c.report(check_id)                               # serve-014: POST, then GET /v1/checks/{id}/report while 202
 
 Rules:
 - `base_url` is `https://<host>[:port][/prefix]` with no userinfo, query or fragment; `http://` only for a loopback host
@@ -26,6 +27,10 @@ Rules:
 - `scope`, `scope_binding` (the body's form, {<map>: {id: token}[, <record>: {...}]}, serve-010) and
   `accepted_scope_ref` are request-body fields when given, never `files` entries; unset, the body is byte for byte what
   it was. The server checks them against the profile row (serve-006 gap 1).
+- `report(check_id)` (serve-014) asks for a verdict's claim-tree report: `POST /v1/checks/{id}/report` with an empty
+  body, then `GET` the same route while 202, with the same backoff and `total_wait_s` bound (past it, `api_error`); a
+  typed refusal carries `detail.answered = 'report'`. The answer must be a report record (`assure.serve.report/v1`,
+  status written or withheld), else `api_error`.
 Every failure is a typed Refusal; nothing here returns a pass that did not come from the server.
 
 `allow_list(listing, profile_id)` builds a profile's allow-list from `GET /v1/profiles`: exact paths and full-match
@@ -52,6 +57,7 @@ from serve.outcomes import OUTCOMES, Refusal
 
 VERDICT_SCHEMA = 'assure.serve.verdict/v1'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
+REPORT_SCHEMA = 'assure.serve.report/v1'
 DEFAULT_URL = 'https://api.symbolia.ai'
 LOOPBACK = frozenset({'127.0.0.1', '::1', 'localhost'})
 MAX_RESPONSE = 16 * 2 ** 20
@@ -302,6 +308,25 @@ class Client:
                 raise
         if doc.get('schema') != VERDICT_SCHEMA:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
+        return doc
+
+    def report(self, check_id):
+        """serve-014: the claim-tree report record of one verdict (module docstring). Every other end is a Refusal."""
+        if not isinstance(check_id, str) or not CHECK_ID_RE.fullmatch(check_id):
+            raise Refusal('bad_input', 'a report needs the check id of a verdict')
+        started = self.clock()
+        path = '/v1/checks/%s/report' % check_id
+        status, doc = self._call('POST', path, b'', route='report')
+        polls = 0
+        while status == 202:
+            if self.clock() - started >= self.total_wait_s:
+                raise Refusal('api_error', 'the report did not finish within %d s' % int(self.total_wait_s))
+            self.sleep(self.poll_s[min(polls, len(self.poll_s) - 1)])
+            polls += 1
+            status, doc = self._call('GET', path, route='report')
+        if doc.get('schema') != REPORT_SCHEMA or doc.get('status') not in ('written', 'withheld') \
+                or (doc.get('status') == 'written' and not isinstance(doc.get('body_md'), str)):
+            raise Refusal('api_error', 'the API answered without a report record')
         return doc
 
 

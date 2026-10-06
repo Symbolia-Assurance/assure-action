@@ -62,7 +62,11 @@ The server is in Sydney, Australia.
 | Charges | One ledger row per charged check (every check the checker started, except the checker's own internal error): time, account, check id, bytes, tokens, cost, outcome | Kept to compute your credit |
 | Your key | Stored only as a SHA-256 hash, with its key id and account | Kept after revocation, marked revoked |
 | Backups | A daily copy of the key file (key hashes, key ids, accounts) and the charges ledger, readable only by the operator (mode 0600). Verdicts and collected facts are not backed up | 30 days, then deleted |
+| The report, when you ask for one | `store/<your account>/<check id>.report.json`, beside the verdict (described below) | Deleted with the verdict |
+| Report usage | One ledger row per report the writer was called for: time, account, check id, tokens, cost, route, model and attempt. It is not charged | Kept with the charges |
+| Report log | One line per report on the server: time, account, check id, whether it was written or withheld and why, the attempt and the duration. Never the report's text | 90 days |
 | Checker telemetry | One line per check the checker started, in a file on the server readable only by the service (described below) | 12 months, then deleted |
+| Report telemetry | One line per report (described below) | 12 months, then deleted |
 | Proxy log | The front proxy's own messages in the system journal: start-up, certificate renewal and errors. An error line can hold the client's IP address, the request method and path with its query, and the request headers with the `Authorization` header redacted. It never holds a request body. There is no access log | 90 days |
 
 The scratch folder is removed when the check ends. If the server is stopped during a check, a daily cleanup job removes any scratch folder older than 30 minutes. When the server starts again, that check reads `checker_error` with the reason "the server restarted while this check was running; submit it again", and it is not charged.
@@ -75,8 +79,16 @@ The request log holds ids, sizes, outcomes and timings only: time, request id, k
 
 Each check runs in its own process, separate from the server process. Two things keep that process off the network:
 
-- The serving code it runs imports no network client and no model client. A test enforces this: it reads every source file of the serving code and the Action and fails if one imports a network or model client module. The one exception is the Action's own client of the API, which runs in your runner.
+- The serving code it runs imports no network client and no model client. A test enforces this: it reads every source file of the serving code and the Action and fails if one imports a network or model client module. There are two exceptions: the Action's own client of the API, which runs in your runner, and the report writer, which only the separate report service imports (below).
 - The server's systemd service configuration denies the service, the check process included, every outbound network address except the machine's own loopback.
+
+### The report
+
+When you ask for a report (`report: true` in the Action, or `POST /v1/checks/{id}/report`), a separate service on the server, the report service, sends one request to a language model: the writer's fixed instructions and the verdict's record. The record is each rule's status, reason and evidence, the first line, the policy and the engine's release digest. Like the verdict, it holds facts observed from your files, such as role names and settings. Nothing else is sent: never your files or their names, sizes or digests, and never your account, key or check id.
+
+The request goes over HTTPS to OpenRouter, which passes it to the model's provider, for the model `openai/gpt-6.1-sol`. The report service may reach only OpenRouter's addresses; the API service and the check process still reach no outside address. If the request fails, it is sent once more; after that the report is withheld. Neither the request nor the model's raw answer is stored. A deterministic check reads the written text against the record, and a text that fails it is withheld and not kept.
+
+The report record is stored beside the verdict and deleted with it. One ledger row records the report's tokens, cost, route, model and attempt; it is not charged. One telemetry line records the hour, the profile, whether the report was written or withheld, the route, the model as the gateway named it, the attempt, the token counts, the cost, whether the deterministic check passed and the names of the rules it failed, and why a report was withheld. It holds no text of the report, no names or values from your system, and no account, key or check id. Every value in it comes from a fixed list kept in Assure's code, or is a number. It is kept for 12 months, then deleted.
 
 ### Checker telemetry
 

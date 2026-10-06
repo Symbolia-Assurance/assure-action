@@ -195,6 +195,7 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `scope-binding` | none | A JSON file holding the whole `scope_binding` object, for a profile that binds its scope: the token map under the profile's map name, and any record the profile lists. The Action checks its keys before collecting. Both PostgreSQL profiles take none. For `http-observed-baseline`, leave it empty and the Action makes it. |
 | `identity-key` | `pipe` | For `http-observed-baseline`: how the endpoint identity key reaches the identity producer. Only `pipe`. The Action makes a fresh key for each job, passes it to the producer and then the collector on a pipe, and keeps nothing, so no key is an input, an environment variable or a file and nothing persists between runs; that is fine while no accepted scope exists, since a later comparison with an accepted scope will need a key kept across runs. Any other value is masked and refused before anything is read. |
 | `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
+| `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report", below). `mode: api` only. Any other word is `bad_input`. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 
@@ -340,6 +341,15 @@ When no obligation reaches a verdict, the summary headline reads "No verdicts" a
 
 Text from the checker or your files is shown as plain text. A web address in it appears as code, never as a link.
 
+## The report
+
+Set `report: true` to get a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. It needs `mode: api` and an account whose tier includes the report; otherwise the API refuses it with `tier_excludes`. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails that check is withheld. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
+
+- **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
+- **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: <reason>." A refused report adds one warning annotation, never an error.
+
+The report never changes the verdict, the verdict file or the exit code. The first line and the verdict file stay the record. The `report-status` output reads `written`, `withheld` or `refused`. [DATA.md](DATA.md) says what is sent to the writer and how long a report is kept.
+
 ## 9. Using collected files instead of a connection
 
 You can collect on one machine and check from another. Set `artefacts` to a directory that holds a `raw/` folder (or to the `raw/` folder itself). Leave `connection` empty.
@@ -398,6 +408,8 @@ The last line of the summary says what left your runner:
 | `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting. | Run again. If it repeats, report the check id to Symbolia. |
 
 A collection with gaps is still a verdict. Each gap reads **not observed** with the place it was looked for.
+
+`tier_excludes` never ends a job. With `report: true`, it means your account's tier does not include the report: the verdict, its summary and its exit stand, and the summary says the report was withheld. Leave `report` off, or ask Symbolia about a tier that includes the report.
 
 ## 11. Profiles
 

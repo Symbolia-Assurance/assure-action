@@ -50,6 +50,13 @@ Refutation-010 (5 Oct 2026):
   (`check_line`).
 - F1: a `bad_input` caused by a workflow input (fail-on, allow-partial, the artefacts path, another named input) shows
   that input's next step under "What to do" (`next_step`); the envelope's `action` is unchanged.
+
+serve-014: a claim-tree report that was not written reads one line, the same on the report page and in the Action's job
+summary: "The report was withheld: <reason in plain words>." (`report_withheld_line`), from REPORT_WITHHELD for the
+three fallback reasons; any other reason (a typed refusal's own text) is bounded and escaped like any customer string.
+A written body enters the job summary through `report_markdown`: at most REPORT_CAP characters, every line HTML-escaped
+with link brackets, pipes, backticks and tildes escaped and link-shaped text as a code span, so it can carry its one
+bold span and its paragraphs and nothing else; `report_page_line(url)` names the page as a code span.
 """
 from __future__ import annotations
 
@@ -58,7 +65,12 @@ import re
 
 CAP = 300
 MAX_ANNOTATIONS = 50
+REPORT_WITHHELD = {'lint_failed': 'the written text did not pass the deterministic check',
+                   'writer_unavailable': 'the writer could not be reached',
+                   'profile_unqualified': 'the writer is not yet qualified for this profile'}
 _MD_SPECIAL = re.compile(r'([\\`*_\[\]|~])')   # customer text never starts a line, so # and - need no escape
+REPORT_CAP = 8000
+_REPORT_SPECIAL = re.compile(r'([\\`\[\]|~])')    # a written body keeps its * (one bold span) and nothing else
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 
 
@@ -239,6 +251,37 @@ def scope_line(envelope):
     if any(isinstance(r, dict) and r.get('reason') == 'removed from the accepted scope' for r in sc['refused']):
         line += ' (accepted scope reduced)'
     return line
+
+
+def report_withheld_line(reason):
+    """serve-014: the one line a withheld or refused report reads (module docstring)."""
+    words = REPORT_WITHHELD.get(reason) if isinstance(reason, str) else None
+    if words is None:
+        words = esc(reason).rstrip('.') if reason else 'no reason was given'
+    return 'The report was withheld: %s.' % words
+
+
+def report_markdown(text):
+    """serve-014: a written report body for the job summary (module docstring)."""
+    t = '' if text is None else str(text)
+    if len(t) > REPORT_CAP:
+        t = t[:REPORT_CAP - 1] + '…'
+    lines = []
+    for line in t.split('\n'):
+        line = _CONTROL.sub(' ', line).lstrip('#').strip()          # no heading, no raw control character
+        out, pos = [], 0
+        for m in _LINKISH.finditer(line):
+            out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(line[pos:m.start()], quote=True)))
+            out.append('`%s`' % m.group(0).replace('`', ''))
+            pos = m.end()
+        out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(line[pos:], quote=True)))
+        lines.append(''.join(out))
+    return '\n'.join(lines).strip()
+
+
+def report_page_line(url):
+    """serve-014: the line that names the report page (the API's own URL, never customer text)."""
+    return 'The report page: `%s` (send your API key in the Authorization header to open it).' % str(url).replace('`', '')
 
 
 def first_line(envelope):

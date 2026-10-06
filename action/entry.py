@@ -6,7 +6,7 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_OUTPUT), with
+INPUT_REPORT, INPUT_OUTPUT), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
@@ -36,6 +36,16 @@ connection or a runner token.
   a key of their own), `artefacts` is that bundle and the wrapper is sent as written, as for any bound profile. `identity-key` takes only `pipe` (the default); any other value is masked first and refused (`bad_input`)
   before anything is read. The key is never printed, never in an environment variable or a file, and nothing persists
   between runs.
+  `report` (serve-014: `true` or `false`, default false; any other word is `bad_input` before anything is read): after
+  a verdict envelope comes back, the Action asks for its claim-tree report (`Client.report`: POST, then GET while 202,
+  bounded). The job summary then carries the verdict's first line, the written body and the line naming the report
+  page; for a withheld report, or one the API refused (`tier_excludes`, a delivery failure), it carries the
+  deterministic summary and "The report was withheld: <reason>." (`serve.render.report_withheld_line`), with the page
+  line when a record came back. A refused report is one `::warning`, never an error. The verdict file, the exit code
+  and the `outcome` output are the verdict's whatever the report did; the outputs add `report-status` (written,
+  withheld or refused) and `report-url` (the page, `<api-url>/v1/checks/<id>/report.html`, opened with the key). The
+  verdict file is the envelope byte for byte, so the page is named in the summary and the outputs, never inside it.
+  `mode: local` refuses `report: true` (`bad_input`) before anything is read: the report runs on the API only.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -310,6 +320,32 @@ def parse_allow_partial(text):
     raise Refusal('bad_input', 'allow-partial must be true or false')
 
 
+def parse_report(text):
+    """serve-014: the `report` input: '', 'false' or '0' is False; 'true' or '1' is True (case-insensitive); else
+    bad_input."""
+    v = (text or '').strip().lower()
+    if v in ('', 'false', '0'):
+        return False
+    if v in ('true', '1'):
+        return True
+    raise Refusal('bad_input', 'report must be true or false')
+
+
+def _with_report(summary, report, url):
+    """(summary, report-status, report-url) for a requested report (module docstring). `report` is the record or the
+    Refusal that ended the request."""
+    if isinstance(report, dict) and report.get('status') == 'written':
+        head = summary.split('\n', 1)[0]
+        return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n' + render.report_page_line(url)
+                + '\n', 'written', url)
+    if isinstance(report, dict):
+        fallback = report.get('fallback') if isinstance(report.get('fallback'), dict) else {}
+        return (summary + '\n' + render.report_withheld_line(fallback.get('reason')) + '\n'
+                + render.report_page_line(url) + '\n', 'withheld', url)
+    reason = report.reason if isinstance(report, Refusal) else None
+    return summary + '\n' + render.report_withheld_line(reason) + '\n', 'refused', ''
+
+
 def _scratch(env):
     temp_root = env.get('RUNNER_TEMP') or None
     if temp_root and not os.path.isdir(temp_root):
@@ -340,11 +376,13 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         say(_mask(v))
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
-    state = {'mode': None, 'scratch': None, 'withheld': None, 'session': []}
+    state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
+             'report_url': ''}
 
-    def outputs(outcome, code):
+    def outputs(outcome, code, extra=''):
         try:
-            _append(env.get('GITHUB_OUTPUT'), 'verdict-path=%s\noutcome=%s\nexit-code=%d\n' % (out_text, outcome, code))
+            _append(env.get('GITHUB_OUTPUT'), 'verdict-path=%s\noutcome=%s\nexit-code=%d\n%s' % (out_text, outcome, code,
+                                                                                                extra))
         except OSError as w:
             say('::warning title=Assure::%s' % _cmd_data('the step outputs could not be written (%s)' % type(w).__name__))
 
@@ -478,11 +516,22 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if isinstance(verdict, dict):
             state['server_check_id'] = verdict.get('check_id')
         check_verdict(verdict)
+        if state['report_on']:                    # serve-014: never changes the verdict, its file or its exit
+            state['report_url'] = client.base + '/v1/checks/%s/report.html' % verdict['check_id']
+            try:
+                state['report'] = client.report(verdict['check_id'])
+            except Refusal as e:
+                state['report'] = scrub.refusal(e)
+            except Exception as e:  # typed, never a traceback; the class name only
+                state['report'] = Refusal('api_error', 'the report request failed unexpectedly (%s)' % type(e).__name__)
         return verdict, list(collected.ignored)
 
     try:
         try:
             state['mode'] = _mode(env)
+            state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'))   # serve-014: before anything is read
+            if state['report_on'] and state['mode'] == 'local':
+                raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
             inputs_profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
         except Refusal as e:
@@ -498,8 +547,12 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         return failed(Refusal('api_error' if state['mode'] == 'api' else 'checker_error', 'no verdict envelope'))
     code = verdict['policy']['exit']
     unrenderable = 'api_error' if state['mode'] == 'api' else 'checker_error'
+    report_extra = ''
     try:                                               # rendered before anything is written: a fault is typed
         summary = render.summary_markdown(verdict)
+        if state['report_on']:
+            summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'])
+            report_extra = 'report-status=%s\nreport-url=%s\n' % (report_status, report_url)
         if state['withheld'] is not None:
             summary += withhold.summary_markdown(state['withheld'])
         summary += markers.session_markdown(state['session'])
@@ -521,13 +574,19 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         more = len(ignored) - len(names)
         say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
             len(ignored), inputs_profile, ', '.join(names), (' and %d more' % more) if more else '')))
+    if state['report_on']:
+        if isinstance(state['report'], dict):
+            say('Assure: report %s; %s' % (_cmd_data(state['report'].get('status')), _cmd_data(state['report_url'])))
+        else:
+            say('::warning title=%s::%s' % (_cmd_prop('Assure report'), _cmd_data(
+                render.report_withheld_line(getattr(state['report'], 'reason', None)))))
     bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line
     if bound is not None:
         say('Assure: scope: %s' % _cmd_data(bound))
     line = render.first_line(verdict)
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
-    outputs(verdict['outcome'], code)
+    outputs(verdict['outcome'], code, report_extra)
     return code
 
 
