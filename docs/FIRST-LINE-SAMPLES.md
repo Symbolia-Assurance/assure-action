@@ -44,7 +44,7 @@ green: 3 of 8 machines read, 5 refused; declared premises: 0; version pins: none
 
 ## What each colour means, per profile
 
-The sentence under the first line comes from a fixed template for each colour. A consequence the profile does not state yet reads "Consequence not yet stated for <obligation>."; nothing is invented.
+The sentence under the first line comes from a fixed template for each colour. A consequence the profile does not state yet reads "Consequence not yet stated for \<obligation>."; nothing is invented.
 
 ### PostgreSQL observed
 

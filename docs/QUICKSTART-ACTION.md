@@ -16,7 +16,7 @@ Assure is the check that reads green only when nothing it examined is disproven.
 
 The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with your API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
-Supported PostgreSQL majors: 14 to 18. Real-run evidence exists for PostgreSQL 18.
+Supported PostgreSQL majors: 14 to 18. Real-run evidence: 17 and 18.
 
 **Rules the collector keeps, and rules it withholds.** The collector this Action ships keeps a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) as written, and the check reads it. A rule or setting it still has to withhold, such as a rule with an unclosed quote, becomes a marker line that names its own line number and reason. The check reads that rule or setting as not observed, and the summary lists it as `not observed: <file> line N (<the reason in plain words>)`.
 
@@ -30,7 +30,7 @@ The Action sends the collector's output: catalog facts (roles, memberships, obje
 - policy expressions with every string literal withheld: each quoted literal becomes `'<withheld literal N>'` in the runner, and so does each literal in your declaration's `declared_predicate`;
 - no secret-bearing value: the collector withholds every one whole before anything is written, and checks its own output for those values.
 
-The job log and the job summary state how many comments and literals were withheld. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold; none of the files sent is a PostgreSQL configuration or pg_hba file". [DATA.md](DATA.md) lists every item, including what is still sent as written, such as role names and client addresses.
+The job log and the job summary state how many comments and literals were withheld. For a profile whose inputs name no PostgreSQL configuration or `pg_hba.conf` file, such as the HTTP profile, nothing is withheld: the files are sent as read, and the line says "nothing to withhold — the withholding pass covers PostgreSQL configuration and pg_hba files and the SQL literals in the catalog snapshot and the declaration, and this profile's inputs name none of them". [DATA.md](DATA.md) lists every item, including what is still sent as written, such as role names and client addresses.
 
 The collector never reads table contents, password hashes, key material or other sessions' statements. It reads the connection string of a subscription and withholds it whole before anything is written.
 
@@ -68,6 +68,8 @@ GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;
 GRANT CONNECT ON DATABASE <your database> TO assure_collector;
 ```
 
+In these statements `<your database>` is the name of the database to check, or `postgres` for a local server that holds no other database.
+
 The `CONNECT` grant matters when your database revokes `CONNECT` from `PUBLIC` (for example `REVOKE ALL ON DATABASE <your database> FROM PUBLIC`). Without it, the first run stops with `collector_cannot_connect` and the reason `permission denied for database`. Where `PUBLIC` still has `CONNECT`, the grant changes nothing.
 
 Then allow the role to log in from the runner. Add a line to `pg_hba.conf` and reload the server:
@@ -91,21 +93,21 @@ Add a second repository secret:
 - Name: `ASSURE_PG_CONNECTION`
 - Value: a libpq connection string or URI, for example:
 
-  ```
-  host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=require
-  ```
+```
+host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=require
+```
 
 `sslmode=require` encrypts the connection but does not check the server's certificate. It works with the self-signed certificate that the Debian and Ubuntu packages set up. `sslmode=verify-full` also checks that the certificate is signed by an authority the runner trusts and names the host you connect to. It is the stronger choice. It needs a certificate the runner trusts: a self-signed server certificate fails it. Give the authority's certificate with `sslrootcert`:
 
-  ```
-  host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=verify-full sslrootcert=/path/to/root.crt
-  ```
+```
+host=db.example.internal port=5432 dbname=app user=assure_collector password=<the password> sslmode=verify-full sslrootcert=/path/to/root.crt
+```
 
 Test the string from the runner before the first run. Leave the password out and type it at the prompt, so it stays out of your shell history:
 
-  ```
-  psql 'host=db.example.internal port=5432 dbname=app user=assure_collector sslmode=require' -c 'SELECT current_user'
-  ```
+```
+psql 'host=db.example.internal port=5432 dbname=app user=assure_collector sslmode=require' -c 'SELECT current_user'
+```
 
 It prints `assure_collector`. If it does not, the Action cannot connect either.
 
@@ -119,6 +121,10 @@ Create `.github/workflows/assure.yml`:
 name: Assure
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 1"
@@ -160,6 +166,10 @@ jobs:
 
 Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a commit cannot.
 
+Pin the Action at the commit you fetched this file from. Put that commit of `Symbolia-Assurance/assure-action`, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
+
+This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
+
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (section 9).
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
@@ -168,11 +178,11 @@ The runner must reach your database and `api.symbolia.ai`. For a database on a p
 
 The first line of the job summary, and the Action's last log line, starts with a colour, then says how much was read, "N of 8 machines read, M refused", and the bounds of the result. A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason.
 
-- **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; not established: 18 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: <action>". One line follows for each obligation that could not be established, "<id>: <reason> — <owner>: <what it needs>". Green never means more than this.
-- **red**: something is disproven, for example "red: ...; disproven: <obligation> — <object>, <access path>, <locator>". It exits 1 when your `fail-on` names the status (`fails` by default). A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — <obligation>", never "disproven".
-- **yellow** (exit 3): nothing could be read at all, "yellow: could not look: <reason>; <action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
+- **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; not established: 18 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: \<action>". One line follows for each obligation that could not be established, "\<id>: \<reason> — \<owner>: \<what it needs>". Green never means more than this.
+- **red**: something is disproven, for example "red: ...; disproven: \<obligation> — \<object>, \<access path>, \<locator>". It exits 1 when your `fail-on` names the status (`fails` by default). A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — \<obligation>", never "disproven".
+- **yellow** (exit 3): nothing could be read at all, "yellow: could not look: \<reason>; \<action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
 
-Under the first line, one sentence says what it means in plain words. For a green PostgreSQL run: "Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 40 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it." For red, the consequence of what was disproven and where; for yellow, that nothing below is a finding and what to do. Each disproven or deviating obligation is listed under "Why it matters" with its statement and its consequence ("Consequence not yet stated for <obligation>." until the profile states one).
+Under the first line, one sentence says what it means in plain words. For a green PostgreSQL run: "Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 40 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it." For red, the consequence of what was disproven and where; for yellow, that nothing below is a finding and what to do. Each disproven or deviating obligation is listed under "Why it matters" with its statement and its consequence ("Consequence not yet stated for \<obligation>." until the profile states one).
 
 [FIRST-LINE-SAMPLES.md](FIRST-LINE-SAMPLES.md) shows one first line for each colour, word for word, with the meaning sentence for each colour and profile.
 
@@ -180,7 +190,7 @@ A refused machine bounds the result and is named; a status you name in `fail-on`
 
 Under the first line, the summary lists every reading under its status, each with its text: why it holds, why it fails, or what could not be read. The verdict file holds the same readings with their premises ([VERDICTS.md](VERDICTS.md)). The Action keeps it at the `output` path; the workflow above uploads it as the `assure-verdict` artifact.
 
-If a reading looks wrong, send Symbolia, through your Symbolia contact, the check id (the line under the heading: "Profile ..., check <id>."), the first line, and the summary text of that reading. Never send your configuration files or your connection string.
+If a reading looks wrong, send Symbolia, through your Symbolia contact, the check id (the line under the heading: "Profile ..., check \<id>."), the first line, and the summary text of that reading. Never send your configuration files or your connection string.
 
 ## 5. Inputs
 
@@ -202,8 +212,8 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `scope-binding` | none | A JSON file holding the whole `scope_binding` object, for a profile that binds its scope: the token map under the profile's map name, and any record the profile lists. The Action checks its keys before collecting. Both PostgreSQL profiles take none. For `http-observed-baseline`, leave it empty and the Action makes it. |
 | `identity-key` | `pipe` | For `http-observed-baseline`: how the endpoint identity key reaches the identity producer. Only `pipe`. The Action makes a fresh key for each job, passes it to the producer and then the collector on a pipe, and keeps nothing, so no key is an input, an environment variable or a file and nothing persists between runs; that is fine while no accepted scope exists, since a later comparison with an accepted scope will need a key kept across runs. Any other value is masked and refused before anything is read. |
 | `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
-| `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report", below). `mode: api` only. Any other word is `bad_input`. |
-| `allow-overage` | `false` | With `report: true`, `true` lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2 ("The report", below). Any other word is `bad_input`. |
+| `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report"). `mode: api` only. Any other word is `bad_input`. |
+| `allow-overage` | `false` | With `report: true`, `true` lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2 ("The report"). Any other word is `bad_input`. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 
@@ -218,12 +228,12 @@ To read the files, run the Action on a self-hosted runner that can read them:
 - `data-dir`: the server's data directory, as the runner sees it.
 - `config-dirs`: directories that hold configuration files outside the data directory. The Debian and Ubuntu packages keep them in `/etc/postgresql/<major>/<cluster>`:
 
-  ```yaml
-          data-dir: /var/lib/postgresql/18/main
-          config-dirs: /etc/postgresql/18/main
-  ```
+```yaml
+data-dir: /var/lib/postgresql/18/main
+config-dirs: /etc/postgresql/18/main
+```
 
-  Give one directory per line, or separate them with colons. A path that holds a colon cannot be given here.
+Give one directory per line, or separate them with colons. A path that holds a colon cannot be given here.
 
 The collector reads files only inside `data-dir` and `config-dirs`.
 
@@ -310,9 +320,9 @@ Examples:
 - `fails,deviates`: the job also fails on a deviation from vendor guidance or from the Assure baseline (observed profile).
 - `fails,not_collected`: the job also fails when a needed fact was not collected or could not be represented.
 - `never`: readings never fail the job, except a prove-class obligation that is not proven, which exits 1 (`not_proven`). A typed outcome still does.
-- `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): <id> — <reason>; <action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin <pin>", and the first line says "strict: n of m security obligations observable at this pin".
+- `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): \<id> — \<reason>; \<action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin \<pin>", and the first line says "strict: n of m security obligations observable at this pin".
 
-Each obligation has a class its profile declares, never settable per run, and `GET /v1/profiles` lists it: `refute` (green unless disproven) or `prove` (red unless proven). A prove-class obligation that does not read holds on a machine that was read turns the run red, "not proven: <id> — input not observed" when its input could not be read, else "not proven: <id> — <reason>; <action>", and the first line states "prove-class obligations: p (unproven: u)". Every obligation of today's profiles is refute-class.
+Each obligation has a class its profile declares, never settable per run, and `GET /v1/profiles` lists it: `refute` (green unless disproven) or `prove` (red unless proven). A prove-class obligation that does not read holds on a machine that was read turns the run red, "not proven: \<id> — input not observed" when its input could not be read, else "not proven: \<id> — \<reason>; \<action>", and the first line states "prove-class obligations: p (unproven: u)". Every obligation of today's profiles is refute-class.
 
 The Action exits with the verdict's own policy exit, `policy.exit` in the verdict file. `policy.reason` says why, in one word. The job summary states the policy and this run's exit in plain words.
 
@@ -357,7 +367,7 @@ Text from the checker or your files is shown as plain text. A web address in it 
 Set `report: true` to get a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. It needs `mode: api` and an account whose tier includes the report; otherwise the API refuses it with `tier_excludes`. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails that check is withheld. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
 
 - **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
-- **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: <reason>." A refused report adds one warning annotation, never an error.
+- **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: \<reason>." A refused report adds one warning annotation, never an error.
 
 The report never changes the verdict, the verdict file or the exit code. The first line and the verdict file stay the record. The `report-status` output reads `written`, `withheld`, `refused`, or `running` when the report was still being written as the Action stopped waiting; the summary and `report-url` then name its page, to open later. [DATA.md](DATA.md) says what is sent to the writer and how long a report is kept.
 
@@ -387,6 +397,180 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
           fail-on: fails
 ```
 
+### Bringing the folder to the runner
+
+The Action reads `artefacts` from the runner's working directory. Put the folder there before the Assure step, in one of three ways:
+
+- **Committed to your repository.** Add a step with `actions/checkout`, pinned to a full commit SHA. The complete workflow is below.
+- **Made by an earlier job.** That job uploads the folder with `actions/upload-artifact`; the job that runs the Action fetches it with `actions/download-artifact` in place of the checkout step.
+- **Collected in the same job.** Fetch the collector and run it in a step before the Assure step, as in "Running the collector yourself". The runner must then reach your database.
+
+Committing the folder puts what it holds into your repository's history: role names, ACLs, `pg_hba.conf` rules with client addresses, and the other items `DATA.md` lists as sent as written. Commit it only where everyone who can read the repository may read those.
+
+A complete workflow for the intent-free profile, with the collector's output committed as `collected/`:
+
+```yaml
+name: Assure
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check from collected files
+        id: assure
+        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        with:
+          api-key: ${{ secrets.ASSURE_API_KEY }}
+          profile: postgresql-observed-baseline
+          artefacts: collected
+          fail-on: fails
+          output: assure-verdict.json
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@<full commit sha of the release you trust>
+        with:
+          name: assure-verdict
+          path: ${{ steps.assure.outputs.verdict-path }}
+```
+
+For the declared profile, set `profile: postgresql-declared-model` and commit your declaration as `collected/raw/declaration.json`.
+
+For a folder made by an earlier job, this step takes the place of the checkout step:
+
+```yaml
+      - name: Fetch the collected files
+        uses: actions/download-artifact@<full commit sha of the release you trust>
+        with:
+          name: collected
+          path: collected
+```
+
+The earlier job uploads the whole folder as the collector wrote it, under the name `collected`. The job that runs the Action names the collecting job in `needs:`, so it starts only after the upload; without it the two jobs run at the same time and the download finds nothing:
+
+```yaml
+  check:
+    needs: collect
+    runs-on: ubuntu-latest
+```
+
+### Running the collector yourself
+
+The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same commit as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
+
+```sh
+git clone https://github.com/Symbolia-Assurance/assure-action assure-action
+git -C assure-action checkout <full commit sha>
+```
+
+Set the standard libpq variables for the server (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`). Find the data directory first: ask the server with `psql -c 'SHOW data_directory'` ("A server on your own machine", below), and give that directory, as this machine sees it, in place of `<data directory>`. Then run:
+
+```sh
+python3.14 -B assure-action/action/collector/collect_pg.py --out collected \
+  --role assure_collector \
+  --privileges pg_read_all_settings,pg_read_all_stats \
+  --data-dir '<data directory>' \
+  --role-created-for-run yes
+```
+
+| Flag | Meaning |
+|---|---|
+| `--out` | A new or empty directory for the output. Required. Any other directory is refused with exit 3 before anything is read. |
+| `--role` | The collection role's name inside the database (section 2). Required. |
+| `--privileges` | The roles granted to it, comma separated: `pg_read_all_settings`, `pg_read_all_stats` or both. Required. `pg_monitor` or `pg_stat_scan_tables` here is refused with exit 2. |
+| `--data-dir` | The server's data directory, as this machine sees it. Required, and it must be a directory that exists. When this machine cannot read the server's files, give an empty directory: every configuration file then reads as a recorded gap, as it does for the Action without `data-dir`. |
+| `--extra-root` | A directory outside the data directory that holds configuration files, such as `/etc/postgresql/18/main`. Once per directory. The collector reads configuration files only inside `--data-dir` and these directories. |
+| `--psql` | The `psql` command to run, when it is not `psql` on the path. |
+| `--role-created-for-run` | `yes` or `no`: whether you created the role for this run. The collector records your answer in `COLLECTION-SIDECAR.json`; left out, it records that you did not say. The collector itself creates, alters and grants nothing. |
+| `--login-user` | The login name, when a connection pooler's login name differs from the role (section 6). Left out, it is `--role`. |
+
+The collector logs in as `--login-user`, or as `--role` when that is not given. The collector never asks for a password: give it in `PGPASSWORD`, or in a password file `psql` reads.
+
+It prints one line of JSON and exits with one of four codes:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Collected; every input was observed. |
+| 1 | Collected with gaps. `COLLECTION-SIDECAR.json` lists each one under `entries` with its status (`unreadable`, `missing` or `unsupported`), and `gap_count` counts them. Give the output as `artefacts`: each gap reads **not observed** with the place it was looked for. |
+| 2 | Invalid arguments. Nothing was read and nothing was written. The printed line, or the usage text before it, names the argument. |
+| 3 | A typed refusal. The printed line gives its `type` and its `reason`. A refusal during the collection removes everything the run wrote and leaves `REFUSAL.json`, with the same type and reason, as the only file in `--out`. A refusal before the collection, such as a `--out` that is not new or empty, writes no `REFUSAL.json`. |
+
+With the two roles of section 2, a collection usually ends with exit 1: the role cannot read some catalog views, such as `pg_hba_file_rules` and `pg_file_settings`, and each view it cannot read is a gap with the status `unreadable`. The collector still reads the configuration files themselves inside `--data-dir` and `--extra-root`.
+
+The refusals name the reason in their `type`: for example `collection_role_superuser`, `collection_role_not_read_only` or `collection_role_not_least_privilege` for a role section 2 does not allow, `collection_role_mismatch` when the role you connect as is not `--role`, `unsupported_major` outside PostgreSQL 14 to 18, and `redaction_selfcheck_failed` when its own check found a withheld value in its output. Recreate the role as in section 2, or fix what the reason names, and run it again into an empty directory.
+
+### A server on your own machine
+
+For a PostgreSQL server on the machine you collect on, ask the server where its files are, as the user you normally connect as:
+
+```sh
+psql -c 'SHOW data_directory'
+psql -c 'SHOW config_file'
+psql -c 'SHOW hba_file'
+```
+
+Give the data directory as `--data-dir`. When `config_file` or `hba_file` lies outside it, give that file's directory as `--extra-root`. Homebrew on Apple silicon keeps the data directory at `/opt/homebrew/var/postgresql@<major>`, and Postgres.app at `~/Library/Application Support/Postgres/var-<major>`; check with `SHOW` all the same.
+
+Read the `pg_hba.conf` that `SHOW hba_file` names. Where its `local` lines say `trust`, the role needs no password; create it without one:
+
+```sql
+CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;
+GRANT CONNECT ON DATABASE <your database> TO assure_collector;
+```
+
+In these statements `<your database>` is the name of the database to check, or `postgres` for a local server that holds no other database.
+
+Otherwise create it with a password as in section 2. The collector never asks for a password, so set `PGPASSWORD` for the collector's run only, and `unset PGPASSWORD` afterwards. Test the role first; it prints `assure_collector`:
+
+```sh
+psql -U assure_collector -d <your database> -c 'SELECT current_user'
+```
+
+When `psql` is not on the path, as with a Homebrew server whose client is not linked, tell the collector where it is: `--psql /opt/homebrew/opt/postgresql@<major>/bin/psql`.
+
+When you have finished collecting, drop the role, as the user that created it:
+
+```sql
+REVOKE CONNECT ON DATABASE <your database> FROM assure_collector;
+DROP ROLE assure_collector;
+```
+
+To collect again later, create it again.
+
+### Collecting again after a change
+
+A check on collected files reads the server as it was when you collected. After you change the server (a setting, a `pg_hba.conf` rule, a role or a grant), collect again. `--out` must be a new or empty directory, so remove the old output first, then run the collector as above and commit the new folder:
+
+```sh
+rm -rf collected
+python3.14 -B assure-action/action/collector/collect_pg.py --out collected \
+  --role assure_collector \
+  --privileges pg_read_all_settings,pg_read_all_stats \
+  --data-dir '<data directory>' \
+  --role-created-for-run yes
+```
+
+Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it is a new check, charged again, and it says nothing about the change.
+
 ## 10. Typed outcomes
 
 When the Action cannot produce a verdict, it writes a failure file at the `output` path (schema `assure.serve.failure/v1`) with `outcome`, `reason` and `action`. It also writes the reason to the job summary and one error annotation. When the API gave a check id, the failure file carries it.
@@ -396,8 +580,8 @@ The last line of the summary says what left your runner:
 - "No check was sent." The Action stopped in your runner. Nothing was sent.
 - "The API refused the request for the profile list before anything was collected; nothing from your system was sent." The Action asks the API for the profile list first. A wrong or revoked key, or a rate limit, is refused there, before the Action collects or sends anything.
 - "The API refused the request before a check started; the collected files were sent and not kept."
-- "Check <id>. The check was sent; the API refused the poll for its result."
-- "Check <id>." The check reached the server. Report this id to Symbolia.
+- "Check \<id>. The check was sent; the API refused the poll for its result."
+- "Check \<id>." The check reached the server. Report this id to Symbolia.
 - "No check id came back from the API." The request may have left your runner; no check id came back.
 
 | Outcome | Exit | What it means | What to do |
@@ -478,6 +662,68 @@ A complete `manifest.json` for two endpoints:
 
 The inputs: `profile: http-observed-baseline`; `artefacts`, the folder above. `scope` is optional: a JSON file listing the endpoint ids to check, which must name exactly the manifest's ids (the Action stops before collecting otherwise). Leave `scope-binding` unset so the Action produces it: before collection it runs the identity producer and then the collector over your manifest, and sends their record as the scope binding with the endpoint tokens. `identity-key` stays `pipe`, its default: the Action makes a fresh key for each job and passes it on a pipe, so no key is an input, an environment variable or a file.
 
+A `scope` file, when you give one, is a JSON list of the manifest's ids, for example `["endpoint-001", "endpoint-002"]`.
+
+### Capturing the response heads
+
+Capture each head with `curl`, one HEAD request over HTTP/1.1, and write it to the file the manifest names:
+
+```sh
+mkdir -p http-fixture
+curl -sS --http1.1 -I https://shop.example.test/checkout > http-fixture/head-001.txt
+curl -sS --http1.1 -I https://shop.example.test/login > http-fixture/head-002.txt
+head -n 1 http-fixture/head-001.txt
+```
+
+`-I` sends a HEAD request and writes the head as received, every line ending in CRLF, with the empty line that ends it. `--http1.1` matters: the first line of each head must be an HTTP/1.1 status line, such as `HTTP/1.1 200 OK`. A head whose first line is another version, such as `HTTP/2 200` from a capture without `--http1.1`, or `HTTP/1.0 200 OK` from a server that answers in HTTP/1.0, is recorded as not observed. Without `-L`, `curl` does not follow a redirect, so a `3xx` head is the endpoint's own answer.
+
+Set `complete` to `true` for each head you captured this way. Commit `http-fixture/` with the manifest; the workflow below checks it out.
+
+A complete workflow for the HTTP profile:
+
+```yaml
+name: Assure HTTP
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  http:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        id: assure
+        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        with:
+          api-key: ${{ secrets.ASSURE_API_KEY }}
+          profile: http-observed-baseline
+          artefacts: http-fixture
+          fail-on: fails
+          output: assure-verdict.json
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@<full commit sha of the release you trust>
+        with:
+          name: assure-verdict
+          path: ${{ steps.assure.outputs.verdict-path }}
+```
+
 Every reading summary carries the profile's three scope notes:
 
 - Readings cover one HEAD request per operator-selected endpoint.
@@ -487,3 +733,7 @@ Every reading summary carries the profile's three scope notes:
 A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; not established: 6 — top action: collect the facts HTTP-TLS10-NEGOTIATION reads": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; not established: 3 — top action: state it in requirements.md". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red.
 
 The policy exits are those of section 7: `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read; `disproven` (1, red) when a reading has a status you fail on; `could_not_look` (3, yellow) when no endpoint was observed or no machine could be read.
+
+## Rules for an agent
+
+When an agent sets up or runs the Action for you, these rules hold for it, as they do for you. Do not fabricate facts, edit redacted evidence, change database permissions to accommodate the checker, or change the pins to conceal a gap. Report the first line and each reading as the summary states it: a missing fact is reported as missing, with the place it was looked for. It shows you every command that changes your server, its files or its roles, and you run it.

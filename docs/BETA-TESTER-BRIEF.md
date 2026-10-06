@@ -30,13 +30,13 @@ If the key is wrong or revoked, or you hit a rate limit, the API refuses the fir
 
 - **A refused machine (M2, client authentication) when the server has more than six databases or more than six users, as the checker counts them.** It counts the databases that allow connections, plus each one a `pg_hba.conf` rule names, and the login roles, plus each `+group`. The summary names the bound exceeded, for example "databases 7 (cap 6)" or "users 7 (cap 6)". The other machines still read, and the run stays green unless something is disproven. M2 also reads "missing method" today when any `pg_hba.conf` line uses `peer`, `ident` or another external authentication method (the Debian and Ubuntu default `local all postgres peer` included), until the checker bounds those methods.
 - **A `pg_hba.conf` rule with a quoted role name, an `@file` list or a regular-expression user reads `representation` or `missing method`, not a verdict.** Under the default `fail-on: fails` such a run can still pass; choose `fail-on: fails,not_collected` to make those readings stop the job. A rule the collector has to withhold (an unclosed quote, for example) appears as `not observed: pg_hba.conf line N (<reason>)`.
-- **Readings that read not observed or representation where you might expect a verdict.** On PostgreSQL 18 the collection role cannot read `pg_hba_file_rules`, `pg_file_settings` or `pg_subscription`, so the readings that need them read not observed. With more than one `SECURITY DEFINER` function, the search-path readings (SD-1, SD-2) read representation.
+- **Readings that read not observed or representation where you might expect a verdict.** On PostgreSQL 17 and 18 the collection role cannot read `pg_hba_file_rules` or `pg_file_settings` (nor, on 17, `pg_ident_file_mappings`, and on 18 `pg_subscription`), so the readings that need them read not observed. With more than one `SECURITY DEFINER` function, the search-path readings (SD-1, SD-2) read representation.
 
 ## What to send back
 
 Through your Symbolia contact:
 
-- the check id (the line under the summary heading: "Profile ..., check <id>.");
+- the check id (the line under the summary heading: "Profile ..., check \<id>.");
 - the first line;
 - the summary text of any reading that looks wrong, or the failure reason;
 - your PostgreSQL major, and where setup took longest.
