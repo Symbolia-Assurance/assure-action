@@ -10,7 +10,7 @@ You administer one self-hosted PostgreSQL server, major 14 to 18, and you can ru
 
 ## What you get
 
-A reading for each obligation Assure checks: holds, fails, deviates, vacuous, or why it could not be read. A run that meets your policy claims this: every rule Symbolia holds for the system was checked against what was observed and none is violated; what could not be observed or judged is named. It is a record of what was checked, never a seal of approval. [SCOPE.md](SCOPE.md) states the limits.
+A reading for each obligation Assure checks: holds, fails, deviates, vacuous, or why it could not be read. A green run claims this: within the bounds its first line states, nothing the rules Symbolia holds could check was disproven; every obligation that could not be established is named with what would establish it. It is a record of what was checked, never a seal of approval. [SCOPE.md](SCOPE.md) states the limits.
 
 ## Your first run
 
@@ -24,11 +24,11 @@ If the key is wrong or revoked, or you hit a rate limit, the API refuses the fir
 
 ## What the first line means
 
-"7 of 8 machines read, 1 refused" means seven parts of the check were read and one was not. Exit 3 means nothing was checked, or a machine was refused: the claim is about the whole system. Set `allow-partial: true` to accept a partial read.
+"green: 7 of 8 machines read, 1 refused; ..." means seven parts of the check were read, one was not, and nothing was disproven in what was read (exit 0). Red (exit 1) means something is disproven, and the line names it. Yellow (exit 3) means nothing could be read at all.
 
 ## Three things that will look odd today
 
-- **A refused machine (M2, client authentication) when the server has more than six databases or more than six users, as the checker counts them.** It counts the databases that allow connections, plus each one a `pg_hba.conf` rule names, and the login roles, plus each `+group`. The summary names the bound exceeded, for example "databases 7 (cap 6)" or "users 7 (cap 6)". The other machines still read; set `allow-partial: true` to accept them. M2 also reads "missing method" today when any `pg_hba.conf` line uses `peer`, `ident` or another external authentication method (the Debian and Ubuntu default `local all postgres peer` included), until the checker bounds those methods.
+- **A refused machine (M2, client authentication) when the server has more than six databases or more than six users, as the checker counts them.** It counts the databases that allow connections, plus each one a `pg_hba.conf` rule names, and the login roles, plus each `+group`. The summary names the bound exceeded, for example "databases 7 (cap 6)" or "users 7 (cap 6)". The other machines still read, and the run stays green unless something is disproven. M2 also reads "missing method" today when any `pg_hba.conf` line uses `peer`, `ident` or another external authentication method (the Debian and Ubuntu default `local all postgres peer` included), until the checker bounds those methods.
 - **A `pg_hba.conf` rule with a quoted role name, an `@file` list or a regular-expression user reads `representation` or `missing method`, not a verdict.** Under the default `fail-on: fails` such a run can still pass; choose `fail-on: fails,not_collected` to make those readings stop the job. A rule the collector has to withhold (an unclosed quote, for example) appears as `not observed: pg_hba.conf line N (<reason>)`.
 - **Readings that read not observed or representation where you might expect a verdict.** On PostgreSQL 18 the collection role cannot read `pg_hba_file_rules`, `pg_file_settings` or `pg_subscription`, so the readings that need them read not observed. With more than one `SECURITY DEFINER` function, the search-path readings (SD-1, SD-2) read representation.
 

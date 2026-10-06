@@ -10,6 +10,10 @@
 
 **Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
 
+Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
+
+Assure is the check that reads green only when nothing it examined is disproven. It tells you the bounds of what it has established, and why it matters. In an age where machines generate code at a volume nobody can read, Assure shows that each change maintains its baseline security and reliability, and stays true to any formalised requirements.
+
 The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with your API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence exists for PostgreSQL 18.
@@ -162,14 +166,17 @@ The runner must reach your database and `api.symbolia.ai`. For a database on a p
 
 ## Reading your first result
 
-The first line of the job summary, and the Action's last log line, says how much was read: "N of 8 machines read, M refused". A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason.
+The first line of the job summary, and the Action's last log line, starts with a colour, then says how much was read, "N of 8 machines read, M refused", and the bounds of the result. A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason.
 
-Exit 3 means one of two things:
+- **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; not established: 18 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: <action>". One line follows for each obligation that could not be established, "<id>: <reason> — <owner>: <what it needs>". Green never means more than this.
+- **red**: something is disproven, for example "red: ...; disproven: <obligation> — <object>, <access path>, <locator>". It exits 1 when your `fail-on` names the status (`fails` by default). A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — <obligation>", never "disproven".
+- **yellow** (exit 3): nothing could be read at all, "yellow: could not look: <reason>; <action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
 
-- nothing was checked: the summary says "No verdicts", or a typed outcome stopped the check before any reading;
-- a machine was refused. The claim of a check is about the whole system, so a run that read only part of it does not meet the policy by default.
+Under the first line, one sentence says what it means in plain words. For a green PostgreSQL run: "Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 40 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it." For red, the consequence of what was disproven and where; for yellow, that nothing below is a finding and what to do. Each disproven or deviating obligation is listed under "Why it matters" with its statement and its consequence ("Consequence not yet stated for <obligation>." until the profile states one).
 
-If you accept a partial read, set `allow-partial: true`. A run with refused machines then exits 0 when no reading has a status you fail on, and 1 when one has.
+[FIRST-LINE-SAMPLES.md](FIRST-LINE-SAMPLES.md) shows one first line for each colour, word for word, with the meaning sentence for each colour and profile.
+
+A refused machine bounds the result and is named; a status you name in `fail-on` on its rows stops the job as on a read machine, and a reading the checker kept on it is read as not observed. `allow-partial` is still accepted and no longer changes anything.
 
 Under the first line, the summary lists every reading under its status, each with its text: why it holds, why it fails, or what could not be read. The verdict file holds the same readings with their premises ([VERDICTS.md](VERDICTS.md)). The Action keeps it at the `output` path; the workflow above uploads it as the `assure-verdict` artifact.
 
@@ -189,13 +196,14 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `collection-privileges` | `pg_read_all_settings,pg_read_all_stats` | The roles you granted to the collection role: one or both of these two. |
 | `data-dir` | none | A path where the runner can read the server's data directory. Used with `connection`. |
 | `config-dirs` | none | Directories that hold the server's configuration files outside the data directory, one per line or separated by colons. Used with `connection`. |
-| `fail-on` | `fails` | Which statuses fail the job (section 7). The API checks it against the profile and applies it. |
-| `allow-partial` | `false` | `true` accepts a run in which some machines could not be read (section 7). Any other word is `bad_input`. |
+| `fail-on` | `fails` | Which statuses fail the job (section 7). The API checks it against the profile and applies it. `unresolved-security` adds strict (section 7). |
+| `allow-partial` | `false` | Accepted for compatibility; it no longer changes the exit (section 7). Any other word is `bad_input`. |
 | `scope` | none | A JSON file of selected ids, for a profile whose scope you select. Both PostgreSQL profiles take none. |
 | `scope-binding` | none | A JSON file holding the whole `scope_binding` object, for a profile that binds its scope: the token map under the profile's map name, and any record the profile lists. The Action checks its keys before collecting. Both PostgreSQL profiles take none. For `http-observed-baseline`, leave it empty and the Action makes it. |
 | `identity-key` | `pipe` | For `http-observed-baseline`: how the endpoint identity key reaches the identity producer. Only `pipe`. The Action makes a fresh key for each job, passes it to the producer and then the collector on a pipe, and keeps nothing, so no key is an input, an environment variable or a file and nothing persists between runs; that is fine while no accepted scope exists, since a later comparison with an accepted scope will need a key kept across runs. Any other value is masked and refused before anything is read. |
 | `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
 | `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report", below). `mode: api` only. Any other word is `bad_input`. |
+| `allow-overage` | `false` | With `report: true`, `true` lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2 ("The report", below). Any other word is `bad_input`. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 
@@ -287,7 +295,7 @@ The words a profile accepts:
 
 - any status the profile can emit except `holds` and `vacuous`;
 - `not_collected`: every status the profile uses for a fact it could not read or represent;
-- `never`, on its own: readings never fail the job.
+- `never`, on its own: readings never fail the job, except a prove-class obligation that is not proven (exit 1, `not_proven`).
 
 | Profile | Statuses you can name | `not_collected` stands for |
 |---|---|---|
@@ -301,31 +309,34 @@ Examples:
 - `fails` (the default): the job fails when any obligation reads fails.
 - `fails,deviates`: the job also fails on a deviation from vendor guidance or from the Assure baseline (observed profile).
 - `fails,not_collected`: the job also fails when a needed fact was not collected or could not be represented.
-- `never`: readings never fail the job. A typed outcome still does.
+- `never`: readings never fail the job, except a prove-class obligation that is not proven, which exits 1 (`not_proven`). A typed outcome still does.
+- `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): <id> — <reason>; <action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin <pin>", and the first line says "strict: n of m security obligations observable at this pin".
+
+Each obligation has a class its profile declares, never settable per run, and `GET /v1/profiles` lists it: `refute` (green unless disproven) or `prove` (red unless proven). A prove-class obligation that does not read holds on a machine that was read turns the run red, "not proven: <id> — input not observed" when its input could not be read, else "not proven: <id> — <reason>; <action>", and the first line states "prove-class obligations: p (unproven: u)". Every obligation of today's profiles is refute-class.
 
 The Action exits with the verdict's own policy exit, `policy.exit` in the verdict file. `policy.reason` says why, in one word. The job summary states the policy and this run's exit in plain words.
 
 | Code | `policy.reason` | Meaning |
 |---|---|---|
-| 0 | `policy_met` | A verdict was written, and no reading has a status you fail on. |
-| 0 | `never` | A verdict was written, and `fail-on` is `never`. |
-| 1 | `policy_failed` | A reading has a status you fail on. |
-| 2 | | Bad input. Fix the inputs or files. |
-| 3 | `no_verdict` | Nothing was checked: no reading is a verdict, and no reading has a status you fail on. |
-| 3 | `input_integrity` | Nothing was checked: the input-integrity gate stopped the check. |
-| 3 | `machines_refused` | Some machines could not be read, and `allow-partial` is not `true`. The readings cover only the machines that were read. |
-| 3 | `scope_refused` | Part of the selected scope (for example an endpoint) was not observed, and `allow-partial` is not `true`. Both PostgreSQL profiles check machines, so they never give this reason. |
+| 0 | `nothing_disproven` | Green: nothing is disproven within the bounds the first line states. Machines or endpoints that could not be read, and a run with no verdict, are named there and do not change the exit. |
+| 0 | `never` | `fail-on` is `never`. The first line keeps the colour the readings give. A prove-class obligation that is not proven still exits 1 (`not_proven`). |
+| 1 | `disproven` | Red: a reading on a machine that was read has a status you fail on. A disproof your `fail-on` leaves out stays red with exit 0 and the same reason. |
+| 1 | `not_proven` | Red: a prove-class obligation is not proven. |
+| 1 | `unresolved_strict` | Red: under strict, an obligation marked `security: true` is unresolved. |
+| 1 | `stopped_by_choice` | Red: a reading has a status that is not a verdict and that your `fail-on` names (`not_observed`, or a status `not_collected` stands for). The job stopped on a status you named in fail-on; the colour above says whether anything is disproven. |
+| 2 | | Bad input, or an API key that is missing, unknown or revoked (`unauthenticated`). Red. Fix the inputs, the files or the key. |
+| 3 | `could_not_look` | Yellow: nothing could be read at all: the input-integrity gate stopped the check, no machine was read, or no selected endpoint was observed. |
 | 3 | | A typed outcome. The failure file holds the reason and what to do. |
 
-A failed policy wins over no verdict: when a reading has a status you fail on, the exit is 1 even if no reading is a verdict, and even if some machines could not be read. The input-integrity gate gives 3 under every policy except `never`.
+A reading with a status you fail on gives exit 1 whatever could not be read. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `allow-partial` no longer changes the exit. The input-integrity gate gives 3 under every policy except `never`.
 
-A vacuous reading only says that a domain was empty. A run whose only verdicts are vacuous reads "No verdicts" and the job stops with exit 3.
+A vacuous reading only says that a domain was empty. A run whose only verdicts are vacuous reads "No verdicts" in the summary, and its first line says "nothing could be established".
 
-The first line of the job summary, and the Action's last log line, say how many machines were read and how many could not be read, for example "5 of 8 machines read, 3 refused", or "No machine could be read". The count is out of every machine the profile checks: a machine that gave no reading at all is listed as refused with the reason "no readings for this machine". When Assure worked the list out from the readings because the checker did not report it, the line ends "(inferred)", for example "8 of 8 machines read, none refused (inferred)". The summary lists each machine that could not be read with the checker's reason. The claim of a check is about the whole system, so by default a run in which machines were refused exits 3. If you accept a partial read, set `allow-partial: true`: such a run then exits 0 when no reading has a status you fail on.
+The first line counts the machines read out of every machine the profile checks, "5 of 8 machines read, 3 refused" (", K refused" only when a machine was refused): a machine that gave no reading at all is listed as refused with the reason "no readings for this machine". When Assure worked the list out from the readings because the checker did not report it, the count ends "(inferred)". The bounds follow: "declared premises: n" (premises you declared; "none (observed profile)" for an observed profile that has none) and "version pins: major 18" (the server's observed major; "none" when the readings name none). Under the meaning sentence, the summary answers three questions in three short sentences, "Usable readings: u of n. Coverage complete: yes or no. Job stops: no (exit 0 by your fail-on), or yes (exit 1).", followed by the collection time and the loaded state when the collector records them, and lists the obligations the profile version cannot yet check (representation, missing method) under their own heading, "Unsupported by this profile version: n".
 
 If the checker itself fails, the result is the typed outcome `checker_error` (exit 3) under every policy, `never` included. A check is charged once the checker has started, whatever its result, `checker_error` and `checker_timeout` included. One failure is not charged: the checker's own internal error, a `checker_error` whose `detail.rule` is `internal_error`. A request refused before the checker starts is never charged, and neither is a check cut short by a server restart; it still counts against your rate limits. A result is returned whenever one can be produced: when the checker's output for one machine is malformed, that machine is listed under "Machines not read" with its reason (`malformed_output: ...`, or `server_fault: ...` when the server could not write it) and the other machines keep their readings. When no result can be produced, the failure's `detail.malformation` says what was malformed: a fixed kind, the file, the line, the field and the expected form, never your text.
 
-The Action sets three outputs: `verdict-path`, `outcome` and `exit-code`.
+The Action sets five outputs: `verdict-path`, `outcome`, `exit-code`, `colour` (`green`, `red` or `yellow`; a failure is `red` for bad input or a bad key, exit 2, and `yellow` otherwise) and `not-established` (how many obligations could not be established; empty for a failure).
 
 ## 8. Where the results appear
 
@@ -335,9 +346,9 @@ The Action sets three outputs: `verdict-path`, `outcome` and `exit-code`.
   - `TLS to the server: yes (<protocol>, <cipher>, <bits> bits)`, `no` or `not recorded`.
 
   Behind a connection pooler they describe the pooler's session to the server, not your runner's connection to the pooler. The job log carries the same two lines.
-- **Annotations.** Each `fails` reading is an error annotation. Each `deviates` reading is a warning annotation. At most 50 appear.
+- **Annotations.** The first line is the first notice annotation. Each `fails` reading is an error annotation. Each `deviates` reading is a warning annotation. Under strict, each obligation that could not be established is a notice annotation. At most 50 of each appear.
 
-When no obligation reaches a verdict, the summary headline reads "No verdicts" and the job stops with exit 3. That means nothing could be checked. It never means "no issues".
+When no obligation reaches a verdict, the summary says "No verdicts" and the first line says "nothing could be established". It never means "no issues".
 
 Text from the checker or your files is shown as plain text. A web address in it appears as code, never as a link.
 
@@ -348,7 +359,9 @@ Set `report: true` to get a plain-language report of the claim tree behind a ver
 - **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
 - **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: <reason>." A refused report adds one warning annotation, never an error.
 
-The report never changes the verdict, the verdict file or the exit code. The first line and the verdict file stay the record. The `report-status` output reads `written`, `withheld` or `refused`. [DATA.md](DATA.md) says what is sent to the writer and how long a report is kept.
+The report never changes the verdict, the verdict file or the exit code. The first line and the verdict file stay the record. The `report-status` output reads `written`, `withheld`, `refused`, or `running` when the report was still being written as the Action stopped waiting; the summary and `report-url` then name its page, to open later. [DATA.md](DATA.md) says what is sent to the writer and how long a report is kept.
+
+**What a report costs.** Each plan has a monthly report allowance, counted in USD at the model's price. No plan's allowance is set yet, so today every report is overage. A report within the allowance is not charged. The part of a report's cost beyond it is charged at cost x 1.2. Before a report runs, the API holds its expected cost (the high end of its quote) against your allowance and top-up, so two reports never share the same cover. A report that would go beyond the allowance runs only when you set `allow-overage: true`, or when your account's top-up covers the hold. Otherwise the API refuses it with `allowance_exhausted`: nothing runs and nothing is charged, and the summary reads "Report: allowance exhausted: USD q needed; set allow-overage or top up". Without `allow-overage`, a report is never charged more than its hold, even when the model cost more. Each paid plan also has a monthly overage ceiling (`overage_ceiling`, refused even with `allow-overage`) and a daily report cap (`daily_report_cap`). A withheld report still cost the model call, so it is charged the same way as a written one, and the cost line says why; only a report the writer never answered (`writer_unavailable`) costs and is charged nothing. Asking again for a report you already have returns the same record at no cost. The summary adds one line, "Report: cost USD x.xxx, charged USD y.yyy, allowance remaining USD z.zz", and the outputs `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining` hold the same figures.
 
 ## 9. Using collected files instead of a connection
 
@@ -392,7 +405,7 @@ The last line of the summary says what left your runner:
 | `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://` (plain `http://` only for a loopback host). | Read the reason and fix the input. |
 | `oversize_input` | 2 | A file, the file count or the total size is over the limit. | Remove files the profile does not read. Limits: 4 MiB per file, 64 files, 8 MiB in total. |
 | `unknown_profile` | 2 | The API serves no profile with that name. | Use a profile the API lists. |
-| `unauthenticated` | 3 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
+| `unauthenticated` | 2 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
 | `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits once for a wait of up to 60 seconds. | Run again later. |
 | `credit_exhausted` | 3 | The account's free credit is spent. | Contact Symbolia. |
 | `server_busy` | 3 | The API's queue stayed full after three attempts. | Run again in a minute. |
@@ -410,6 +423,10 @@ The last line of the summary says what left your runner:
 A collection with gaps is still a verdict. Each gap reads **not observed** with the place it was looked for.
 
 `tier_excludes` never ends a job. With `report: true`, it means your account's tier does not include the report: the verdict, its summary and its exit stand, and the summary says the report was withheld. Leave `report` off, or ask Symbolia about a tier that includes the report.
+
+`allowance_exhausted` never ends a job either. With `report: true`, it means your plan's report allowance is not set or is spent for the month, and nothing pays for the report: the verdict, its summary and its exit stand, and the summary names the USD needed. Set `allow-overage: true`, or ask Symbolia to top up your account.
+
+`overage_ceiling` never ends a job: this month's report overage would pass your account's ceiling, so the report does not run, even with `allow-overage`. `daily_report_cap` never ends a job: your account has had its reports for the day (UTC). Nothing runs and nothing is charged for either.
 
 ## 11. Profiles
 
@@ -467,6 +484,6 @@ Every reading summary carries the profile's three scope notes:
 - Evidence freshness and response authenticity are unverified; same-selection replay is not excluded.
 - Per-endpoint coverage qualifications are not displayed in this report.
 
-A full read of the two `https` endpoints above has the first line "2 of 2 endpoints observed, none refused; 4 of 5 machines read, 1 refused": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. By default that run exits 3 (`machines_refused`); set `allow-partial: true` to accept the other machines' readings. For `http://` endpoints M2 reads vacuous and the first line is "2 of 2 endpoints observed, none refused; 5 of 5 machines read, none refused". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1.
+A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; not established: 6 — top action: collect the facts HTTP-TLS10-NEGOTIATION reads": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; not established: 3 — top action: state it in requirements.md". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red.
 
-The policy exits are those of section 7: `policy_met` (0) when no reading has a status you fail on and every selected endpoint was observed; `policy_failed` (1) when one has; `scope_refused` (3) when a selected endpoint was not observed and `allow-partial` is not set; `no_verdict` (3) and `machines_refused` (3) as for PostgreSQL.
+The policy exits are those of section 7: `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read; `disproven` (1, red) when a reading has a status you fail on; `could_not_look` (3, yellow) when no endpoint was observed or no machine could be read.

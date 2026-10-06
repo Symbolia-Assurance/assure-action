@@ -14,7 +14,8 @@ _TABLE = {
     'bad_input': (400, 2, 'Fix the request so every file is allow-listed for the profile and well formed, then send it again.'),
     'oversize_input': (413, 2, 'Send fewer or smaller files, within the published size and count limits.'),
     'unknown_profile': (404, 2, 'Choose a profile from the list of served profiles.'),
-    'unauthenticated': (401, None, 'Send a valid, unrevoked API key in the Authorization header.'),
+    # serve-016 (REFUTATION-028 F5; DD-073's table: bad input, auth, key read red, exit 2)
+    'unauthenticated': (401, 2, 'Send a valid, unrevoked API key in the Authorization header.'),
     'rate_limited': (429, None, 'Wait for the time given in Retry-After, then send the request again.'),
     'credit_exhausted': (402, None, 'Your free credit is spent; contact Symbolia to continue.'),
     'engine_digest_mismatch': (503, 3, 'Report it to Symbolia (or reinstall the pinned release when you run the engine yourself), because the engine files differ from their pin and no check ran.'),
@@ -31,6 +32,17 @@ _TABLE = {
     # serve-014: the account's tier does not include the claim-tree report (refused before any model call).
     'tier_excludes': (403, None, 'Ask Symbolia to move this account to a tier that includes the report, or leave the '
                                  'report off.'),
+    # serve-015: a metered line's allowance is spent and nothing pays for the request (refused before any model call,
+    # free of charge, counted in the rate windows).
+    'allowance_exhausted': (402, None, 'Send the request again with allow_overage true (the Action input allow-overage) '
+                                       'to pay the overage, or ask Symbolia to top up this account; nothing ran and '
+                                       'nothing was charged.'),
+    # serve-015: the month's overage would pass the account's ceiling (refused even with allow_overage), or the
+    # account has had its reports for the day (UTC). Both before any model call, free of charge.
+    'overage_ceiling': (402, None, 'Wait for next month, or ask Symbolia to raise this account\'s overage ceiling; '
+                                   'nothing ran and nothing was charged.'),
+    'daily_report_cap': (402, None, 'Wait for the time given in Retry-After (midnight UTC), or ask Symbolia to raise '
+                                    'this account\'s daily report cap; nothing ran and nothing was charged.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),
@@ -59,6 +71,7 @@ MALFORMATIONS = MappingProxyType({
     'fail_on': 'a comma list of the words this profile accepts, or never alone',
     'allow_partial': 'true or false (the API query: 1 or 0)',
     'idempotency_key': 'one Idempotency-Key of 16 to 64 characters of A-Z, a-z, 0-9, _ and -',
+    'report_body': 'no body, or a JSON object whose only key is allow_overage, true or false (serve-015)',
     # a file's content
     'json_file': 'valid JSON in this file',
     'json_unicode': 'strings in this file that are valid Unicode',
@@ -99,7 +112,7 @@ MALFORMATIONS = MappingProxyType({
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
                     'allow_partial', 'redaction_withheld', 'sanitised_sha256', 'entries', 'major', 'server.major',
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
-                    'scope_binding', 'accepted_scope_ref'})
+                    'scope_binding', 'accepted_scope_ref', 'allow_overage'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',

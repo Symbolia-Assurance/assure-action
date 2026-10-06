@@ -30,7 +30,9 @@ Rules:
 - `report(check_id)` (serve-014) asks for a verdict's claim-tree report: `POST /v1/checks/{id}/report` with an empty
   body, then `GET` the same route while 202, with the same backoff and `total_wait_s` bound (past it, `api_error`); a
   typed refusal carries `detail.answered = 'report'`. The answer must be a report record (`assure.serve.report/v1`,
-  status written or withheld), else `api_error`.
+  status written or withheld), else `api_error`. serve-015: `allow_overage=True` sends the body
+  `{"allow_overage":true}` (the operator pays overage beyond the monthly allowance); false sends the empty body as
+  before. `allowance_exhausted` is never retried.
 Every failure is a typed Refusal; nothing here returns a pass that did not come from the server.
 
 `allow_list(listing, profile_id)` builds a profile's allow-list from `GET /v1/profiles`: exact paths and full-match
@@ -65,7 +67,7 @@ RESPONSE_LIMITS = bundle.Limits(body_bytes=MAX_RESPONSE, file_bytes=MAX_RESPONSE
 MAX_KEY = 512
 MAX_RETRY_AFTER_S = 60
 NEVER_RETRY = frozenset({'unauthenticated', 'bad_input', 'oversize_input', 'unknown_profile', 'credit_exhausted',
-                         'profile_not_servable'})
+                         'profile_not_servable', 'allowance_exhausted'})
 RETRY_TYPED = frozenset({'server_busy'})
 CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')
@@ -310,17 +312,19 @@ class Client:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
         return doc
 
-    def report(self, check_id):
+    def report(self, check_id, *, allow_overage=False):
         """serve-014: the claim-tree report record of one verdict (module docstring). Every other end is a Refusal."""
         if not isinstance(check_id, str) or not CHECK_ID_RE.fullmatch(check_id):
             raise Refusal('bad_input', 'a report needs the check id of a verdict')
         started = self.clock()
         path = '/v1/checks/%s/report' % check_id
-        status, doc = self._call('POST', path, b'', route='report')
+        body = b'{"allow_overage":true}' if allow_overage is True else b''     # serve-015
+        status, doc = self._call('POST', path, body, route='report')
         polls = 0
         while status == 202:
             if self.clock() - started >= self.total_wait_s:
-                raise Refusal('api_error', 'the report did not finish within %d s' % int(self.total_wait_s))
+                raise Refusal('api_error', 'the report did not finish within %d s' % int(self.total_wait_s),
+                              report_running=True)     # serve-015: still being written; the page will hold it
             self.sleep(self.poll_s[min(polls, len(self.poll_s) - 1)])
             polls += 1
             status, doc = self._call('GET', path, route='report')

@@ -48,11 +48,11 @@ inputs:
     required: false
     default: ''
   fail-on:
-    description: Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never.
+    description: Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never. unresolved-security (strict) also fails the job on an obligation the checker marks `security: true` that is not resolved.
     required: false
     default: fails
   allow-partial:
-    description: true lets a run in which some machines could not be read meet the policy (exit 0 when no reading has a fail-on status). Default false, so such a run exits 3.
+    description: Accepted for compatibility; it no longer changes the exit. A run in which some machines could not be read is green unless something is disproven, and the first line names what was not read.
     required: false
     default: 'false'
   scope:
@@ -75,6 +75,10 @@ inputs:
     description: true asks the Assure API for the plain-language report of the check's claim tree (api mode only; your account's tier must include it). The job summary then carries the report after the first line, or the summary and the reason it was withheld. The verdict, its file and the exit code never change. Default false.
     required: false
     default: 'false'
+  allow-overage:
+    description: With report true, true lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged.
+    required: false
+    default: 'false'
   output:
     description: Where to write the verdict file.
     required: false
@@ -92,14 +96,29 @@ outputs:
     description: verdict, no_verdict, or the typed failure outcome.
     value: ${{ steps.assure.outputs.outcome }}
   exit-code:
-    description: The verdict's policy exit (0 policy met or never, 1 policy failed, 3 nothing was checked or machines were refused), 2 bad input, 3 typed refusal or API failure.
+    description: The verdict's policy exit (0 nothing disproven or never, 1 something disproven or a status you chose to stop on, 3 could not look), 2 bad input or a missing, unknown or revoked key, 3 another typed refusal or an API failure.
     value: ${{ steps.assure.outputs.exit-code }}
+  colour:
+    description: green (nothing disproven within the bounds the first line states); red (something disproven, a prove-class obligation not proven, a status you chose to stop on, an unresolved obligation under strict, bad input, or a missing, unknown or revoked key); yellow (could not look: nothing readable, the credit is spent, a rate limit, or another typed refusal).
+    value: ${{ steps.assure.outputs.colour }}
+  not-established:
+    description: How many obligations the check could not establish (each is named in the job summary). Empty for a failure.
+    value: ${{ steps.assure.outputs.not-established }}
   report-status:
-    description: With report true, written, withheld or refused. Empty otherwise.
+    description: With report true, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.
     value: ${{ steps.assure.outputs.report-status }}
   report-url:
     description: With report true, the report page on the API (open it with your API key). Empty otherwise.
     value: ${{ steps.assure.outputs.report-url }}
+  report-cost-usd:
+    description: With report true, what the report cost at the model's price, in USD. Empty otherwise.
+    value: ${{ steps.assure.outputs.report-cost-usd }}
+  report-charge-usd:
+    description: With report true, what the report was charged, in USD (0 within the monthly allowance). Empty otherwise.
+    value: ${{ steps.assure.outputs.report-charge-usd }}
+  report-allowance-remaining:
+    description: With report true, the report allowance left this month, in USD. Empty otherwise.
+    value: ${{ steps.assure.outputs.report-allowance-remaining }}
 
 runs:
   using: composite
@@ -124,6 +143,7 @@ runs:
         INPUT_ACCEPTED_SCOPE_REF: ${{ inputs.accepted-scope-ref }}
         INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
         INPUT_REPORT: ${{ inputs.report }}
+        INPUT_ALLOW_OVERAGE: ${{ inputs.allow-overage }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

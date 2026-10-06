@@ -6,7 +6,7 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_REPORT, INPUT_OUTPUT), with
+INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_OUTPUT), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
@@ -18,8 +18,8 @@ connection or a runner token.
   never leaves the runner -> `POST /v1/checks?fail_on=...[&allow_partial=1]` over TLS with the key -> poll while 202 -> the returned
   envelope is written to the output path -> the job summary and annotations are rendered here from it -> the exit code
   is the envelope's `policy.exit` (never derived here). A failure envelope gives its outcome's exit code. `fail-on` is
-  sent as written; the server checks it against the profile. `allow-partial` is `true` or `false` (default false; any
-  other word is `bad_input`): true lets a run in which some machines could not be read meet the policy.
+  sent as written; the server checks it against the profile; `unresolved-security` is the strict preset. `allow-partial`
+  is `true` or `false` (default false; any other word is `bad_input`) and no longer changes the exit (serve-016).
   `scope` (a JSON file holding the list of selected ids), `scope-binding` (a JSON file holding the whole binding
   object, {<map>: {id: token}[, <record>: {...}]}, serve-010) and `accepted-scope-ref` (a string) are sent as
   request-body fields, never as files and never read from the collected bundle. The binding's keys must be exactly the
@@ -43,21 +43,33 @@ connection or a runner token.
   deterministic summary and "The report was withheld: <reason>." (`serve.render.report_withheld_line`), with the page
   line when a record came back. A refused report is one `::warning`, never an error. The verdict file, the exit code
   and the `outcome` output are the verdict's whatever the report did; the outputs add `report-status` (written,
-  withheld or refused) and `report-url` (the page, `<api-url>/v1/checks/<id>/report.html`, opened with the key). The
+  withheld, refused, or running when the poll ran out while the report was written: serve-015, with the page line)
+  and `report-url` (the page, `<api-url>/v1/checks/<id>/report.html`, opened with the key). The
   verdict file is the envelope byte for byte, so the page is named in the summary and the outputs, never inside it.
   `mode: local` refuses `report: true` (`bad_input`) before anything is read: the report runs on the API only.
+  serve-015: `allow-overage` (`true` or `false`, default false; any other word is `bad_input` before anything is
+  read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
+  and its overage is charged. The summary adds one line from the record, "Report: cost USD x.xxx, charged USD y.yyy,
+  allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted`, "Report: allowance
+  exhausted: USD q needed; set allow-overage or top up"; the outputs add `report-cost-usd`, `report-charge-usd` and
+  `report-allowance-remaining` (empty when the record carries none).
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
 
-The last stdout line reads `Assure: <how many machines were read and refused>; <outcome>; policy exit <n>; <path>`, for
-example `Assure: 5 of 8 machines read, 3 refused; verdict; policy exit 3; assure-verdict.json` (`serve.render.first_line`:
-for a profile scoped by another unit the scope phrase comes first, `1 of 2 endpoints observed, 1 refused; 5 of 5
-machines read, none refused`; an envelope without `machines`, from an older server, leaves that part out).
+The last stdout line reads `Assure: <the verdict line>; <outcome>; policy exit <n>; <path>` (serve-016: the verdict
+line is `serve.render.verdict_line`, the job summary's headline and the first `::notice`), for example `Assure: green: 5
+of 8 machines read, 3 refused; declared premises: 0; version pins: major 18; nothing disproven; not established: 4;
+verdict; policy exit 0; assure-verdict.json`. An envelope without `colour`, from an older server, gives the coverage
+phrase there instead (`serve.render.first_line`), or nothing for one without `machines`. The step outputs add `colour`
+(green, red or yellow) and `not-established` (how many obligations were not established); a failure gives `colour` red
+for exit 2 and yellow otherwise, and an empty `not-established`.
 
-Exit codes: 0 policy met, 1 policy failed, 2 bad input, 3 nothing was checked (no verdict, the input-integrity gate
-stopped the check, or machines were refused and allow-partial is not set), a typed refusal or a delivery failure (`api_unreachable`, `api_error`); an outcome with no exit code
-of its own (for example `unauthenticated`) exits 3. Every failure writes the failure envelope at the output path, its
+Exit codes: 0 nothing disproven (or fail-on never), 1 something disproven, 2 bad input, 3 could not look (the
+input-integrity gate stopped the check, or nothing could be read), a typed refusal or a delivery failure
+(`api_unreachable`, `api_error`); an outcome with no exit code of its own (for example `rate_limited`) exits 3.
+`unauthenticated` exits 2, red, as DD-073's table puts auth and key failures (serve-016, REFUTATION-028 F5).
+`allow-partial` is still accepted and changes no exit (serve-016). Every failure writes the failure envelope at the output path, its
 summary and one `::error` line. The summary names a check only when the check reached the server: the server's check id
 is kept in `detail.check_id` (from its failure envelope, or from a verdict that came back and then could not be used);
 a refusal the API answered says which request it refused (`detail.answered`, set by the client): the profile list
@@ -109,7 +121,7 @@ SCOPE_REF_REASON = ('no accepted scope record can be resolved for this account a
                     'accepted_scope_ref for a first-run comparison')
 MAX_NOTICE_NAMES = 20
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
-_FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, ]{0,100}')
+_FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, -]{0,100}')     # serve-016: '-' for unresolved-security
 _OUTCOME_SHAPE = re.compile(r'[a-z_]{1,40}')
 _FROZEN = object()
 # The variables a child process of the Action may still see (ACTION-06): no input, key, connection or runner token.
@@ -117,9 +129,9 @@ KEEP_ENV = ('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TZ', 'SYSTEMROOT', 
             'NO_PROXY', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR')
 
 
-def _cmd_data(value):
+def _cmd_data(value, cap=300):
     s = '' if value is None else str(value)
-    s = s if len(s) <= 300 else s[:299] + '…'
+    s = s if cap is None or len(s) <= cap else s[:cap - 1] + '…'
     return s.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
 
 
@@ -331,19 +343,54 @@ def parse_report(text):
     raise Refusal('bad_input', 'report must be true or false')
 
 
+def parse_allow_overage(text):
+    """serve-015: the `allow-overage` input, read as `allow-partial` is."""
+    v = (text or '').strip().lower()
+    if v in ('', 'false', '0'):
+        return False
+    if v in ('true', '1'):
+        return True
+    raise Refusal('bad_input', 'allow-overage must be true or false')
+
+
+def _report_usage(report):
+    """serve-015: (summary line or None, step outputs text) of a report record or refusal."""
+    cost = report.get('cost') if isinstance(report, dict) and isinstance(report.get('cost'), dict) else {}
+    if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted':
+        line = render.report_exhausted_line(report.detail.get('topup_needed_usd'))
+    else:
+        line = render.report_cost_line(report) if isinstance(report, dict) else None
+
+    def num(v):
+        return '' if isinstance(v, bool) or not isinstance(v, (int, float)) else repr(float(v))
+    outs = 'report-cost-usd=%s\nreport-charge-usd=%s\nreport-allowance-remaining=%s\n' % (
+        num(cost.get('usd')) if 'charge_usd' in cost else '', num(cost.get('charge_usd')),
+        num(cost.get('allowance_remaining')))
+    return line, outs
+
+
 def _with_report(summary, report, url):
     """(summary, report-status, report-url) for a requested report (module docstring). `report` is the record or the
     Refusal that ended the request."""
     if isinstance(report, dict) and report.get('status') == 'written':
         head = summary.split('\n', 1)[0]
         return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n' + render.report_page_line(url)
-                + '\n', 'written', url)
+                + '\n' + _usage_tail(report), 'written', url)
     if isinstance(report, dict):
         fallback = report.get('fallback') if isinstance(report.get('fallback'), dict) else {}
         return (summary + '\n' + render.report_withheld_line(fallback.get('reason')) + '\n'
-                + render.report_page_line(url) + '\n', 'withheld', url)
+                + render.report_page_line(url) + '\n' + _usage_tail(report), 'withheld', url)
     reason = report.reason if isinstance(report, Refusal) else None
-    return summary + '\n' + render.report_withheld_line(reason) + '\n', 'refused', ''
+    if isinstance(report, Refusal) and report.detail.get('report_running') is True:
+        # serve-015: the poll ran out while the report was being written; the page will carry it
+        return (summary + '\n' + render.report_withheld_line(reason) + '\n' + render.report_page_line(url) + '\n',
+                'running', url)
+    return summary + '\n' + render.report_withheld_line(reason) + '\n' + _usage_tail(report), 'refused', ''
+
+
+def _usage_tail(report):
+    line = _report_usage(report)[0]
+    return '' if line is None else line + '\n'
 
 
 def _scratch(env):
@@ -377,12 +424,17 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
-             'report_url': ''}
+             'report_url': '', 'allow_overage': False}
 
-    def outputs(outcome, code, extra=''):
+    def outputs(outcome, code, extra='', verdict=None):
+        if verdict is None:                       # serve-016: a failure is red for bad input, yellow otherwise
+            colour, n = ('red' if code == 2 else 'yellow'), ''
+        else:
+            colour = verdict.get('colour') if verdict.get('colour') in render.COLOURS else ''
+            n = str(len(verdict['not_established'])) if isinstance(verdict.get('not_established'), list) else ''
         try:
-            _append(env.get('GITHUB_OUTPUT'), 'verdict-path=%s\noutcome=%s\nexit-code=%d\n%s' % (out_text, outcome, code,
-                                                                                                extra))
+            _append(env.get('GITHUB_OUTPUT'), 'verdict-path=%s\noutcome=%s\nexit-code=%d\ncolour=%s\nnot-established=%s\n%s'
+                    % (out_text, outcome, code, colour, n, extra))
         except OSError as w:
             say('::warning title=Assure::%s' % _cmd_data('the step outputs could not be written (%s)' % type(w).__name__))
 
@@ -519,7 +571,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if state['report_on']:                    # serve-014: never changes the verdict, its file or its exit
             state['report_url'] = client.base + '/v1/checks/%s/report.html' % verdict['check_id']
             try:
-                state['report'] = client.report(verdict['check_id'])
+                state['report'] = client.report(verdict['check_id'], allow_overage=state['allow_overage'])
             except Refusal as e:
                 state['report'] = scrub.refusal(e)
             except Exception as e:  # typed, never a traceback; the class name only
@@ -530,6 +582,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         try:
             state['mode'] = _mode(env)
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'))   # serve-014: before anything is read
+            state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
             if state['report_on'] and state['mode'] == 'local':
                 raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
@@ -552,7 +605,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         summary = render.summary_markdown(verdict)
         if state['report_on']:
             summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'])
-            report_extra = 'report-status=%s\nreport-url=%s\n' % (report_status, report_url)
+            report_extra = 'report-status=%s\nreport-url=%s\n' % (report_status, report_url) \
+                + _report_usage(state['report'])[1]
         if state['withheld'] is not None:
             summary += withhold.summary_markdown(state['withheld'])
         summary += markers.session_markdown(state['session'])
@@ -583,10 +637,11 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line
     if bound is not None:
         say('Assure: scope: %s' % _cmd_data(bound))
-    line = render.first_line(verdict)
-    say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line) + '; ',
+    line = render.verdict_line(verdict)              # serve-016: the verdict line; an older server's coverage phrase
+    line = render.first_line(verdict) if line is None else line
+    say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line, cap=None) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
-    outputs(verdict['outcome'], code, report_extra)
+    outputs(verdict['outcome'], code, report_extra, verdict)
     return code
 
 

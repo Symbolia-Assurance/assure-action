@@ -14,9 +14,9 @@ The design treats a wrong "holds" as the worst possible outcome. When a fact is 
 
 ## What a check that meets the policy claims
 
-Under the default policy (`fail-on: fails`), a check exits 0 only when every machine was read, at least one obligation reads holds or deviates, and none reads fails. Such a check claims this: every rule Symbolia holds for the system was checked against what was observed and none is violated; what could not be observed or judged is named. Deviations from a recommendation are listed beside it. The claim covers these rules and these observations, and nothing beyond them. Uptime and behaviour under load are outside it, because no rule for them exists yet.
+Under the default policy (`fail-on: fails`), a check is green and exits 0 when nothing is disproven. A green check claims only this: within the bounds its first line states, nothing the rules Symbolia holds could check was disproven; every obligation that could not be established is named with what would establish it. Its first line states those bounds: the machines read and refused, the declared premises and the version pins. Deviations from a recommendation are listed beside it. The claim covers these rules and these observations, and nothing beyond them. Uptime and behaviour under load are outside it, because no rule for them exists yet.
 
-A run in which some machines could not be read exits 3 by default, because the claim is about the whole system; the first line of the summary says how many machines were read and how many were refused. A run that checked nothing, or whose only verdicts are vacuous, also exits 3, and so does a run in which no machine could be read, even with allow-partial set.
+A run in which some machines could not be read is green unless something is disproven, and its first line says how many machines were read and how many were refused. When no obligation on the machines read holds, the first line says "nothing could be established". Only a run in which nothing could be read at all is yellow and exits 3.
 
 ## What a verdict claims
 
@@ -44,7 +44,7 @@ The collector and checker accept majors 14 to 18. The major comes from the obser
 
 ## Managed PostgreSQL
 
-Some facts live in configuration files: `postgresql.conf` and its includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`. With a connection and no data directory, those files cannot be read. This is the usual case for managed PostgreSQL services. Then every reading that could not be made is named with its status and its reason, such as not observed or representation; the reason says which fact or file was missing. A machine the checker could not read at all is listed with its reason under "Machines not read" in the job summary, and in the verdict's `machines` field. A run in which machines were refused does not meet the policy by default: it exits 3. Set `allow-partial: true` to accept a partial read.
+Some facts live in configuration files: `postgresql.conf` and its includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`. With a connection and no data directory, those files cannot be read. This is the usual case for managed PostgreSQL services. Then every reading that could not be made is named with its status and its reason, such as not observed or representation; the reason says which fact or file was missing. A machine the checker could not read at all is listed with its reason under "Machines not read" in the job summary, and in the verdict's `machines` field. A run in which machines were refused is green unless something is disproven, and its first line names what was not read.
 
 To fail a job when a needed fact was not collected, set `fail-on` to `fails,not_collected`.
 
