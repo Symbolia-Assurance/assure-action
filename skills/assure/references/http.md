@@ -59,9 +59,9 @@ head -n 1 http-fixture/head-001.txt
 
 `-I` sends a HEAD request and writes the head as received, every line ending in CRLF, with the empty line that ends it. `--http1.1` matters: the first line of each head must be an HTTP/1.1 status line, such as `HTTP/1.1 200 OK`. A head whose first line is another version, such as `HTTP/2 200` from a capture without `--http1.1`, or `HTTP/1.0 200 OK` from a server that answers in HTTP/1.0, is recorded as not observed. Without `-L`, `curl` does not follow a redirect, so a `3xx` head is the endpoint's own answer.
 
-Set `complete` to `true` for each head you captured this way. Commit `http-fixture/` with the manifest; the workflow below checks it out.
+Set `complete` to `true` for each head you captured this way.
 
-A complete workflow for the HTTP profile:
+A complete workflow for the HTTP profile captures the heads in the job. Commit `http-fixture/manifest.json` alone; one step per endpoint runs `curl` and writes that endpoint's head beside it. Every run then checks fresh heads, and no captured head is committed to your repository.
 
 ```yaml
 name: Assure HTTP
@@ -71,6 +71,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -87,6 +89,12 @@ jobs:
         uses: actions/setup-python@<full commit sha of the release you trust>
         with:
           python-version: "3.14"
+
+      - name: Capture the head of /checkout
+        run: curl -sS --http1.1 -I https://shop.example.test/checkout > http-fixture/head-001.txt
+
+      - name: Capture the head of /login
+        run: curl -sS --http1.1 -I https://shop.example.test/login > http-fixture/head-002.txt
 
       - name: Assure check
         id: assure
@@ -105,6 +113,10 @@ jobs:
           name: assure-verdict
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
+
+Each run is a new check, even when the heads are the same as the last run's, byte for byte: the Action makes a fresh identity key for each job, so the endpoint tokens it sends differ from run to run (section 9).
+
+You can instead commit the captured heads with the manifest and leave out the capture steps. Use this offline route when you must reproduce a check on a fixture that does not change, for example heads you captured once to keep as a record.
 
 Every reading summary carries the profile's three scope notes:
 

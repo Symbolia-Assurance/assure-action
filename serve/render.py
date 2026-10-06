@@ -459,7 +459,9 @@ def red_findings(envelope):
     - 'not_proven': every prove-class obligation of `bias.prove` with no holds on a machine that was read (or
       'disproven' when it reads fails: listed above);
     - 'strict': under the strict preset, every obligation of `bias.security` with no verdict (a verdict status or
-      vacuous) on a machine that was read;
+      vacuous) on a machine that was read (DD-079 W3: every unresolved security obligation binds, including an
+      intent-bound one, reading "depends on what the system is for; state it in requirements.md", and one the pin
+      could not observe, reading "not observable at collector pin <pin>"; the coverage count is observability only);
     - 'chosen': every reading of a non-verdict status fail-on names (`not_observed`, `not_collected`'s statuses):
       never "disproven", always "stopped by your choice".
     An obligation is listed once, under its first kind."""
@@ -486,8 +488,8 @@ def red_findings(envelope):
         out.append(('not_proven', i, r))
     if STRICT in words:
         named_ids = {i for _, i, _ in out}
-        unobservable = set(bias.get('unobservable') or ())        # only what the collector pin can observe counts
-        for i in [x for x in bias.get('security') or () if x not in unobservable]:
+        # DD-079 W3: every unresolved security obligation binds, intent-bound and unobservable at the pin included
+        for i in list(bias.get('security') or ()):
             r = by_id.get(i)
             if i in named_ids or (r is not None and r.get('status') in verdicts and r.get('machine') in read):
                 continue
@@ -682,6 +684,10 @@ def _red_words(env, finding):
         return 'stopped by your choice: %s — %s' % (_clip(label((row or {}).get('status'))),
                                                      _clip(ob_id if ob_id is not None else (row or {}).get('machine')))
     lead = 'not proven: ' if kind == 'not_proven' else 'unresolved by your choice (strict): '
+    if kind == 'strict':                             # serve-027: the count, then the first in reading order
+        k = len([f for f in red_findings(env) if f[0] == 'strict'])
+        if k > 1:
+            lead += '%d, first ' % k
     entry = next((e for e in env.get('not_established') or () if isinstance(e, dict) and e.get('id') == ob_id), None)
     unread = (row is None or row.get('machine') not in _read_set(env)
               or (entry is not None and entry.get('reason_class') == 'not_observed'))
@@ -961,13 +967,16 @@ def why_lines(envelope):
 
 
 def _strict_words(env):
-    """2073 N6: 'strict: no obligations marked' when the strict preset is set and the profile marks no obligation."""
+    """2073 N6: 'strict: no obligations marked' when the strict preset is set and the profile marks no obligation;
+    otherwise 'strict: n of m security obligations observable at this pin', where m counts the intent-free security
+    obligations and n those of them the collector pin can observe (serve-026)."""
     pol = env.get('policy') if isinstance(env.get('policy'), dict) else {}
     b = env.get('bias') if isinstance(env.get('bias'), dict) else {}
     if STRICT in (pol.get('fail_on') or ()) and not b.get('security'):
         return 'strict: no obligations marked'
     if STRICT in (pol.get('fail_on') or ()):           # the security obligations the collector pin can observe
-        sec = list(b.get('security') or ())
+        # serve-026: of the intent-free ones; an intent-bound obligation is unobservable by any collector, not this pin
+        sec = [i for i in b.get('security') or () if i not in set(b.get('intent_bound') or ())]
         seen = [i for i in sec if i not in set(b.get('unobservable') or ())]
         return 'strict: %d of %d security obligations observable at this pin' % (len(seen), len(sec))
     return None
@@ -1044,7 +1053,8 @@ def summary_markdown(envelope, now=None):
         out.append('%sNone of the readings is a verdict that checked something; a vacuous reading only says a domain '
                    'was empty. Read each status below for what was and was not checked.' % lead_nv)
     statuses = [s for s in fail_on if s != STRICT]
-    strict = ', or when an obligation marked security is not resolved (strict)' if STRICT in fail_on else ''
+    strict = (', or when an obligation marked security is not resolved, intent-bound ones included (strict)'
+              if STRICT in fail_on else '')
     if statuses:                                  # R2-10 (b): the sentence names strict when it is set
         out.append('Policy: the job stops with exit 1 when any reading is %s%s.'
                    % (' or '.join(esc(label(s)) for s in statuses), strict))

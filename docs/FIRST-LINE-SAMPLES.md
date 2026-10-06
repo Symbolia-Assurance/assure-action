@@ -28,10 +28,10 @@ yellow: could not look: the input could not be represented; re-collect with the 
 
 ## Strict
 
-The successor build's readings with `fail-on: unresolved-security`. The observed profile marks 36 of its 40 obligations `security: true`, all observable at this collector pin. PRIV-1 is one of them and reads needs intent, so it is unresolved: strict stops the job (exit 1, `unresolved_strict`), and the line names it with what would resolve it.
+The successor build's readings with `fail-on: unresolved-security`. The observed profile marks 36 of its 40 obligations `security: true`. Fourteen of them are intent-bound: they depend on what the system is for, which no collector can observe, so the count "19 of 22" leaves them out; it counts observability only. Of the other 22, the collector pin observes 19; HBA-6, TLS-1-OB and LR-3-OB are listed as not observable at the collector pin. All security obligations without a verdict bind under strict, including one the pin cannot observe; the report names each and why: 19 here, the 14 intent-bound ones, HBA-1-OB, REP-1-OB and the three the pin cannot observe. The job stops (exit 1, `unresolved_strict`), and the line gives the count and names the first in reading order, PRIV-1, with what would resolve it.
 
 ```text
-red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; strict: 36 of 36 security obligations observable at this pin; deviations: 2; unresolved by your choice (strict): PRIV-1 — depends on what the system is for; state it in requirements.md
+red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; strict: 19 of 22 security obligations observable at this pin; deviations: 2; unresolved by your choice (strict): 19, first PRIV-1 — depends on what the system is for; state it in requirements.md
 ```
 
 ## Every obligation not established

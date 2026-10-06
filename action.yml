@@ -79,6 +79,10 @@ inputs:
     description: With report true, true lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged.
     required: false
     default: 'false'
+  fresh-check:
+    description: true sends a random Idempotency-Key, so the same bundle is checked, and charged, again. False (the default) derives the key from the content of the request, so a repeat of the same request gets the stored verdict back and is not charged again.
+    required: false
+    default: 'false'
   output:
     description: Where to write the verdict file.
     required: false
@@ -144,6 +148,7 @@ runs:
         INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
         INPUT_REPORT: ${{ inputs.report }}
         INPUT_ALLOW_OVERAGE: ${{ inputs.allow-overage }}
+        INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

@@ -235,4 +235,10 @@ python3.14 -B assure-action/action/collector/collect_pg.py --out collected \
   --role-created-for-run yes
 ```
 
-Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it is a new check, charged again, and it says nothing about the change.
+Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it gets the stored verdict of the first run back, and it says nothing about the change.
+
+The Action makes one check per distinct bundle. It derives its `Idempotency-Key` from the content of the request: a digest of the bundle's files, the profile, the selected scope and its binding, and the `fail-on` and `allow-partial` words as sent. A later run whose request is the same, byte for byte, gets the stored verdict of the first run back, and it is not charged again. A changed byte in any file is a new check. A changed `fail-on` is a new check too, because the stored verdict carries the policy it was checked under.
+
+A collection from a connection is never the same twice: the collector records when it collected and how long each query took. An HTTP check is never the same twice either: the Action makes a fresh identity key for each job, so the endpoint tokens differ from run to run. A stored verdict comes back when `artefacts` holds a collected bundle with the same files as an earlier run, for example when you run a job again.
+
+A stored failure comes back the same way. To check the same bundle again on purpose, set `fresh-check: true`: the Action then sends a random key, and the check runs and is charged again. The server keeps a key for as long as the verdict it points to (30 days).

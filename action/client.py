@@ -11,8 +11,10 @@ Rules:
   (127.0.0.1, ::1, localhost). TLS verification is the default context's and is never turned off. A redirect is never
   followed (the key could otherwise reach another host): a 3xx answer is `api_error`. Loopback requests use no proxy.
 - The key goes only in `Authorization: Bearer`. No error text holds the key, a request body or a response header.
-- One submit sends one random `Idempotency-Key` (32 hex) and reuses it on every retry, so the server creates and
-  charges the check once.
+- One submit sends one `Idempotency-Key` (32 hex) and reuses it on every retry, so the server creates and charges the
+  check once. By default it is random; `key_from_bundle=True` (serve-023, the Action's default) derives it from the
+  request's content with `check_key`, so a later submit of the same request gets the stored check back (the server's
+  idempotency: 200 with the stored envelope, not charged again) and a changed byte is a new check.
 - Delivery failures (refused or reset connection, DNS, TLS, timeout, a 5xx with no failure envelope, a body that is not
   bounded JSON or has no known schema, a body over 16 MiB) are retried on the same route with bounded backoff (3
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
@@ -44,7 +46,9 @@ names, so the Action can check the keys of the `scope_binding` it sends), else N
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
+import json
 import re
 import secrets
 import ssl
@@ -94,6 +98,29 @@ def _clip(value):
     s = '' if value is None else str(value)
     s = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', s)
     return s if len(s) <= _TEXT_CAP else s[:_TEXT_CAP - 1] + '…'
+
+
+def _digest_of(value):
+    """sha256 hex of a JSON value encoded as the request body encodes it, or None for None."""
+    if value is None:
+        return None
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def check_key(profile_id, files, query, *, scope=None, scope_binding=None):
+    """serve-023: the Idempotency-Key of one request, derived from its content: the first 32 hex of
+    sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256, query}).
+    `bundle_sha256` is the digest of the bundle's manifest ([{path, bytes, sha256}] sorted by path, the manifest the
+    server computes); `scope_sha256` and `scope_binding_sha256` are the digests of those body fields (null when unset);
+    `requirements_sha256` is null (the request carries no requirements); `query` is the query string as sent
+    (`fail_on`, `allow_partial`). The server answers a repeated key whose request differs with `bad_input`, so every
+    part of the request it compares is in the key: the fail-on words too, because a repeat returns the stored verdict
+    with the policy it was checked under. The key is a digest of the whole document, never the bundle digest itself."""
+    manifest = [{'path': n, 'bytes': len(files[n]), 'sha256': hashlib.sha256(bytes(files[n])).hexdigest()}
+                for n in sorted(files)]
+    doc = {'bundle_sha256': bundle.bundle_sha256(manifest), 'profile': profile_id, 'scope_sha256': _digest_of(scope),
+           'scope_binding_sha256': _digest_of(scope_binding), 'requirements_sha256': None, 'query': query or ''}
+    return hashlib.sha256(bundle.canonical_json(doc)).hexdigest()[:32]
 
 
 def check_base_url(text):
@@ -272,11 +299,14 @@ class Client:
         return doc
 
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
-               scope_binding=None, accepted_scope_ref=None, limits=None):
+               scope_binding=None, accepted_scope_ref=None, limits=None, key_from_bundle=False):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
-        built here under `limits` (default the serving limits) with the scope fields that are not None."""
+        built here under `limits` (default the serving limits) with the scope fields that are not None.
+        `key_from_bundle=True` sends `check_key` of the request (it needs `files`), else a random key."""
         started = self.clock()
+        if key_from_bundle and (files is None or body is not None):
+            raise ValueError('a key from the bundle is derived from the files and the scope fields, not a built body')
         if body is None:
             body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                        scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref)
@@ -288,9 +318,13 @@ class Client:
             query['fail_on'] = fail_on
         if allow_partial is True:
             query['allow_partial'] = '1'
-        if query:
-            path += '?' + urllib.parse.urlencode(query)
-        idem = secrets.token_hex(16)
+        query_text = urllib.parse.urlencode(query) if query else ''
+        if query_text:
+            path += '?' + query_text
+        if key_from_bundle:
+            idem = check_key(profile_id, files, query_text, scope=scope, scope_binding=scope_binding)
+        else:
+            idem = secrets.token_hex(16)
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
         polls = 0
         while status == 202:

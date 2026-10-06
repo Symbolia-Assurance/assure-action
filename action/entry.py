@@ -6,7 +6,7 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_OUTPUT), with
+INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_FRESH_CHECK, INPUT_OUTPUT), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
@@ -53,6 +53,11 @@ connection or a runner token.
   allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted`, "Report: allowance
   exhausted: USD q needed; set allow-overage or top up"; the outputs add `report-cost-usd`, `report-charge-usd` and
   `report-allowance-remaining` (empty when the record carries none).
+  serve-023: the check's `Idempotency-Key` is derived from the request's content (`action.client.check_key`: the
+  bundle digest of the files sent, the profile, the scope fields and the query), so one check is made per distinct
+  bundle: a later run that sends the same request gets the stored verdict back from the server, not charged again.
+  `fresh-check` (`true` or `false`, default false; any other word is `bad_input` before anything is read) sends a
+  random key instead, for a deliberate re-check. In `mode: local` it changes nothing.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -353,6 +358,16 @@ def parse_allow_overage(text):
     raise Refusal('bad_input', 'allow-overage must be true or false')
 
 
+def parse_fresh_check(text):
+    """serve-023: the `fresh-check` input, read as `allow-partial` is."""
+    v = (text or '').strip().lower()
+    if v in ('', 'false', '0'):
+        return False
+    if v in ('true', '1'):
+        return True
+    raise Refusal('bad_input', 'fresh-check must be true or false')
+
+
 def _report_usage(report):
     """serve-015: (summary line or None, step outputs text) of a report record or refusal."""
     cost = report.get('cost') if isinstance(report, dict) and isinstance(report.get('cost'), dict) else {}
@@ -424,7 +439,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
-             'report_url': '', 'allow_overage': False}
+             'report_url': '', 'allow_overage': False, 'fresh_check': False}
 
     def outputs(outcome, code, extra='', verdict=None):
         if verdict is None:                       # serve-016: a failure is red for bad input, yellow otherwise
@@ -564,7 +579,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
         verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, limits=lim,
                                 scope=scope, scope_binding=binding,
-                                accepted_scope_ref=inputs['accepted_scope_ref'], **extra)
+                                accepted_scope_ref=inputs['accepted_scope_ref'],
+                                key_from_bundle=not state['fresh_check'], **extra)
         if isinstance(verdict, dict):
             state['server_check_id'] = verdict.get('check_id')
         check_verdict(verdict)
@@ -583,6 +599,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             state['mode'] = _mode(env)
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'))   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
+            state['fresh_check'] = parse_fresh_check(_plain(env, 'INPUT_FRESH_CHECK'))           # serve-023
             if state['report_on'] and state['mode'] == 'local':
                 raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()

@@ -214,6 +214,7 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
 | `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report"). `mode: api` only. Any other word is `bad_input`. |
 | `allow-overage` | `false` | With `report: true`, `true` lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2 ("The report"). Any other word is `bad_input`. |
+| `fresh-check` | `false` | `true` sends a random `Idempotency-Key`, so the same bundle is checked, and charged, again (section 9). By default the key comes from the content of the request, and a repeat of the same request gets the stored verdict back. Any other word is `bad_input`. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 
@@ -320,7 +321,7 @@ Examples:
 - `fails,deviates`: the job also fails on a deviation from vendor guidance or from the Assure baseline (observed profile).
 - `fails,not_collected`: the job also fails when a needed fact was not collected or could not be represented.
 - `never`: readings never fail the job, except a prove-class obligation that is not proven, which exits 1 (`not_proven`). A typed outcome still does.
-- `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): \<id> — \<reason>; \<action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin \<pin>", and the first line says "strict: n of m security obligations observable at this pin".
+- `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): \<id> — \<reason>; \<action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count in n and m: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin \<pin>", and the first line says "strict: n of m security obligations observable at this pin". An intent-bound obligation (`class: intent_bound`) depends on what the system is for, which no collector observes. All security obligations without a verdict bind under strict, including one the pin cannot observe; the report names each and why. An intent-bound one is named "unresolved by your choice (strict)", reads "depends on what the system is for" and has the action "state it in requirements.md". n and m count observability only: an intent-bound obligation never counts in them and is never listed as not observable at the collector pin; m counts the intent-free security obligations.
 
 Each obligation has a class its profile declares, never settable per run, and `GET /v1/profiles` lists it: `refute` (green unless disproven) or `prove` (red unless proven). A prove-class obligation that does not read holds on a machine that was read turns the run red, "not proven: \<id> — input not observed" when its input could not be read, else "not proven: \<id> — \<reason>; \<action>", and the first line states "prove-class obligations: p (unproven: u)". Every obligation of today's profiles is refute-class.
 
@@ -569,7 +570,13 @@ python3.14 -B assure-action/action/collector/collect_pg.py --out collected \
   --role-created-for-run yes
 ```
 
-Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it is a new check, charged again, and it says nothing about the change.
+Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it gets the stored verdict of the first run back, and it says nothing about the change.
+
+The Action makes one check per distinct bundle. It derives its `Idempotency-Key` from the content of the request: a digest of the bundle's files, the profile, the selected scope and its binding, and the `fail-on` and `allow-partial` words as sent. A later run whose request is the same, byte for byte, gets the stored verdict of the first run back, and it is not charged again. A changed byte in any file is a new check. A changed `fail-on` is a new check too, because the stored verdict carries the policy it was checked under.
+
+A collection from a connection is never the same twice: the collector records when it collected and how long each query took. An HTTP check is never the same twice either: the Action makes a fresh identity key for each job, so the endpoint tokens differ from run to run. A stored verdict comes back when `artefacts` holds a collected bundle with the same files as an earlier run, for example when you run a job again.
+
+A stored failure comes back the same way. To check the same bundle again on purpose, set `fresh-check: true`: the Action then sends a random key, and the check runs and is charged again. The server keeps a key for as long as the verdict it points to (30 days).
 
 ## 10. Typed outcomes
 
@@ -677,9 +684,9 @@ head -n 1 http-fixture/head-001.txt
 
 `-I` sends a HEAD request and writes the head as received, every line ending in CRLF, with the empty line that ends it. `--http1.1` matters: the first line of each head must be an HTTP/1.1 status line, such as `HTTP/1.1 200 OK`. A head whose first line is another version, such as `HTTP/2 200` from a capture without `--http1.1`, or `HTTP/1.0 200 OK` from a server that answers in HTTP/1.0, is recorded as not observed. Without `-L`, `curl` does not follow a redirect, so a `3xx` head is the endpoint's own answer.
 
-Set `complete` to `true` for each head you captured this way. Commit `http-fixture/` with the manifest; the workflow below checks it out.
+Set `complete` to `true` for each head you captured this way.
 
-A complete workflow for the HTTP profile:
+A complete workflow for the HTTP profile captures the heads in the job. Commit `http-fixture/manifest.json` alone; one step per endpoint runs `curl` and writes that endpoint's head beside it. Every run then checks fresh heads, and no captured head is committed to your repository.
 
 ```yaml
 name: Assure HTTP
@@ -689,6 +696,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -705,6 +714,12 @@ jobs:
         uses: actions/setup-python@<full commit sha of the release you trust>
         with:
           python-version: "3.14"
+
+      - name: Capture the head of /checkout
+        run: curl -sS --http1.1 -I https://shop.example.test/checkout > http-fixture/head-001.txt
+
+      - name: Capture the head of /login
+        run: curl -sS --http1.1 -I https://shop.example.test/login > http-fixture/head-002.txt
 
       - name: Assure check
         id: assure
@@ -723,6 +738,10 @@ jobs:
           name: assure-verdict
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
+
+Each run is a new check, even when the heads are the same as the last run's, byte for byte: the Action makes a fresh identity key for each job, so the endpoint tokens it sends differ from run to run (section 9).
+
+You can instead commit the captured heads with the manifest and leave out the capture steps. Use this offline route when you must reproduce a check on a fixture that does not change, for example heads you captured once to keep as a record.
 
 Every reading summary carries the profile's three scope notes:
 
