@@ -61,6 +61,8 @@ Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a comm
 
 Put the commit of `Symbolia-Assurance/assure-action` you fetched this file from, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
 
+`SOURCE-CONTRACT.json` at the top of this repository records the digest of the Assure source the tree was built from, the files that built it and the digest of every file it ships, with its details in `SOURCE-CONTRACT-DETAIL.json`; `DIST-MANIFEST.json` lists each shipped file with its digest and the reason it ships.
+
 The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, collecting over a connection, managed PostgreSQL, running the collector yourself, complete workflow files that run on pull requests and on pushes to your default branch, the HTTP captures, and every typed outcome.
 
 ## Inputs
