@@ -20,6 +20,10 @@ is built, named only by allow-listed relative paths, and written by this module 
   Action sends; a field left unset is not sent, so a PostgreSQL body is byte for byte what it was. `from_request(...,
   with_scope=True)` (the API) also returns those three fields when present (serve-006 gap 1); the profile row checks
   them (`serve.profiles.bind_request`).
+- serve-019 (coordination 2136): the body may also carry `requirements` (requirements.md as text: at most 65536 bytes,
+  256 lines, 8192 bytes per line), `repository` (owner/name) and `commit` (40 lower-case hex), the two together or
+  neither, and `provenance` (caller or runner) only with them (`upload_fields`). They are metadata beside the files,
+  never a raw/ file; `request_body` sends each only when it is set.
 - `context/` under the work directory is the server's own (serve-006 gap 2: the trusted scope context): `check_name`
   refuses a customer name under it, whatever a profile pattern matches, in any case and in compatibility forms such as
   fullwidth letters (a case-insensitive filesystem would otherwise put it there).
@@ -51,6 +55,28 @@ RUNNER_ONLY = ('REDACTION-MANIFEST.json',)
 SERVING_DIR = 'context'
 # The optional request fields of the selected scope (serve-006 gap 1), each with the malformation kind a null value reads.
 SCOPE_FIELDS = (('scope', 'scope_missing'), ('scope_binding', 'scope_binding'), ('accepted_scope_ref', 'scope_ref'))
+# serve-019 (coordination 2136): the requirements upload fields, metadata beside the files and never a raw/ file. The
+# bounds are serve.requirements' own (a test holds them equal); this module never imports the matcher.
+REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance')
+MAX_REQUIREMENTS_BYTES = 65536
+MAX_REQUIREMENTS_LINES = 256
+MAX_REQUIREMENT_LINE_BYTES = 8192
+PROVENANCES = ('caller', 'runner')
+_NAME_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-')
+
+
+def repository_ok(value):
+    """True for `owner/name`: one slash, each side 1 to 100 of A-Z, a-z, 0-9, `_`, `.` and `-` (no `re`: the public
+    tree pins this module's imports)."""
+    if not isinstance(value, str) or value.count('/') != 1:
+        return False
+    owner, name = value.split('/')
+    return all(0 < len(part) <= 100 and set(part) <= _NAME_CHARS for part in (owner, name)) and owner[0] not in '.-'
+
+
+def commit_ok(value):
+    """True for 40 lower-case hex digits."""
+    return isinstance(value, str) and len(value) == 40 and set(value) <= set('0123456789abcdef')
 
 
 @dataclass(frozen=True)
@@ -182,10 +208,11 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
     `accepted_scope_ref` (serve-006 gap 1), returned as a third item {field: value} holding only the fields sent; a field
     sent as null is `bad_input`. Their values are checked against the profile row later (`serve.profiles`)."""
     doc = parse_json(body, limits)
-    optional = {k for k, _ in SCOPE_FIELDS} if with_scope else set()
+    optional = ({k for k, _ in SCOPE_FIELDS} | set(REQUIREMENT_FIELDS)) if with_scope else set()
     if not isinstance(doc, dict) or not {'profile', 'files'} <= set(doc) <= {'profile', 'files'} | optional:
         raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s'
-                      % (' (and optionally scope, scope_binding and accepted_scope_ref)' if with_scope else ''),
+                      % (' (and optionally scope, scope_binding, accepted_scope_ref, requirements, repository, commit '
+                         'and provenance)' if with_scope else ''),
                       malformation=malformation('body_shape'))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
@@ -217,7 +244,69 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
             raise Refusal('bad_input', '%s is null; leave it out when it is not sent' % key,
                           malformation=malformation(kind, field=None if key == 'scope' else key))
         asked[key] = doc[key]
+    asked.update(upload_fields({k: doc[k] for k in REQUIREMENT_FIELDS if k in doc}))
     return profile_id, files, asked
+
+
+def requirement_lines(text):
+    """REFUTATION-034 F8: the physical lines of requirements text, split on LF, where one final LF (or CRLF) ends
+    the last line instead of starting another: 'a\\nb\\n' and 'a\\nb' are 2 lines. The serving adapter hands the
+    matcher the text without that one final line end, so both count alike."""
+    n = text.count('\n') + 1
+    return n - 1 if text.endswith('\n') and n > 1 else n
+
+
+def check_requirements(text):
+    """serve-019: `text` as requirements.md text within the bounds (MAX_REQUIREMENTS_*: bytes, physical lines split
+    on LF, bytes per physical line), or `bad_input` with the malformation kind `requirements` (and the line beyond the
+    bound). Its content is never quoted."""
+    def bad(why, line=None):
+        return Refusal('bad_input', 'requirements %s' % why,
+                       malformation=malformation('requirements', line=line, field='requirements'))
+    if not isinstance(text, str):
+        raise bad('must be text')
+    try:
+        data = text.encode('utf-8')
+    except UnicodeEncodeError:
+        raise bad('must be valid UTF-8 text') from None
+    if len(data) > MAX_REQUIREMENTS_BYTES:
+        raise bad('are %d bytes; the limit is %d' % (len(data), MAX_REQUIREMENTS_BYTES))
+    lines = text.split('\n')
+    if requirement_lines(text) > MAX_REQUIREMENTS_LINES:
+        raise bad('are %d lines; the limit is %d' % (requirement_lines(text), MAX_REQUIREMENTS_LINES))
+    for n, line in enumerate(lines, 1):
+        if len(line.encode('utf-8')) > MAX_REQUIREMENT_LINE_BYTES:
+            raise bad('line %d is longer than %d bytes' % (n, MAX_REQUIREMENT_LINE_BYTES), line=n)
+    return text
+
+
+def upload_fields(fields):
+    """serve-019 (coordination 2136): the requirements upload fields checked: `requirements` (`check_requirements`),
+    `repository` (owner/name) and `commit` (40 lower-case hex) together or not at all, and `provenance` (caller or
+    runner; the API reads an absent one as caller) only with them. Shape only: the pair is never read as authority over
+    an account or as a GitHub attestation. `bad_input` (kind `requirements` or `provenance`) otherwise."""
+    out = {}
+    if 'requirements' in fields:
+        out['requirements'] = check_requirements(fields['requirements'])
+
+    def bad(why, field):
+        return Refusal('bad_input', why, malformation=malformation('provenance', field=field))
+    repo, commit = fields.get('repository'), fields.get('commit')
+    if ('repository' in fields) != ('commit' in fields):
+        raise bad('repository and commit travel together: send both or neither', 'repository')
+    if 'repository' in fields:
+        if not repository_ok(repo):
+            raise bad('repository must be owner/name', 'repository')
+        if not commit_ok(commit):
+            raise bad('commit must be 40 lower-case hex digits', 'commit')
+        out.update(repository=repo, commit=commit)
+    if 'provenance' in fields:
+        if 'repository' not in fields:
+            raise bad('provenance names who sent repository and commit; send it only with them', 'provenance')
+        if fields['provenance'] not in PROVENANCES:
+            raise bad('provenance must be caller or runner', 'provenance')
+        out['provenance'] = fields['provenance']
+    return out
 
 
 def _read_capped(path, cap):
@@ -474,13 +563,16 @@ def dumps(obj):
     return canonical_json(obj) + b'\n'
 
 
-def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None):
+def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None,
+                 requirements=None, repository=None, commit=None, provenance=None):
     """The upload body `{profile, files: {name: base64}}`, plus each of `scope`, `scope_binding` and
-    `accepted_scope_ref` that is not None (serve-006 gap 1); `oversize_input` when the encoded body passes the body
-    cap."""
+    `accepted_scope_ref` (serve-006 gap 1) and of `requirements`, `repository`, `commit` and `provenance` (serve-019)
+    that is not None; `oversize_input` when the encoded body passes the body cap."""
     doc = {'profile': profile_id,
            'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}}
-    for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref)):
+    for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref),
+                       ('requirements', requirements), ('repository', repository), ('commit', commit),
+                       ('provenance', provenance)):
         if value is not None:
             doc[key] = value
     body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')

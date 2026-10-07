@@ -24,7 +24,8 @@ Rules:
   poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
-- `fail_on` is passed through as the customer wrote it; the server checks it against the profile and decides the exit.
+- `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025: lower case, no spaces, each word once,
+  sorted), so equal policies are one query and one key; the server checks it against the profile and decides the exit.
   `allow_partial=True` adds `allow_partial=1` to the query; false sends nothing (the server's default).
 - `scope`, `scope_binding` (the body's form, {<map>: {id: token}[, <record>: {...}]}, serve-010) and
   `accepted_scope_ref` are request-body fields when given, never `files` entries; unset, the body is byte for byte what
@@ -107,19 +108,35 @@ def _digest_of(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
-def check_key(profile_id, files, query, *, scope=None, scope_binding=None):
+def canonical_fail_on(text):
+    """serve-025: the fail-on words as one canonical query value: each comma-separated word stripped of spaces and
+    lower-cased, each once, sorted, joined with commas, so "fails,deviates", "fails, deviates" and "deviates,fails" are
+    one policy. An empty word stays (the server still refuses it); None and '' are returned as given (no query)."""
+    if not text:
+        return text
+    return ','.join(sorted({w.strip().lower() for w in str(text).split(',')}))
+
+
+def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requirements=None, repository=None,
+              commit=None, provenance=None):
     """serve-023: the Idempotency-Key of one request, derived from its content: the first 32 hex of
-    sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256, query}).
+    sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256,
+    repository, commit, provenance, query}).
     `bundle_sha256` is the digest of the bundle's manifest ([{path, bytes, sha256}] sorted by path, the manifest the
     server computes); `scope_sha256` and `scope_binding_sha256` are the digests of those body fields (null when unset);
-    `requirements_sha256` is null (the request carries no requirements); `query` is the query string as sent
-    (`fail_on`, `allow_partial`). The server answers a repeated key whose request differs with `bad_input`, so every
-    part of the request it compares is in the key: the fail-on words too, because a repeat returns the stored verdict
-    with the policy it was checked under. The key is a digest of the whole document, never the bundle digest itself."""
+    `requirements_sha256` is the sha256 of the requirements text's UTF-8 bytes (the digest the server keeps with the
+    check), null when no text is sent; `repository`, `commit` and `provenance` are the body's own values, null when
+    unset (serve-025 merge with serve-019); `query` is the query string as sent (`fail_on`, `allow_partial`). The
+    server answers a repeated key whose request differs with `bad_input`, so every part of the request it compares is
+    in the key: the fail-on words too, because a repeat returns the stored verdict with the policy it was checked
+    under, and the commit, so a new commit on an unchanged bundle is a new check. The key is a digest of the whole
+    document, never the bundle digest itself."""
     manifest = [{'path': n, 'bytes': len(files[n]), 'sha256': hashlib.sha256(bytes(files[n])).hexdigest()}
                 for n in sorted(files)]
+    req = None if requirements is None else hashlib.sha256(requirements.encode('utf-8')).hexdigest()
     doc = {'bundle_sha256': bundle.bundle_sha256(manifest), 'profile': profile_id, 'scope_sha256': _digest_of(scope),
-           'scope_binding_sha256': _digest_of(scope_binding), 'requirements_sha256': None, 'query': query or ''}
+           'scope_binding_sha256': _digest_of(scope_binding), 'requirements_sha256': req, 'repository': repository,
+           'commit': commit, 'provenance': provenance, 'query': query or ''}
     return hashlib.sha256(bundle.canonical_json(doc)).hexdigest()[:32]
 
 
@@ -299,30 +316,36 @@ class Client:
         return doc
 
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
-               scope_binding=None, accepted_scope_ref=None, limits=None, key_from_bundle=False):
+               scope_binding=None, accepted_scope_ref=None, limits=None, requirements=None, repository=None,
+               commit=None, provenance=None, key_from_bundle=False):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
-        built here under `limits` (default the serving limits) with the scope fields that are not None.
+        built here under `limits` (default the serving limits) with the scope fields and the serve-019 requirements
+        fields (requirements, repository, commit, provenance) that are not None.
         `key_from_bundle=True` sends `check_key` of the request (it needs `files`), else a random key."""
         started = self.clock()
         if key_from_bundle and (files is None or body is not None):
             raise ValueError('a key from the bundle is derived from the files and the scope fields, not a built body')
         if body is None:
             body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
-                                       scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref)
-        elif (scope, scope_binding, accepted_scope_ref) != (None, None, None):
+                                       scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
+                                       requirements=requirements, repository=repository, commit=commit,
+                                       provenance=provenance)
+        elif (scope, scope_binding, accepted_scope_ref, requirements, repository, commit,
+              provenance) != (None,) * 7:
             raise ValueError('pass the scope fields or a built body, not both')
         path = '/v1/checks'
         query = {}
         if fail_on:
-            query['fail_on'] = fail_on
+            query['fail_on'] = canonical_fail_on(fail_on)
         if allow_partial is True:
             query['allow_partial'] = '1'
         query_text = urllib.parse.urlencode(query) if query else ''
         if query_text:
             path += '?' + query_text
         if key_from_bundle:
-            idem = check_key(profile_id, files, query_text, scope=scope, scope_binding=scope_binding)
+            idem = check_key(profile_id, files, query_text, scope=scope, scope_binding=scope_binding,
+                             requirements=requirements, repository=repository, commit=commit, provenance=provenance)
         else:
             idem = secrets.token_hex(16)
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')

@@ -1,0 +1,30 @@
+{
+  "access_paths_complete": true,
+  "administrators": [
+    "db_owner"
+  ],
+  "applications": [
+    "user_a",
+    "user_b"
+  ],
+  "database_owner": "db_owner",
+  "declared_predicate": "owner_id = auth.uid()",
+  "execution_authorized": false,
+  "hardware_authorized": false,
+  "id": "supabase-cpd-tenant-isolation",
+  "industrial_release_authorized": false,
+  "major": 17,
+  "physical_validation": false,
+  "protected_tables": [
+    "cpd_records"
+  ],
+  "release_allowed": false,
+  "required_policies": [
+    "cpd_own_rows"
+  ],
+  "rls_exempt_logins": [],
+  "schema": "assure.postgresql.declaration/v1",
+  "self_approved": false,
+  "simulation": true,
+  "view_exemptions": []
+}

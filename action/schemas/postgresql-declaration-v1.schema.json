@@ -1,0 +1,567 @@
+{
+  "$id": "urn:assure:postgresql-declaration:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "dependentRequired": {
+    "protected_tables": [
+      "declared_predicate",
+      "access_paths_complete"
+    ]
+  },
+  "description": "A declaration is a file in your repo at raw/declaration.json. Validation checks its shape. It names assumptions requiring operator confirmation and leaves verdicts to the checker. Existing legacy runtime declarations remain supported; add schema and id to validate against this public version. The declared predicate is matched by normalized SQL-text equality; tenant semantics are an operator assumption.",
+  "execution_authorized": false,
+  "hardware_authorized": false,
+  "industrial_release_authorized": false,
+  "physical_validation": false,
+  "properties": {
+    "access_paths_complete": {
+      "type": "boolean"
+    },
+    "administrators": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "allow_publisher_bypassrls": {
+      "type": "boolean"
+    },
+    "allow_publisher_superuser": {
+      "type": "boolean"
+    },
+    "applications": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "authority_complete": {
+      "type": "boolean"
+    },
+    "ca_bindings": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "ca": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "channel": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "server": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "ca",
+          "server"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "caller": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "certificate_roles": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "collection_role": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "database_owner": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "declared_predicate": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "declared_revokes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "cascade": {
+            "type": "boolean"
+          },
+          "grant_id": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "grant_option_only": {
+            "type": "boolean"
+          },
+          "object": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "grant_id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "default_acl_expectations": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "creator": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "expected_acl": {
+            "items": {
+              "items": false,
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE"
+                  ],
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "kind": {
+            "const": "table"
+          },
+          "schema": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "creator",
+          "schema",
+          "kind",
+          "expected_acl"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "disjoint_duties": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "left": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "object": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "privileges": {
+            "items": {
+              "enum": [
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "right": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "left",
+          "right",
+          "object",
+          "privileges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "exclusive_reader": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "execution_authorized": {
+      "const": false
+    },
+    "forbidden_methods": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "hardware_authorized": {
+      "const": false
+    },
+    "id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+      "type": "string"
+    },
+    "industrial_release_authorized": {
+      "const": false
+    },
+    "intended_flows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "database": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "method": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "rule_id": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "transport": {
+            "enum": [
+              "local",
+              "plain",
+              "tls",
+              "gss"
+            ],
+            "type": "string"
+          },
+          "user": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transport",
+          "database",
+          "user",
+          "address",
+          "method",
+          "rule_id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "intended_tables": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "key_file_mode": {
+      "pattern": "^0?[0-7]{3}$",
+      "type": "string"
+    },
+    "key_owner": {
+      "enum": [
+        "postgres",
+        "root",
+        "other"
+      ],
+      "type": "string"
+    },
+    "loaded_identity": {
+      "enum": [
+        "same",
+        "different",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "maintenance_window": {
+      "type": "boolean"
+    },
+    "major": {
+      "description": "Draft 2020-12 permits integer-valued numbers such as 17.0. The frozen derive step additionally requires integer JSON encoding (17), and the local validator reports that runtime compatibility rule.",
+      "maximum": 18,
+      "minimum": 14,
+      "type": "integer",
+      "x-runtime-integer-encoding": true
+    },
+    "no_loss_required": {
+      "type": "boolean"
+    },
+    "owner_only_login": {
+      "type": "boolean"
+    },
+    "permitted": {
+      "additionalProperties": {
+        "items": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "physical_validation": {
+      "const": false
+    },
+    "privilege_queries": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "object": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "privilege": {
+            "enum": [
+              "SELECT",
+              "INSERT",
+              "UPDATE",
+              "DELETE"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "object",
+          "privilege"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "protected_tables": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "release_allowed": {
+      "const": false
+    },
+    "replication_roles": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "required_policies": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "rls_exempt_logins": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema": {
+      "const": "assure.postgresql.declaration/v1"
+    },
+    "self_approved": {
+      "const": false
+    },
+    "sensitive_objects": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "sensitive_roles": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "shadow_allowed": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "simulation": {
+      "const": true
+    },
+    "slot_creation_actor": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "slot_creation_authority_declared": {
+      "type": "boolean"
+    },
+    "standby_addresses": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "standbys": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "primary_slot_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "standby_mode": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "address"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "target_schema": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "tls_floor": {
+      "enum": [
+        "TLSv1",
+        "TLSv1.1",
+        "TLSv1.2",
+        "TLSv1.3"
+      ],
+      "type": "string"
+    },
+    "trusted_addresses": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "trusted_owners": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "unbounded_retention_declared": {
+      "type": "boolean"
+    },
+    "untrusted_roles": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "view_exemptions": {
+      "items": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "release_allowed": false,
+  "required": [
+    "schema",
+    "id",
+    "major"
+  ],
+  "self_approved": false,
+  "simulation": true,
+  "title": "PostgreSQL declaration, version 1",
+  "type": "object"
+}

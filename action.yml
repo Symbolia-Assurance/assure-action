@@ -79,6 +79,10 @@ inputs:
     description: With report true, true lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged.
     required: false
     default: 'false'
+  requirements:
+    description: A requirements file to send with the check, api mode only (a path relative to the workspace). Empty sends the repository root's requirements.md when it can be sent; when it cannot (over 65536 bytes, 256 lines or 8192 bytes per line, a symbolic link, not a regular file or not UTF-8) nothing is sent and one notice says why. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements.
+    required: false
+    default: ''
   fresh-check:
     description: true sends a random Idempotency-Key, so the same bundle is checked, and charged, again. False (the default) derives the key from the content of the request, so a repeat of the same request gets the stored verdict back and is not charged again.
     required: false
@@ -108,6 +112,12 @@ outputs:
   not-established:
     description: How many obligations the check could not establish (each is named in the job summary). Empty for a failure.
     value: ${{ steps.assure.outputs.not-established }}
+  requirements-not-established:
+    description: With a requirements file sent, how many of its requirements are not established (each is named in the job summary). Empty otherwise.
+    value: ${{ steps.assure.outputs.requirements-not-established }}
+  requirements-disproven:
+    description: With a requirements file sent, how many of its requirements are disproven. Empty otherwise.
+    value: ${{ steps.assure.outputs.requirements-disproven }}
   report-status:
     description: With report true, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.
     value: ${{ steps.assure.outputs.report-status }}
@@ -148,6 +158,7 @@ runs:
         INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
         INPUT_REPORT: ${{ inputs.report }}
         INPUT_ALLOW_OVERAGE: ${{ inputs.allow-overage }}
+        INPUT_REQUIREMENTS: ${{ inputs.requirements }}
         INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}

@@ -85,6 +85,15 @@ are the closed table of DESIGN-004 section 2 (`REASON_WORDS`). Green reads "noth
 never "safe". An envelope without `colour` (an older server) renders as before. `red_findings` and `could_not_look`
 are the policy's own tests (serve/envelope.py imports them), kept here because this module ships in the Action.
 
+serve-019 (DD-071; DESIGN-004 Addendum 2): an envelope that carries `requirements` (the matcher's rows, sent only
+when the check carried requirements.md text) adds "requirements: h hold, n not established[, d disproven]" to the
+first line after the not-established count (`requirements_words`; before the finding on a red line), one line per
+requirement under the not-established list ("### Requirements: ...", then '<id> — "<sentence>" — <state> — <reason
+class>[ — <locator>] — <action>[ — quote USD a–b]', `requirement_line`), "<u> of <N> requirements in requirements.md could be read." after
+the meaning sentence, and one annotation per requirement that does not hold (`::error` when disproven). `decide` reads
+the rows as findings (`red_findings`): a disproven requirement is a disproof with its matched obligation's witness, and
+one that reads not proven binds exit 1 under every fail-on; a row whose obligation is already named is listed once.
+
 serve-014: a claim-tree report that was not written reads one line, the same on the report page and in the Action's job
 summary: "The report was withheld: <reason in plain words>." (`report_withheld_line`), from REPORT_WITHHELD for the
 fallback reasons; any other reason (a typed refusal's own text) is bounded and escaped like any customer string.
@@ -96,9 +105,11 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 
 CAP = 300
 MAX_ANNOTATIONS = 50
+MAX_REQUIREMENT_LINES = 256                       # serve-019: requirements.md holds at most 256 lines
 REPORT_WITHHELD = {'lint_failed': 'the written text did not pass the deterministic check',
                    'writer_unavailable': 'the writer could not be reached',
                    'profile_unqualified': 'the writer is not yet qualified for this profile',
@@ -360,6 +371,45 @@ def report_exhausted_line(needed_usd):
     return 'Report: allowance exhausted: USD %s needed; set allow-overage or top up' % _money(needed_usd, 3)
 
 
+# serve-019 (DD-072 Addendum 10): the allowance line a check response's `usage` block adds when a threshold is crossed
+USAGE_LINE_NAMES = {'report': 'Report allowance', 'formalisation': 'Formalisation allowance',
+                    'proof_search': 'Proof search allowance'}
+_MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+
+
+def usage_notice_lines(block):
+    """One line per usage line whose threshold was crossed since the last check (`crossed` true): "Report allowance:
+    90 % used (USD 4.50 of 5.00); resets 1 Nov; past the limit: metered at cost x 1.2", or "...; past the limit: hard
+    stop (overage budget USD 0.00)". A once-only balance (`renews` false) reads "Report allowance: 90 % used (USD
+    0.90 of 1.00); does not renew; past the limit: reports stop", with ", and USD x is owed" after "does not renew"
+    while something is owed. [] for none, or for a block of another shape."""
+    lines = block.get('lines') if isinstance(block, dict) and isinstance(block.get('lines'), dict) else {}
+    resets = block.get('resets') if isinstance(block, dict) else None
+    m = re.fullmatch(r'[0-9]{4}-([0-9]{2})-([0-9]{2})', resets) if isinstance(resets, str) else None
+    when = '%d %s' % (int(m.group(2)), _MONTHS[int(m.group(1)) - 1]) if m and 1 <= int(m.group(1)) <= 12 else '?'
+    out = []
+    for name in sorted(lines, key=lambda n: list(USAGE_LINE_NAMES).index(n) if n in USAGE_LINE_NAMES else 99):
+        ln = lines[name]
+        if not isinstance(ln, dict) or ln.get('crossed') is not True or name not in USAGE_LINE_NAMES:
+            continue
+        if ln.get('renews') is False:              # serve-032 (DD-083): a once-only balance, never reset
+            debt = ln.get('debt_usd') if isinstance(ln.get('debt_usd'), (int, float)) else 0
+            owed = ', and USD %s is owed' % _money(debt, 2) if debt > 0 else ''
+            out.append('%s: %s %% used (USD %s of %s); does not renew%s; past the limit: reports stop' % (
+                USAGE_LINE_NAMES[name], ln.get('percent') if type(ln.get('percent')) is int else '?',
+                _money(ln.get('used_usd'), 2), _money(ln.get('included_usd'), 2), owed))
+            continue
+        if ln.get('past_limit') == 'hard_stop':
+            past = 'hard stop (overage budget USD %s)' % _money(ln.get('overage_budget_usd') or 0.0, 2)
+        else:
+            margin = ln.get('margin') if isinstance(ln.get('margin'), (int, float)) else 0.2
+            past = 'metered at cost x %s' % ('%g' % (1 + float(margin)))   # ASCII, as the docs write it
+        out.append('%s: %s %% used (USD %s of %s); resets %s; past the limit: %s' % (
+            USAGE_LINE_NAMES[name], ln.get('percent') if type(ln.get('percent')) is int else '?',
+            _money(ln.get('used_usd'), 2), _money(ln.get('included_usd'), 2), when, past))
+    return out
+
+
 def report_page_line(url):
     """serve-014: the line that names the report page (the API's own URL, never customer text)."""
     return 'The report page: `%s` (send your API key in the Authorization header to open it).' % str(url).replace('`', '')
@@ -503,7 +553,7 @@ def red_findings(envelope):
             out.append(('chosen', r.get('id'), r))
         elif kept_on_refused(env, r) and named & set(NOT_OBSERVED_STATUSES):        # R3-1 (i)
             out.append(('chosen', r.get('id'), dict(r, status=KEPT_READ_AS)))
-    return out
+    return out + _requirement_findings(env, out)            # serve-019: the requirement rows, after the readings
 
 
 # REFUTATION-028-R2, R2-10 (a): the reason for each kind of finding that sets exit 1, in the order the reason is chosen
@@ -528,6 +578,8 @@ def binding_reason(envelope, finding):
     named = {s for s in pol.get('fail_on') or () if isinstance(s, str)} - {STRICT}
     kind, ob_id, row = finding
     status = row.get('status') if isinstance(row, dict) else None
+    if isinstance(row, dict) and row.get('requirement') is not None and kind == 'not_proven':
+        return 'not_proven'                        # serve-019: a prove-class requirement binds as its obligation does
     read = _read_set(env)
     held = {r.get('id') for r in _rows(env) if r.get('status') == 'holds' and r.get('machine') in read}
     # REFUTATION-028-R6, R6-1: the prove branch only when the obligation holds on no read machine
@@ -768,8 +820,9 @@ def verdict_line(envelope):
     c = env.get('colour')
     if c not in COLOURS:
         return None
+    req = requirements_words(env)                     # serve-019: after the not-established count
     if c == 'yellow':
-        return 'yellow: could not look: %s' % _could_not_look_words(env)
+        return 'yellow: could not look: %s%s' % (_could_not_look_words(env), '; %s' % req if req else '')
     parts = [p for p in (_coverage_words(env), _bounds_words(env), _prove_words(env), _strict_words(env)) if p]
     read = _read_set(env)
     obligations = _obligation_rows(env)
@@ -795,6 +848,8 @@ def verdict_line(envelope):
                     words += ' (exit 1: not proven — %s)' % b_id
                 else:
                     words += ' (exit 1 by your fail-on: %s — %s)' % (what, b_id)
+        if req:
+            parts.append(req)
         parts.append(words)
         return '%s: %s' % (c, '; '.join(parts))
     held = len([r for r in obligations if r.get('status') == 'holds' and r.get('machine') in read])
@@ -813,6 +868,8 @@ def verdict_line(envelope):
     if top is not None:                               # 2129 W2, W3: the count becomes a path
         tail += ' — top action: %s%s' % (_clip(top.get('action')), _quote_words(top.get('quote')))
     parts.append(tail)
+    if req:
+        parts.append(req)
     return '%s: %s' % (c, '; '.join(parts))
 
 
@@ -840,6 +897,123 @@ def top_entry(entries):
     pool = [k for k in first if k != 'representation'] or first
     top = max(pool, key=lambda k: (counts[k], -first.index(k)))
     return next(e for e in entries if e.get('reason_class') == top)
+
+
+# ---------- serve-019: the requirements rows (serve/requirements_adapter.py; DD-071's three states) ----------
+REQUIREMENT_STATES = ('holds', 'not_established', 'disproven')
+UNREAD_CLASSES = ('not_understood', 'duplicate_id')       # the parser's own classes: a line it could not read
+
+
+def requirement_rows(envelope):
+    """The envelope's `requirements` rows (objects only), or None for an envelope that carries none (no text was
+    sent, or an earlier server)."""
+    rows = envelope.get('requirements') if isinstance(envelope, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def requirement_counts(envelope):
+    """{holds, not_established, disproven, not_proven} of the rows, or None (`requirement_rows`). not_proven is the
+    overlapping subset of not_established whose display state reads not proven."""
+    rows = requirement_rows(envelope)
+    if rows is None:
+        return None
+    out = {s: len([r for r in rows if r.get('state') == s]) for s in REQUIREMENT_STATES}
+    out['not_proven'] = len([r for r in rows if r.get('display_state') == 'not_proven'])
+    return out
+
+
+def requirements_words(envelope):
+    """'requirements: h hold, n not established[, d disproven]' for the first line, or None (`requirement_rows`)."""
+    c = requirement_counts(envelope)
+    if c is None:
+        return None
+    words = 'requirements: %d hold, %d not established' % (c['holds'], c['not_established'])
+    return words + (', %d disproven' % c['disproven'] if c['disproven'] else '')
+
+
+def _requirement_label(row):
+    if row.get('display_state') == 'not_proven' and row.get('state') == 'not_established':
+        return 'not proven'
+    return label(row.get('state') if row.get('state') in REQUIREMENT_STATES else 'not_established')
+
+
+SENTENCE_CAP = 160                                # DD-070 item 1: the quoted sentence on the requirement line
+# REFUTATION-034 F6 and R2 N3; coordination 2365/2379 (the declared-model lane's display decision): a format character
+# (Unicode category Cf: bidi embeddings, overrides and isolates, zero-width marks, the BOM, the soft hyphen, the astral
+# TAG characters) or a line or paragraph separator (Zl, Zp) can reorder, hide or split what a summary or an annotation
+# shows. The sentence's exact code points are its identity (the JSON and the quote keep them); a human line shows each
+# one as one ASCII space, one for one, so the 160-character bound holds.
+_FORMAT_CATEGORIES = ('Cf', 'Zl', 'Zp')
+
+
+def format_space(text):
+    """`text` with every character of category Cf, Zl or Zp replaced by one ASCII space; nothing else changes."""
+    t = '' if text is None else str(text)
+    if t.isascii():
+        return t
+    return ''.join(' ' if unicodedata.category(c) in _FORMAT_CATEGORIES else c for c in t)
+
+
+CONTRACT_WORDS = "the checker's PROFILE.json failed verification; nothing to do on your side — Symbolia repairs it"
+# REFUTATION-034-R2 N6: the quote route's reason when a profile's metadata fails verification (its action agrees)
+METADATA_ROUTE_WORDS = ("the checker's PROFILE.json failed verification; Symbolia repairs the profile; nothing to do on "
+                        "your side")
+_LOCATOR_KEYS = ('evidence_locator', 'locator', 'domain_locator')
+
+
+def requirement_locator(row):
+    """The first locator a requirement row's evidence (then its details) carries, bounded; None when it carries none.
+    Never invented: a row without one prints none."""
+    r = row if isinstance(row, dict) else {}
+    for item in list(r.get('evidence') or ()) + list(r.get('details') or ()):
+        if isinstance(item, dict):
+            for key in _LOCATOR_KEYS:
+                if _scalar(item.get(key)) and str(item[key]).strip():
+                    return _clip(item[key])
+    return None
+
+
+def requirement_line(row):
+    """'<id> — "<sentence>" — <state> — <reason class>[ — <locator>] — <action>[ — quote USD a–b]' for one requirement
+    row (DD-070 item 1): the sentence as written, bounded to SENTENCE_CAP characters with …, the locator when the row's
+    evidence carries one. Plain text, every part bounded; the summary, the annotations and the Action's log read the
+    same words. The JSON row is never changed."""
+    r = row if isinstance(row, dict) else {}
+    sentence = _CONTROL.sub(' ', '' if r.get('sentence') is None else str(r.get('sentence')))
+    if len(sentence) > SENTENCE_CAP:
+        sentence = sentence[:SENTENCE_CAP - 1] + '…'
+    locator = requirement_locator(r)
+    # REFUTATION-034 F7: a failed producer verification is Symbolia's to repair, said so in the customer's words
+    action = CONTRACT_WORDS if r.get('reason_class') == 'checker_contract' else _clip(r.get('establishing_action'))
+    line = '%s — "%s" — %s — %s%s — %s%s' % (
+        _clip(r.get('id')), sentence, _requirement_label(r), _clip(label(r.get('reason_class'))),
+        ' — %s' % locator if locator else '', action, _quote_words(r.get('formalisation_quote')))
+    return format_space(line)
+
+
+def _requirement_findings(env, found):
+    """serve-019: the requirement rows as findings of `red_findings` (the one decision): a disproven row as
+    'disproven' with its matched obligation's machine and id (so its witness is the reading's own), a row that reads
+    not proven as 'not_proven'. A row whose matched obligations are already named is left out: an obligation is listed
+    once."""
+    named = {i for _, i, _ in found if i is not None}
+    out = []
+    for r in requirement_rows(env) or ():
+        kind = ('disproven' if r.get('state') == 'disproven' else
+                'not_proven' if r.get('display_state') == 'not_proven' and r.get('state') == 'not_established' else None)
+        if kind is None:
+            continue
+        matched = [m for m in r.get('matched_obligations') or () if isinstance(m, dict)]
+        if any(m.get('id') in named for m in matched):
+            continue
+        first = matched[0] if matched else {}
+        out.append((kind, r.get('id'), {'machine': first.get('machine'), 'id': first.get('id'),
+                                        'status': 'fails' if kind == 'disproven' else 'not_proven',
+                                        'status_text': r.get('reason_class'), 'reason': r.get('reason'),
+                                        'requirement': r.get('id')}))
+    return out
 
 
 # ---------- DD-073 Addendum 2 (heading 2133): the plain-language layer, closed templates, no model ----------
@@ -873,6 +1047,17 @@ def consequence(env, ob_id):
 
 
 def meaning_line(envelope):
+    """`_meaning_line`, then (serve-019) for an envelope that carries requirement rows: "<u> of <N> requirements in
+    requirements.md could be read." (u leaves out the lines the parser could not read)."""
+    line = _meaning_line(envelope)
+    rows = requirement_rows(envelope)
+    if line is None or rows is None:
+        return line
+    read = len([r for r in rows if r.get('reason_class') not in UNREAD_CLASSES])
+    return '%s %d of %d requirements in requirements.md could be read.' % (line, read, len(rows))
+
+
+def _meaning_line(envelope):
     """DD-073 Addendum 2 (a): one sentence (or two) under the first line saying what it means, from a closed template
     per colour; None for an envelope without `colour`.
     - green: "Nothing in your <subject> contradicts what is known about safe <family> setups. <n> of <N> checks could
@@ -1013,6 +1198,8 @@ def summary_markdown(envelope, now=None):
     done = completion_line(env, now)              # coordination 2102 A25: three answers under the first line
     if line is not None and done is not None:
         out += [_esc_line(done), '']
+    for notice in usage_notice_lines(env.get('usage')):     # serve-019: an allowance threshold crossed
+        out += [_esc_line(notice), '']
     unsupported = set(((env.get('completion') or {}).get('unsupported') or {}).get('ids') or ())
     entries = [e for e in env.get('not_established') or () if isinstance(e, dict)] if line is not None else []
     gaps = [e for e in entries if e.get('id') not in unsupported]
@@ -1020,6 +1207,13 @@ def summary_markdown(envelope, now=None):
         out += ['- %s' % _esc_line(not_established_line(e, env)) for e in gaps[:MAX_ANNOTATIONS]]
         if len(gaps) > MAX_ANNOTATIONS:
             out.append('- and %d more' % (len(gaps) - MAX_ANNOTATIONS))
+        out.append('')
+    reqs = requirement_rows(env) if line is not None else None
+    if reqs:                                      # serve-019: one line per requirement, under the not-established list
+        out += ['### %s' % _esc_line(requirements_words(env)[0].upper() + requirements_words(env)[1:]), '']
+        out += ['- %s' % _esc_line(requirement_line(r)) for r in reqs[:MAX_REQUIREMENT_LINES]]
+        if len(reqs) > MAX_REQUIREMENT_LINES:
+            out.append('- and %d more' % (len(reqs) - MAX_REQUIREMENT_LINES))
         out.append('')
     limits = [e for e in entries if e.get('id') in unsupported]
     if limits:                                    # A25: the profile's own limits, apart from the customer's gaps
@@ -1216,6 +1410,11 @@ def annotations(envelope):
         elif r.get('status') == 'fails' and witness_text(envelope, r):
             msg += ' (%s)' % witness_text(envelope, r)
         lines.append('::%s title=%s::%s' % (level, _cmd_prop(title), _cmd_data(msg)))
+    if first is not None:                         # serve-019: each requirement that does not hold, in the same words
+        for r in [r for r in requirement_rows(envelope) or () if r.get('state') != 'holds'][:MAX_ANNOTATIONS]:
+            lines.append('::%s title=%s::%s' % ('error' if r.get('state') == 'disproven' else 'notice',
+                                                _cmd_prop('Assure requirement %s' % _clip(r.get('id'))),
+                                                _cmd_data(requirement_line(r))))
     if first is not None and STRICT in ((envelope.get('policy') or {}).get('fail_on') or ()):
         for e in [e for e in envelope.get('not_established') or () if isinstance(e, dict)][:MAX_ANNOTATIONS]:
             lines.append('::notice title=%s::%s' % (_cmd_prop('Assure not established %s' % e.get('id')),

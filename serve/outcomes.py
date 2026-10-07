@@ -113,12 +113,19 @@ MALFORMATIONS = MappingProxyType({
                      '-; a profile that declares none takes none',
     'scope_ref': 'no accepted_scope_ref: no accepted scope record can be resolved yet, so a first-run comparison '
                  'omits it; a profile whose scope is fixed takes none',
+    # serve-019 (coordination 2136): the requirements upload fields
+    'requirements': 'requirements as UTF-8 text of at most 65536 bytes, 256 lines and 8192 bytes per line',
+    'quote_body': 'a JSON object with exactly the keys profile and sentence: one sentence of 1 to 8192 bytes of UTF-8 '
+                  'text without control characters',
+    'provenance': 'repository (owner/name) and commit (40 lower-case hex) together, or neither; provenance caller '
+                  'or runner, only with them',
 })
 # A field path the malformation may name: request fields, JSON fields the checks read, and derive locators.
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
                     'allow_partial', 'redaction_withheld', 'sanitised_sha256', 'entries', 'major', 'server.major',
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
-                    'scope_binding', 'accepted_scope_ref', 'allow_overage'})
+                    'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
+                    'provenance', 'sentence'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',
@@ -166,7 +173,10 @@ def is_closed(value, kinds=()):
 
 # An action that differs for one closed rule of an outcome, so the action agrees with the reason (REFUTATION-034-R2 N6;
 # serve-030, REFUTATION-042 F2: the once-only free report balance, which neither allow_overage nor a top-up admits)
-RULE_ACTIONS = {('allowance_exhausted', 'once_balance'):
+RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
+                'Nothing to change on your side; try again after Symbolia repairs the profile, or use another profile '
+                'meanwhile.',
+                ('allowance_exhausted', 'once_balance'):
                 'A paid plan gives more reports; the free report balance does not renew; nothing ran and nothing was '
                 'charged.',
                 # serve-032 (DD-083): the once-only balance is below zero; a recharge first clears what is owed

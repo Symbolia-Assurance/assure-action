@@ -6,8 +6,9 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_FRESH_CHECK, INPUT_OUTPUT), with
-GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP. Before anything else is printed,
+INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_FRESH_CHECK, INPUT_OUTPUT), with
+GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP, and (serve-019) GITHUB_WORKSPACE, GITHUB_REPOSITORY and GITHUB_SHA
+for `requirements_upload`. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
 connection or a runner token.
@@ -56,8 +57,9 @@ connection or a runner token.
   Decision 10); the outputs add `report-cost-usd`, `report-charge-usd` and
   `report-allowance-remaining` (empty when the record carries none).
   serve-023: the check's `Idempotency-Key` is derived from the request's content (`action.client.check_key`: the
-  bundle digest of the files sent, the profile, the scope fields and the query), so one check is made per distinct
-  bundle: a later run that sends the same request gets the stored verdict back from the server, not charged again.
+  bundle digest of the files sent, the profile, the scope fields, the requirements text's digest with the repository,
+  commit and provenance sent beside it (serve-025 merge), and the query), so one check is made per distinct request:
+  a later run that sends the same request gets the stored verdict back from the server, not charged again.
   `fresh-check` (`true` or `false`, default false; any other word is `bad_input` before anything is read) sends a
   random key instead, for a deliberate re-check. In `mode: local` it changes nothing.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
@@ -70,7 +72,9 @@ of 8 machines read, 3 refused; declared premises: 0; version pins: major 18; not
 verdict; policy exit 0; assure-verdict.json`. An envelope without `colour`, from an older server, gives the coverage
 phrase there instead (`serve.render.first_line`), or nothing for one without `machines`. The step outputs add `colour`
 (green, red or yellow) and `not-established` (how many obligations were not established); a failure gives `colour` red
-for exit 2 and yellow otherwise, and an empty `not-established`.
+for exit 2 and yellow otherwise, and an empty `not-established`. serve-019: a verdict that carries requirement rows adds
+`requirements-not-established` and `requirements-disproven` (counts of those rows); the summary and the annotations
+carry the rows (`serve.render`).
 
 Exit codes: 0 nothing disproven (or fail-on never), 1 something disproven, 2 bad input, 3 could not look (the
 input-integrity gate stopped the check, or nothing could be read), a typed refusal or a delivery failure
@@ -112,7 +116,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from action import http_identity, withhold  # noqa: E402
-from action.client import CHECK_ID_RE, DEFAULT_URL, VERDICT_SCHEMA, Client, allow_list  # noqa: E402
+from action.client import CHECK_ID_RE, DEFAULT_URL, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, markers, render  # noqa: E402
 from serve.outcomes import Refusal, malformation  # noqa: E402
 
@@ -291,6 +295,123 @@ def _json_input(env, name, kind, field, cwd):
                       malformation=malformation(kind, field=field)) from None
 
 
+REQUIREMENTS_FILE = 'requirements.md'
+MAX_EVENT_BYTES = 16 * 2 ** 20
+NONE_SENTINEL = 'none'        # REFUTATION-034-R2 N5: `requirements: none` sends no requirements text and prints no notice;
+# compared exact-case (serve-025): `NONE` is a file name
+_SILENCE = 'to keep it and silence this notice, set requirements to none.'
+# REFUTATION-034-R2 N5: why a repository-root requirements.md was not sent, and the one way to send it (serve-025:
+# one instruction for each case, then the way to silence the notice)
+SKIPPED_HOW = {
+    'link': ('it is a symbolic link', 'To send it, name the file it points to in the requirements input; '),
+    'irregular': ('it is not a regular file', 'To send it, name a regular file in the requirements input; '),
+    'unreadable': ('it could not be read', 'To send it, make it readable; '),
+    'size': ('it is larger than %d bytes' % bundle.MAX_REQUIREMENTS_BYTES, 'To send it, shorten it to within the '
+             'bounds; '),
+    'encoding': ('it is not UTF-8 text', 'To send it, save it as UTF-8; '),
+    'bounds': (None, 'To send it, shorten it to within the bounds; '),
+}
+LOCAL_REQUIREMENTS_NOTICE = ('requirements are read in api mode only: local mode did not read or send requirements.md')
+
+
+def skipped_notice(kind, why=None):
+    """The one notice for a repository-root requirements.md that was not sent (SKIPPED_HOW)."""
+    words, how = SKIPPED_HOW[kind]
+    return 'requirements.md at the repository root was not sent (%s). %s%s' % (why or words, how, _SILENCE)
+
+
+def _read_requirements(path):
+    """The text of a requirements file, or Refusal('bad_input') naming why it cannot be sent, with `detail.kind` one
+    of SKIPPED_HOW's keys (a link, not a regular file, unreadable, larger than the bound, not UTF-8, beyond the line
+    bounds). Its content is never quoted."""
+    def bad(why, kind):
+        return Refusal('bad_input', 'requirements %s' % why, kind=kind,
+                       malformation=malformation('requirements', field='requirements'))
+    if os.path.islink(path):
+        raise bad('is a symbolic link; name the file it points to', 'link')
+    try:
+        data = bundle._read_capped(path, bundle.MAX_REQUIREMENTS_BYTES)
+    except Refusal as e:
+        if e.outcome == 'oversize_input':           # REFUTATION-034-R2 N4: a directory or FIFO is not "too large"
+            raise bad('is larger than %d bytes' % bundle.MAX_REQUIREMENTS_BYTES, 'size') from None
+        raise bad('is not a regular file', 'irregular') from None
+    except OSError:
+        if os.path.exists(path) and not os.path.isfile(path):
+            raise bad('is not a regular file', 'irregular') from None
+        raise bad('must name a readable file', 'unreadable') from None
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError:
+        raise bad('is not UTF-8 text', 'encoding') from None
+    try:
+        return bundle.check_requirements(text)
+    except Refusal as e:
+        e.detail['kind'] = 'bounds'
+        raise
+
+
+def _head_commit(env):
+    """REFUTATION-034 D2: the commit a check is about. On a pull_request event GITHUB_SHA is the synthetic merge
+    commit, so the event's `pull_request.head.sha` (GITHUB_EVENT_PATH, bounded) is sent when it is a commit id; any
+    other event, or an event file that cannot be read, sends GITHUB_SHA."""
+    sha = str(env.get('GITHUB_SHA') or '').strip()
+    path = str(env.get('GITHUB_EVENT_PATH') or '').strip()
+    if path:
+        try:
+            doc = bundle.parse_json(bundle._read_capped(Path(path), MAX_EVENT_BYTES),
+                                    bundle.Limits(body_bytes=MAX_EVENT_BYTES, json_depth=128))
+            head = ((doc.get('pull_request') or {}).get('head') or {}).get('sha') if isinstance(doc, dict) else None
+        except (OSError, Refusal, AttributeError):
+            head = None
+        if bundle.commit_ok(head):
+            return head
+    return sha
+
+
+def requirements_upload(env, cwd):
+    """serve-019 (coordination 2136): ({requirements?, repository?, commit?, provenance?}, notice or None). The text is
+    the `requirements` input's file (relative to the working directory): one that is missing, unreadable, a link,
+    not a regular file, beyond the bounds or not UTF-8 is `bad_input` before anything is collected or sent. The input
+    `none` (NONE_SENTINEL) sends no text and prints no notice; a file named `none` is then reached as `./none`. With the input empty, the
+    repository root's requirements.md (GITHUB_WORKSPACE) is sent when it can be; REFUTATION-034 F1: when it cannot,
+    no text is sent and the notice says why (`skipped_notice`), so a file the operator never selected never stops the
+    run. GITHUB_REPOSITORY and the head commit (`_head_commit`) go as repository and commit with `provenance:
+    runner`; the API reads them as metadata, never as authority."""
+    out, notice = {}, None
+    named = _plain(env, 'INPUT_REQUIREMENTS')
+    workspace = str(env.get('GITHUB_WORKSPACE') or '').strip()
+    if named == NONE_SENTINEL:                       # REFUTATION-034-R2 N5: send no text, print no notice
+        pass
+    elif named:
+        path = Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named
+        out['requirements'] = _read_requirements(path)
+    elif workspace and os.path.lexists(os.path.join(workspace, REQUIREMENTS_FILE)):
+        try:
+            out['requirements'] = _read_requirements(Path(workspace) / REQUIREMENTS_FILE)
+        except Refusal as e:
+            kind = e.detail.get('kind', 'bounds')
+            why = e.reason.replace('requirements are ', '', 1).replace('requirements ', '', 1) \
+                if kind == 'bounds' else None        # "400 lines; the limit is 256", "line 3 is longer than ..."
+            notice = skipped_notice(kind, why)
+    repo, sha = str(env.get('GITHUB_REPOSITORY') or '').strip(), _head_commit(env)
+    if repo and sha:
+        out.update(bundle.upload_fields({'repository': repo, 'commit': sha, 'provenance': 'runner'}))
+    return out, notice
+
+
+def local_requirements_notice(env):
+    """REFUTATION-034 F2: LOCAL_REQUIREMENTS_NOTICE when local mode finds a requirements file it will not read (the
+    `requirements` input set, or a requirements.md at the repository root); None otherwise."""
+    workspace = str(env.get('GITHUB_WORKSPACE') or '').strip()
+    named = str(env.get('INPUT_REQUIREMENTS') or '').strip()
+    if named == NONE_SENTINEL:
+        return None
+    if named or (
+            workspace and os.path.lexists(os.path.join(workspace, REQUIREMENTS_FILE))):
+        return LOCAL_REQUIREMENTS_NOTICE
+    return None
+
+
 def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
     profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
     artefacts = _plain(env, 'INPUT_ARTEFACTS')
@@ -302,7 +423,7 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
     if _plain(env, 'INPUT_ACCEPTED_SCOPE_REF'):          # serve-007 F2: before any file is read or collected
         raise Refusal('bad_input', SCOPE_REF_REASON,
                       malformation=malformation('scope_ref', field='accepted_scope_ref'))
-    fail_on = _plain(env, 'INPUT_FAIL_ON')
+    fail_on = canonical_fail_on(_plain(env, 'INPUT_FAIL_ON'))     # serve-025: one form for both modes and the key
     allow_partial = parse_allow_partial(_plain(env, 'INPUT_ALLOW_PARTIAL'))
     data_dir_text = _plain(env, 'INPUT_DATA_DIR')
     config_dirs_text = env.get('INPUT_CONFIG_DIRS')      # line breaks separate items, so it is not read by _plain
@@ -444,7 +565,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
-             'report_url': '', 'allow_overage': False, 'fresh_check': False}
+             'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False}
 
     def outputs(outcome, code, extra='', verdict=None):
         if verdict is None:                       # serve-016: a failure is red for bad input, yellow otherwise
@@ -452,6 +573,10 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         else:
             colour = verdict.get('colour') if verdict.get('colour') in render.COLOURS else ''
             n = str(len(verdict['not_established'])) if isinstance(verdict.get('not_established'), list) else ''
+            counts = render.requirement_counts(verdict)          # serve-019: only when requirements were sent
+            if counts is not None:
+                extra = 'requirements-not-established=%d\nrequirements-disproven=%d\n%s' % (
+                    counts['not_established'], counts['disproven'], extra)
         try:
             _append(env.get('GITHUB_OUTPUT'), 'verdict-path=%s\noutcome=%s\nexit-code=%d\ncolour=%s\nnot-established=%s\n%s'
                     % (out_text, outcome, code, colour, n, extra))
@@ -514,6 +639,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         except ImportError:
             raise absent from None
         engine = local_mode.verify_engine_pin(root, pin_path)   # before any engine byte is imported
+        state['requirements_notice'] = local_requirements_notice(env)     # REFUTATION-034 F2
+        if state['requirements_notice']:
+            say('::notice title=Assure requirements::%s' % _cmd_data(state['requirements_notice'], cap=None))
         if out_error is not None:
             raise out_error
         from action import collect                             # after the pin, like every local-mode import
@@ -535,6 +663,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
+        upload, state['requirements_notice'] = requirements_upload(env, cwd)   # serve-019: before anything is sent
+        if state['requirements_notice']:
+            say('::notice title=Assure requirements::%s' % _cmd_data(state['requirements_notice'], cap=None))
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
         client = (client_factory or Client)(url, raw_key.strip())
         allow = allow_list(client.profiles(), inputs['profile'])
@@ -582,6 +713,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         session(collected.files)
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
+        extra.update(upload)
         verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, limits=lim,
                                 scope=scope, scope_binding=binding,
                                 accepted_scope_ref=inputs['accepted_scope_ref'],
@@ -632,6 +764,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if state['withheld'] is not None:
             summary += withhold.summary_markdown(state['withheld'])
         summary += markers.session_markdown(state['session'])
+        if state['requirements_notice']:                  # REFUTATION-034 F1/F2: the same words in the summary
+            summary += '\n' + render.esc(state['requirements_notice']) + '\n'
         notes = render.annotations(verdict)
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
