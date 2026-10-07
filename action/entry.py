@@ -50,8 +50,10 @@ connection or a runner token.
   serve-015: `allow-overage` (`true` or `false`, default false; any other word is `bad_input` before anything is
   read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
   and its overage is charged. The summary adds one line from the record, "Report: cost USD x.xxx, charged USD y.yyy,
-  allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted`, "Report: allowance
-  exhausted: USD q needed; set allow-overage or top up"; the outputs add `report-cost-usd`, `report-charge-usd` and
+  allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted` past a monthly
+  allowance, "Report: allowance exhausted: USD q needed; set allow-overage or top up" (serve-030: past the free
+  report balance, which no top-up or overage admits, the refusal's own sentence alone, as for `job_ceiling`, DD-079
+  Decision 10); the outputs add `report-cost-usd`, `report-charge-usd` and
   `report-allowance-remaining` (empty when the record carries none).
   serve-023: the check's `Idempotency-Key` is derived from the request's content (`action.client.check_key`: the
   bundle digest of the files sent, the profile, the scope fields and the query), so one check is made per distinct
@@ -371,8 +373,11 @@ def parse_fresh_check(text):
 def _report_usage(report):
     """serve-015: (summary line or None, step outputs text) of a report record or refusal."""
     cost = report.get('cost') if isinstance(report, dict) and isinstance(report.get('cost'), dict) else {}
-    if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted':
+    if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted' and 'topup_needed_usd' in report.detail:
+        # serve-030: a once-only balance (no top-up needed, overage never admits it) has its reason line only
         line = render.report_exhausted_line(report.detail.get('topup_needed_usd'))
+    elif isinstance(report, Refusal):
+        line = None
     else:
         line = render.report_cost_line(report) if isinstance(report, dict) else None
 

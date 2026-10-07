@@ -43,6 +43,10 @@ _TABLE = {
                                    'nothing ran and nothing was charged.'),
     'daily_report_cap': (402, None, 'Wait for the time given in Retry-After (midnight UTC), or ask Symbolia to raise '
                                     'this account\'s daily report cap; nothing ran and nothing was charged.'),
+    # serve-030 (DD-079 Decision 10): the job's quote is above the account's job ceiling (USD 50 unless raised);
+    # refused before any model call, free of charge, not counted on the daily cap.
+    'job_ceiling': (402, None, 'Ask Symbolia to raise this account\'s job ceiling, or send a smaller request; nothing '
+                               'ran and nothing was charged.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),
@@ -72,6 +76,8 @@ MALFORMATIONS = MappingProxyType({
     'allow_partial': 'true or false (the API query: 1 or 0)',
     'idempotency_key': 'one Idempotency-Key of 16 to 64 characters of A-Z, a-z, 0-9, _ and -',
     'report_body': 'no body, or a JSON object whose only key is allow_overage, true or false (serve-015)',
+    # serve-030 (REFUTATION-042 F3): the key tool's grant of the free report balance
+    'email_address': 'one email address, local@domain, with one @, a local part and a domain of dot-separated labels',
     # a file's content
     'json_file': 'valid JSON in this file',
     'json_unicode': 'strings in this file that are valid Unicode',
@@ -158,6 +164,13 @@ def is_closed(value, kinds=()):
                  or value['field'] in _row_kinds(kinds)))
 
 
+# An action that differs for one closed rule of an outcome, so the action agrees with the reason (REFUTATION-034-R2 N6;
+# serve-030, REFUTATION-042 F2: the once-only free report balance, which neither allow_overage nor a top-up admits)
+RULE_ACTIONS = {('allowance_exhausted', 'once_balance'):
+                'A paid plan gives more reports; the free report balance does not renew; nothing ran and nothing was '
+                'charged.'}
+
+
 class Refusal(Exception):
     """A typed outcome: `Refusal(outcome, reason, **detail)`. An unknown outcome name is a ValueError at construction."""
 
@@ -179,7 +192,7 @@ class Refusal(Exception):
 
     @property
     def action(self):
-        return OUTCOMES[self.outcome]['action']
+        return RULE_ACTIONS.get((self.outcome, self.detail.get('rule')), OUTCOMES[self.outcome]['action'])
 
     def to_dict(self):
         return {'outcome': self.outcome, 'reason': self.reason, 'action': self.action, 'detail': dict(self.detail)}
