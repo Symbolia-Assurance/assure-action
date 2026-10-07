@@ -579,11 +579,13 @@ python3.14 -B assure-action/action/collector/collect_pg.py --out collected \
 
 Keep `raw/`, `COLLECTION-SIDECAR.json` and `REDACTION-MANIFEST.json` from the one new run together. Running the workflow again without collecting again sends the same files: it gets the stored verdict of the first run back, and it says nothing about the change.
 
-The Action makes one check per distinct request. It derives its `Idempotency-Key` from the content of the request: a digest of the bundle's files, the profile, the selected scope and its binding, the requirements text, the repository and the commit sent with it, and the `fail-on` and `allow-partial` words as sent. A later run whose request is the same, byte for byte, gets the stored verdict of the first run back, and it is not charged again. A changed byte in any file is a new check. A changed `fail-on` is a new check too, because the stored verdict carries the policy it was checked under. So is a new commit or a changed `requirements.md`, even when the files are the same. The Action sends `fail-on` in one canonical form in both modes, its words in lower case, without spaces, each once and sorted, so `fails,deviates`, `fails, deviates` and `deviates,fails` are one policy and one check.
+The Action makes one check per distinct request. It derives its `Idempotency-Key` from the content of the request: a digest of the bundle's files, the profile, the selected scope and its binding, the requirements text, the repository and the commit sent with it, and the `allow-partial` word as sent. A later run whose request is the same, byte for byte, gets the stored verdict of the first run back, and it is not charged again. A changed byte in any file is a new check. So is a new commit or a changed `requirements.md`, even when the files are the same. A changed `fail-on` is the same check: `fail-on` is applied at render on the stored verdict, so each run's exit follows its own `fail-on`, and nothing is charged again. The Action sends `fail-on` in one canonical form in both modes, its words in lower case, without spaces, each once and sorted, so `fails,deviates`, `fails, deviates` and `deviates,fails` are one policy.
 
 A collection from a connection is never the same twice: the collector records when it collected and how long each query took. An HTTP check is never the same twice either: the Action makes a fresh identity key for each job, so the endpoint tokens differ from run to run. A stored verdict comes back when `artefacts` holds a collected bundle with the same files as an earlier run on the same commit, for example when you run a job again.
 
-A stored failure comes back the same way, except one that may pass on a second try: a check that ran past its time limit (`checker_timeout`), an unexpected fault on the server ("the check failed unexpectedly") or a server restart during the check. The server keeps no key for those, so running the job again runs the check again, and it is charged when it runs. To check the same bundle again on purpose, set `fresh-check: true`: the Action then sends a random key, and the check runs and is charged again. The server keeps a key for as long as the verdict it points to (30 days).
+A stored failure comes back the same way only when it was charged. A failure that was not charged, a timeout, an unexpected server fault or a restart keeps no key, so running the job again checks again. To check the same bundle again on purpose, set `fresh-check: true`: the Action then sends a random key, and the check runs and is charged again. The server keeps a key for as long as the verdict it points to (30 days).
+
+When the verdict is the stored one, the job summary says so under its first line, with the time of the first check, and that nothing was charged this run. A report that comes back stored sets `report-charge-usd` to 0, and its line names what the first check was charged.
 
 ## 10. Typed outcomes
 
@@ -624,7 +626,7 @@ A collection with gaps is still a verdict. Each gap reads **not observed** with 
 
 `allowance_exhausted` never ends a job either. With `report: true`, it means your plan's report allowance is not set or is spent for the month, and nothing pays for the report: the verdict, its summary and its exit stand, and the summary names the USD needed. Set `allow-overage: true`, or ask Symbolia to top up your account. On the free plan, it means your report balance is spent, and the summary says so.
 
-`overage_ceiling` never ends a job: this month's report overage would pass a monthly overage limit set on your account, so the report does not run, even with `allow-overage`. `job_ceiling` never ends a job: the report's quote is above your account's job ceiling, so the report does not run, even with `allow-overage`; the summary names the quote and the ceiling. `daily_report_cap` never ends a job: your account has had its reports for the day (UTC). Nothing runs and nothing is charged for any of them.
+`overage_ceiling` never ends a job: this month's report overage billed later, beyond your top-up, would pass a monthly overage limit set on your account, so the report does not run, even with `allow-overage`. Your top-up is spent before any overage, whatever the limit. `job_ceiling` never ends a job: the report's quote is above your account's job ceiling, so the report does not run, even with `allow-overage`; the summary names the quote and the ceiling. `daily_report_cap` never ends a job: your account has had its reports for the day (UTC). Nothing runs and nothing is charged for any of them.
 
 ## 11. Profiles
 
@@ -677,6 +679,8 @@ A complete `manifest.json` for two endpoints:
 The inputs: `profile: http-observed-baseline`; `artefacts`, the folder above. `scope` is optional: a JSON file listing the endpoint ids to check, which must name exactly the manifest's ids (the Action stops before collecting otherwise). Leave `scope-binding` unset so the Action produces it: before collection it runs the identity producer and then the collector over your manifest, and sends their record as the scope binding with the endpoint tokens. `identity-key` stays `pipe`, its default: the Action makes a fresh key for each job and passes it on a pipe, so no key is an input, an environment variable or a file.
 
 A `scope` file, when you give one, is a JSON list of the manifest's ids, for example `["endpoint-001", "endpoint-002"]`.
+
+Each run of an HTTP check is a new check, charged as one: the Action makes a fresh identity key for each job, and no key is kept from one run to the next, so a new collection is new work.
 
 ### Capturing the response heads
 

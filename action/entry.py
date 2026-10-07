@@ -19,7 +19,7 @@ connection or a runner token.
   never leaves the runner -> `POST /v1/checks?fail_on=...[&allow_partial=1]` over TLS with the key -> poll while 202 -> the returned
   envelope is written to the output path -> the job summary and annotations are rendered here from it -> the exit code
   is the envelope's `policy.exit` (never derived here). A failure envelope gives its outcome's exit code. `fail-on` is
-  sent as written; the server checks it against the profile; `unresolved-security` is the strict preset. `allow-partial`
+  sent in its canonical form (serve-035); the server checks it against the profile; `unresolved-security` is the strict preset. `allow-partial`
   is `true` or `false` (default false; any other word is `bad_input`) and no longer changes the exit (serve-016).
   `scope` (a JSON file holding the list of selected ids), `scope-binding` (a JSON file holding the whole binding
   object, {<map>: {id: token}[, <record>: {...}]}, serve-010) and `accepted-scope-ref` (a string) are sent as
@@ -60,8 +60,16 @@ connection or a runner token.
   bundle digest of the files sent, the profile, the scope fields, the requirements text's digest with the repository,
   commit and provenance sent beside it (serve-025 merge), and the query), so one check is made per distinct request:
   a later run that sends the same request gets the stored verdict back from the server, not charged again.
+  serve-035 (DD-094 §7 (3) and (4)): `fail-on` is sent in one canonical form (`action.client.canonical_fail_on`) and
+  is never part of the key: it is applied at render on the stored verdict, so a run under another fail-on gets the
+  same check, not charged again, decided under its own fail-on.
   `fresh-check` (`true` or `false`, default false; any other word is `bad_input` before anything is read) sends a
   random key instead, for a deliberate re-check. In `mode: local` it changes nothing.
+  serve-035 (DD-094 §7 (2)): the API marks a verdict it served from its store `replay: true` with `first_checked_at`;
+  the job summary's first lines and the log then say "Stored verdict for the same request, first checked <time>;
+  nothing was charged this run." (`serve.render.replay_line`), and a stored report (`replay: true` on the report
+  answer) sets `report-charge-usd` to 0 with the line "Report: cost USD x.xxx, charged USD y.yyy on the first check
+  <time>; nothing was charged this run" (`serve.render.report_replay_line`).
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -423,7 +431,7 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
     if _plain(env, 'INPUT_ACCEPTED_SCOPE_REF'):          # serve-007 F2: before any file is read or collected
         raise Refusal('bad_input', SCOPE_REF_REASON,
                       malformation=malformation('scope_ref', field='accepted_scope_ref'))
-    fail_on = canonical_fail_on(_plain(env, 'INPUT_FAIL_ON'))     # serve-025: one form for both modes and the key
+    fail_on = canonical_fail_on(_plain(env, 'INPUT_FAIL_ON'))     # serve-025's form, carried: one form, both modes
     allow_partial = parse_allow_partial(_plain(env, 'INPUT_ALLOW_PARTIAL'))
     data_dir_text = _plain(env, 'INPUT_DATA_DIR')
     config_dirs_text = env.get('INPUT_CONFIG_DIRS')      # line breaks separate items, so it is not read by _plain
@@ -491,47 +499,64 @@ def parse_fresh_check(text):
     raise Refusal('bad_input', 'fresh-check must be true or false')
 
 
-def _report_usage(report):
-    """serve-015: (summary line or None, step outputs text) of a report record or refusal."""
+def _report_usage(report, first_checked_at=None):
+    """serve-015: (summary line or None, step outputs text) of a report record or refusal. serve-035: a stored report
+    (`replay: true`) names the first check's charge (`render.report_replay_line`) and this run's `report-charge-usd`
+    is 0."""
     cost = report.get('cost') if isinstance(report, dict) and isinstance(report.get('cost'), dict) else {}
+    replay = isinstance(report, dict) and report.get('replay') is True
     if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted' and 'topup_needed_usd' in report.detail:
         # serve-030: a once-only balance (no top-up needed, overage never admits it) has its reason line only
         line = render.report_exhausted_line(report.detail.get('topup_needed_usd'))
     elif isinstance(report, Refusal):
         line = None
+    elif replay:
+        line = render.report_replay_line(report, first_checked_at)
     else:
         line = render.report_cost_line(report) if isinstance(report, dict) else None
 
     def num(v):
         return '' if isinstance(v, bool) or not isinstance(v, (int, float)) else repr(float(v))
+    charge = num(cost.get('charge_usd'))
     outs = 'report-cost-usd=%s\nreport-charge-usd=%s\nreport-allowance-remaining=%s\n' % (
-        num(cost.get('usd')) if 'charge_usd' in cost else '', num(cost.get('charge_usd')),
+        num(cost.get('usd')) if 'charge_usd' in cost else '', num(0.0) if replay and charge else charge,
         num(cost.get('allowance_remaining')))
     return line, outs
 
 
-def _with_report(summary, report, url):
+def _with_report(summary, report, url, first_checked_at=None):
     """(summary, report-status, report-url) for a requested report (module docstring). `report` is the record or the
     Refusal that ended the request."""
+    tail = _usage_tail(report, first_checked_at)
     if isinstance(report, dict) and report.get('status') == 'written':
         head = summary.split('\n', 1)[0]
         return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n' + render.report_page_line(url)
-                + '\n' + _usage_tail(report), 'written', url)
+                + '\n' + tail, 'written', url)
     if isinstance(report, dict):
         fallback = report.get('fallback') if isinstance(report.get('fallback'), dict) else {}
         return (summary + '\n' + render.report_withheld_line(fallback.get('reason')) + '\n'
-                + render.report_page_line(url) + '\n' + _usage_tail(report), 'withheld', url)
+                + render.report_page_line(url) + '\n' + tail, 'withheld', url)
     reason = report.reason if isinstance(report, Refusal) else None
     if isinstance(report, Refusal) and report.detail.get('report_running') is True:
         # serve-015: the poll ran out while the report was being written; the page will carry it
         return (summary + '\n' + render.report_withheld_line(reason) + '\n' + render.report_page_line(url) + '\n',
                 'running', url)
-    return summary + '\n' + render.report_withheld_line(reason) + '\n' + _usage_tail(report), 'refused', ''
+    return summary + '\n' + render.report_withheld_line(reason) + '\n' + tail, 'refused', ''
 
 
-def _usage_tail(report):
-    line = _report_usage(report)[0]
+def _usage_tail(report, first_checked_at=None):
+    line = _report_usage(report, first_checked_at)[0]
     return '' if line is None else line + '\n'
+
+
+def _replay_lead(summary, verdict):
+    """serve-035 (DD-094 §7 (2)): the summary with `render.replay_line` after its first line, for a verdict the API
+    served from its store; unchanged otherwise."""
+    lead = render.replay_line(verdict)
+    if lead is None:
+        return summary
+    head, _, rest = summary.partition('\n')
+    return head + '\n\n' + lead + '\n' + rest
 
 
 def _scratch(env):
@@ -757,10 +782,13 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     report_extra = ''
     try:                                               # rendered before anything is written: a fault is typed
         summary = render.summary_markdown(verdict)
+        when = render.first_checked(verdict)            # serve-035: the first check's time, as the API wrote it
         if state['report_on']:
-            summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'])
+            summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'], when)
             report_extra = 'report-status=%s\nreport-url=%s\n' % (report_status, report_url) \
-                + _report_usage(state['report'])[1]
+                + _report_usage(state['report'], when)[1]
+        summary = _replay_lead(summary, verdict)
+        lead = render.replay_line(verdict)
         if state['withheld'] is not None:
             summary += withhold.summary_markdown(state['withheld'])
         summary += markers.session_markdown(state['session'])
@@ -790,6 +818,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         else:
             say('::warning title=%s::%s' % (_cmd_prop('Assure report'), _cmd_data(
                 render.report_withheld_line(getattr(state['report'], 'reason', None)))))
+    if lead is not None:                               # serve-035: a stored verdict says so in the log too
+        say('Assure: ' + _cmd_data(lead))
     bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line
     if bound is not None:
         say('Assure: scope: %s' % _cmd_data(bound))

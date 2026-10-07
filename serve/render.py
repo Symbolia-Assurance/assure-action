@@ -366,6 +366,40 @@ def report_cost_line(record):
     return line
 
 
+# serve-035 (DD-094 §7 (2); REFUTATION-036 F1): the API's replay marker. A verdict the API served from its store
+# (`replay: true`) says so in the job summary's first lines, with the first check's time; a stored report's line names
+# the first check's charge and this run charges nothing. A time of any other form is never printed.
+FIRST_CHECKED_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+REPLAY_LINE = 'Stored verdict for the same request, first checked %s; nothing was charged this run.'
+EARLIER_RUN = 'in an earlier run'
+
+
+def first_checked(doc):
+    """serve-035: the `first_checked_at` of an envelope as the API wrote it, or None."""
+    t = doc.get('first_checked_at') if isinstance(doc, dict) else None
+    return t if isinstance(t, str) and FIRST_CHECKED_RE.fullmatch(t) else None
+
+
+def replay_line(envelope):
+    """serve-035: "Stored verdict for the same request, first checked <time>; nothing was charged this run." for an
+    envelope the API marked `replay: true`, else None."""
+    if not isinstance(envelope, dict) or envelope.get('replay') is not True:
+        return None
+    return REPLAY_LINE % (first_checked(envelope) or EARLIER_RUN)
+
+
+def report_replay_line(record, first_checked_at=None):
+    """serve-035: the usage line of a stored report (`replay: true`): "Report: cost USD x.xxx, charged USD y.yyy on
+    the first check <time>; nothing was charged this run", or None for a record without a line charge."""
+    cost = record.get('cost') if isinstance(record, dict) else None
+    if not isinstance(cost, dict) or 'charge_usd' not in cost:
+        return None
+    when = ('on the first check %s' % first_checked_at) if isinstance(first_checked_at, str) \
+        and FIRST_CHECKED_RE.fullmatch(first_checked_at) else EARLIER_RUN
+    return 'Report: cost USD %s, charged USD %s %s; nothing was charged this run' % (
+        _money(cost.get('usd') or 0.0, 3), _money(cost.get('charge_usd'), 3), when)
+
+
 def report_exhausted_line(needed_usd):
     """serve-015: the line for a report refused `allowance_exhausted`."""
     return 'Report: allowance exhausted: USD %s needed; set allow-overage or top up' % _money(needed_usd, 3)

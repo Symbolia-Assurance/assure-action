@@ -14,7 +14,9 @@ Rules:
 - One submit sends one `Idempotency-Key` (32 hex) and reuses it on every retry, so the server creates and charges the
   check once. By default it is random; `key_from_bundle=True` (serve-023, the Action's default) derives it from the
   request's content with `check_key`, so a later submit of the same request gets the stored check back (the server's
-  idempotency: 200 with the stored envelope, not charged again) and a changed byte is a new check.
+  idempotency: 200 with the stored envelope, not charged again) and a changed byte is a new check. serve-035 (DD-094
+  §7 (4)): fail-on is applied at render on the stored verdict, so the key leaves it out: one bundle under any policy is
+  one key, one check and one charge, and each answer is decided under the fail-on this submit sends.
 - Delivery failures (refused or reset connection, DNS, TLS, timeout, a 5xx with no failure envelope, a body that is not
   bounded JSON or has no known schema, a body over 16 MiB) are retried on the same route with bounded backoff (3
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
@@ -24,8 +26,9 @@ Rules:
   poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
-- `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025: lower case, no spaces, each word once,
-  sorted), so equal policies are one query and one key; the server checks it against the profile and decides the exit.
+- `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025's, carried by serve-035: lower case, no
+  spaces, each word once, sorted); the server checks it against the profile and decides the exit. The poll of a 202
+  sends it too (`GET /v1/checks/{id}?fail_on=...`), so the verdict is decided under it.
   `allow_partial=True` adds `allow_partial=1` to the query; false sends nothing (the server's default).
 - `scope`, `scope_binding` (the body's form, {<map>: {id: token}[, <record>: {...}]}, serve-010) and
   `accepted_scope_ref` are request-body fields when given, never `files` entries; unset, the body is byte for byte what
@@ -109,9 +112,10 @@ def _digest_of(value):
 
 
 def canonical_fail_on(text):
-    """serve-025: the fail-on words as one canonical query value: each comma-separated word stripped of spaces and
-    lower-cased, each once, sorted, joined with commas, so "fails,deviates", "fails, deviates" and "deviates,fails" are
-    one policy. An empty word stays (the server still refuses it); None and '' are returned as given (no query)."""
+    """serve-025, carried by serve-035 (DD-094 §7 (3)): the fail-on words as one canonical query value: each
+    comma-separated word stripped of spaces and lower-cased, each once, sorted, joined with commas, so "fails,deviates",
+    "fails, deviates" and "deviates,fails" are one policy. An empty word stays (the server still refuses it); None and
+    '' are returned as given (no query)."""
     if not text:
         return text
     return ','.join(sorted({w.strip().lower() for w in str(text).split(',')}))
@@ -126,11 +130,12 @@ def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requi
     server computes); `scope_sha256` and `scope_binding_sha256` are the digests of those body fields (null when unset);
     `requirements_sha256` is the sha256 of the requirements text's UTF-8 bytes (the digest the server keeps with the
     check), null when no text is sent; `repository`, `commit` and `provenance` are the body's own values, null when
-    unset (serve-025 merge with serve-019); `query` is the query string as sent (`fail_on`, `allow_partial`). The
-    server answers a repeated key whose request differs with `bad_input`, so every part of the request it compares is
-    in the key: the fail-on words too, because a repeat returns the stored verdict with the policy it was checked
-    under, and the commit, so a new commit on an unchanged bundle is a new check. The key is a digest of the whole
-    document, never the bundle digest itself."""
+    unset (serve-025 merge with serve-019), so a new commit on an unchanged bundle is a new check; `query` is the query
+    string the server's key compares: serve-035 (DD-094 §7 (4)), every parameter as sent but `fail_on` (`allow_partial`;
+    `submit` passes it), so the key never holds the fail-on words. The server compares the body and that query and
+    answers a repeated key whose request differs with `bad_input`; fail-on is applied at render on the stored verdict,
+    so a repeat under another fail-on is the same check, decided under the fail-on it sends. The key is a digest of the
+    whole document, never the bundle digest itself."""
     manifest = [{'path': n, 'bytes': len(files[n]), 'sha256': hashlib.sha256(bytes(files[n])).hexdigest()}
                 for n in sorted(files)]
     req = None if requirements is None else hashlib.sha256(requirements.encode('utf-8')).hexdigest()
@@ -343,8 +348,10 @@ class Client:
         query_text = urllib.parse.urlencode(query) if query else ''
         if query_text:
             path += '?' + query_text
-        if key_from_bundle:
-            idem = check_key(profile_id, files, query_text, scope=scope, scope_binding=scope_binding,
+        poll_query = '?' + urllib.parse.urlencode({'fail_on': query['fail_on']}) if 'fail_on' in query else ''
+        if key_from_bundle:      # serve-035: the key's query leaves fail_on out (check_key)
+            keyed = urllib.parse.urlencode({k: v for k, v in query.items() if k != 'fail_on'})
+            idem = check_key(profile_id, files, keyed, scope=scope, scope_binding=scope_binding,
                              requirements=requirements, repository=repository, commit=commit, provenance=provenance)
         else:
             idem = secrets.token_hex(16)
@@ -360,7 +367,7 @@ class Client:
             self.sleep(self.poll_s[min(polls, len(self.poll_s) - 1)])
             polls += 1
             try:
-                status, doc = self._call('GET', '/v1/checks/' + cid, route='poll')
+                status, doc = self._call('GET', '/v1/checks/' + cid + poll_query, route='poll')
             except Refusal as e:
                 if e.detail.get('answered') == 'poll' and 'check_id' not in e.detail:
                     e.detail['sent_check_id'] = cid          # the poll was refused; the 202 named the check
