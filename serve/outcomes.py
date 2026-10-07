@@ -168,7 +168,11 @@ def is_closed(value, kinds=()):
 # serve-030, REFUTATION-042 F2: the once-only free report balance, which neither allow_overage nor a top-up admits)
 RULE_ACTIONS = {('allowance_exhausted', 'once_balance'):
                 'A paid plan gives more reports; the free report balance does not renew; nothing ran and nothing was '
-                'charged.'}
+                'charged.',
+                # serve-032 (DD-083): the once-only balance is below zero; a recharge first clears what is owed
+                ('allowance_exhausted', 'once_balance_debt'):
+                'Recharge the free report balance, and the recharge first clears what is owed, or move to a paid plan; '
+                'nothing ran and nothing was charged.'}
 
 
 class Refusal(Exception):
