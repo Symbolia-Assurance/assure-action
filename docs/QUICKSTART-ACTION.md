@@ -178,6 +178,8 @@ This workflow uses the intent-free profile, which needs no declaration. To check
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
+Before the first paid run, run the Action once with `mode: lint`: it reads the same files, sends them to `POST /v1/lint` and lists every problem it finds in your files, profile, scope, `requirements.md` and HTTP heads, at no charge. The Action collects and checks your files in the runner as for a check, then asks the API to read them. Each problem is a `::warning` annotation and a line in the job summary; the lint record is written to `output`. The outputs are `outcome` (`lint`), `exit-code` (0 when nothing was found, else 2) and `lint-findings` (how many problems it found). It never runs a check and nothing is charged, but it counts against your rate limits. Fix what it lists, then run with `mode: api`.
+
 ## Reading your first result
 
 The first line of the job summary, and the Action's last log line, starts with a colour, then says how much was read, "N of 8 machines read, M refused", and the bounds of the result. A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason.
@@ -204,7 +206,7 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 |---|---|---|
 | `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
 | `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
-| `mode` | `api` | `api`: the check runs on the Assure API. |
+| `mode` | `api` | `api`: the check runs on the Assure API. `lint`: a pre-flight that sends the same files to `POST /v1/lint` and runs no check; nothing is charged. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
 | `connection` | none | libpq connection string or URI. Pass it from a secret. |
 | `artefacts` | none | A directory of collected files. Use this or `connection`, never both. For `http-observed-baseline` with `scope-binding` empty, the directory holding your endpoint manifest (`manifest.json` and the response heads it names): the Action binds the endpoints and collects them itself. |

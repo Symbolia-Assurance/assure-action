@@ -68,6 +68,7 @@ from serve.outcomes import OUTCOMES, Refusal
 VERDICT_SCHEMA = 'assure.serve.verdict/v1'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
 REPORT_SCHEMA = 'assure.serve.report/v1'
+LINT_SCHEMA = 'assure.serve.lint/v1'
 DEFAULT_URL = 'https://api.symbolia.ai'
 LOOPBACK = frozenset({'127.0.0.1', '::1', 'localhost'})
 MAX_RESPONSE = 16 * 2 ** 20
@@ -374,6 +375,25 @@ class Client:
                 raise
         if doc.get('schema') != VERDICT_SCHEMA:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
+        return doc
+
+    def lint(self, profile_id, files, fail_on=None, *, allow_partial=False, scope=None, scope_binding=None,
+             accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None):
+        """serve-043: the free pre-flight of one upload (`POST /v1/lint`, serve/lint.py): the lint document (schema
+        assure.serve.lint/v1) the API answers with. Nothing is charged and no check runs. Every other end is a Refusal."""
+        body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
+                                   scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
+                                   requirements=requirements, repository=repository, commit=commit,
+                                   provenance=provenance)
+        query = {}
+        if fail_on:
+            query['fail_on'] = canonical_fail_on(fail_on)
+        if allow_partial is True:
+            query['allow_partial'] = '1'
+        path = '/v1/lint' + ('?' + urllib.parse.urlencode(query) if query else '')
+        status, doc = self._call('POST', path, body, route='lint')
+        if status != 200 or doc.get('schema') != LINT_SCHEMA or not isinstance(doc.get('findings'), list):
+            raise Refusal('api_error', 'the API answered without a lint record')
         return doc
 
     def report(self, check_id, *, allow_overage=False):

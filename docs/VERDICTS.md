@@ -221,3 +221,18 @@ Exit 2 is bad input, and a failure envelope gives its outcome's own exit, 3 for 
 A result is returned whenever one can be produced. When the checker's output for one machine is malformed, that machine is refused and named under "Machines not read" with its reason, `malformed_output: ...` (or `server_fault: ...` when the server could not write that machine's readings), and the other machines keep their readings; a refused machine never contributes a verdict, so the policy reads it as any refused machine. When no result can be produced, the typed failure says what was malformed in `detail.malformation`: a kind from a fixed list, the file, the line, the field and the expected form, never the text of your input. A rule or setting the collector withheld as a marker line is listed in `not_observed_lines` and in the summary as `not observed: <file> line N (<reason>)`; the check reads it as not observed.
 
 `fail-on` takes, for each profile, the statuses it can emit except holds and vacuous, the group word `not_collected`, or `never` alone; the quickstarts list them.
+
+## 11. The lint record
+
+`POST /v1/lint` and the Action's `mode: lint` answer with a lint record, schema `assure.serve.lint/v1`. It is not a verdict: no check ran and nothing was charged.
+
+```json
+{"schema": "assure.serve.lint/v1", "ok": false, "profile": "postgresql-declared-model",
+ "findings": [{"stage": "files", "outcome": "bad_input", "kind": "file_missing",
+               "text": "Missing required file raw/declaration.json.", "file": "raw/declaration.json"}],
+ "requirements": {"rows": 3, "problems": 1}}
+```
+
+The record also carries the seven flags. `ok` is true exactly when `findings` is empty. `profile` is the profile id, or null when none could be read. `requirements` counts the rows read and the rows with a problem, or is null when no requirements text could be read.
+
+Each finding has `stage`, `outcome`, `kind` and `text` (one sentence saying what to change), and `file`, `line`, `field` and `endpoint_id` when they apply. The stages run in this order: `body`, `query`, `profile`, `fail_on`, `scope`, `files`, `collector`, `requirements`, `http`. A stage that cannot run because an earlier one failed is left out. Each stage up to `collector` reports its first problem. `requirements` gives one finding for each row that is not understood (`not_understood`), repeats an id (`duplicate_id`) or carries a tag for another profile family (`scope_mismatch`), with its `line`; a row that is understood and states no method is a normal answer and not a finding. `http` applies to `http-observed-baseline`: one finding for each endpoint whose response will not be observed, and one for each endpoint that answered 4xx or 5xx.

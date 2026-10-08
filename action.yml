@@ -8,7 +8,7 @@ author: Symbolia
 
 inputs:
   mode:
-    description: api (the check runs on the Assure API) or local (in-runner, private distribution only).
+    description: "api (the check runs on the Assure API), lint (a free pre-flight: the same local steps, then POST /v1/lint instead of a check; nothing is charged and no check runs), or local (in-runner, private distribution only)."
     required: false
     default: api
   api-key:
@@ -118,6 +118,9 @@ outputs:
   requirements-disproven:
     description: With a requirements file sent, how many of its requirements are disproven. Empty otherwise.
     value: ${{ steps.assure.outputs.requirements-disproven }}
+  lint-findings:
+    description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a paid run). Empty otherwise."
+    value: ${{ steps.assure.outputs.lint-findings }}
   report-status:
     description: With report true, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.
     value: ${{ steps.assure.outputs.report-status }}

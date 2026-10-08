@@ -70,6 +70,10 @@ connection or a runner token.
   nothing was charged this run." (`serve.render.replay_line`), and a stored report (`replay: true` on the report
   answer) sets `report-charge-usd` to 0 with the line "Report: cost USD x.xxx, charged USD y.yyy on the first check
   <time>; nothing was charged this run" (`serve.render.report_replay_line`).
+`mode: lint` (serve-043) runs the same local steps as `mode: api` up to and including the local file check, then sends the
+upload to `POST /v1/lint` instead of `POST /v1/checks` (never `Client.submit`): nothing is charged and no check runs.
+The lint record is written to the output path; the findings go to the job summary and as `::warning` annotations; the
+outputs are `outcome` (`lint`), `exit-code` (0 when nothing was found, else 2) and `lint-findings` (the count).
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -124,14 +128,14 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from action import http_identity, withhold  # noqa: E402
-from action.client import CHECK_ID_RE, DEFAULT_URL, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
+from action.client import CHECK_ID_RE, DEFAULT_URL, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, markers, render  # noqa: E402
 from serve.outcomes import Refusal, malformation  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
-MODES = ('api', 'local')
+MODES = ('api', 'lint', 'local')
 MAX_INPUT = 4096
 MAX_SCOPE_FILE = 65536
 # serve-007 F2: the API's own reason (serve.profiles.SCOPE_REF_REASON; a test holds the two equal). The server refuses
@@ -139,6 +143,7 @@ MAX_SCOPE_FILE = 65536
 SCOPE_REF_REASON = ('no accepted scope record can be resolved for this account and profile yet; omit '
                     'accepted_scope_ref for a first-run comparison')
 MAX_NOTICE_NAMES = 20
+MAX_LINT_LINES = 50
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 _FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, -]{0,100}')     # serve-016: '-' for unresolved-security
 _OUTCOME_SHAPE = re.compile(r'[a-z_]{1,40}')
@@ -282,7 +287,7 @@ def load_collect():
 def _mode(env):
     m = _plain(env, 'INPUT_MODE').lower() or 'api'
     if m not in MODES:
-        raise Refusal('bad_input', 'mode must be api or local')
+        raise Refusal('bad_input', 'mode must be api, lint or local')
     return m
 
 
@@ -559,6 +564,24 @@ def _replay_lead(summary, verdict):
     return head + '\n\n' + lead + '\n' + rest
 
 
+def _lint_line(f):
+    where = [str(f[k]) for k in ('endpoint_id', 'file') if isinstance(f.get(k), str)]
+    if type(f.get('line')) is int:
+        where.append('line %d' % f['line'])
+    return '%s: %s%s' % (f.get('stage'), f.get('text'), ' (%s)' % ', '.join(where) if where else '')
+
+
+def _lint_markdown(doc, found):
+    """serve-043: the job summary of a lint record: a headline, then one short line per finding."""
+    if not found:
+        return '## Assure lint: ready\n\nNo problems found. Nothing was charged.\n'
+    lines = ['## Assure lint: %d finding(s)' % len(found), '', 'Fix these before a check. Nothing was charged.', '']
+    lines += ['- %s' % render.esc(_lint_line(f)) for f in found[:MAX_LINT_LINES]]
+    if len(found) > MAX_LINT_LINES:
+        lines.append('- and %d more in the lint file' % (len(found) - MAX_LINT_LINES))
+    return '\n'.join(lines) + '\n'
+
+
 def _scratch(env):
     temp_root = env.get('RUNNER_TEMP') or None
     if temp_root and not os.path.isdir(temp_root):
@@ -592,8 +615,10 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False}
 
-    def outputs(outcome, code, extra='', verdict=None):
-        if verdict is None:                       # serve-016: a failure is red for bad input, yellow otherwise
+    def outputs(outcome, code, extra='', verdict=None, lint_colour=None):
+        if lint_colour is not None:               # serve-043: a lint answer is green with no findings, else red
+            colour, n = lint_colour, ''
+        elif verdict is None:                     # serve-016: a failure is red for bad input, yellow otherwise
             colour, n = ('red' if code == 2 else 'yellow'), ''
         else:
             colour = verdict.get('colour') if verdict.get('colour') in render.COLOURS else ''
@@ -739,6 +764,10 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
         extra.update(upload)
+        if state['mode'] == 'lint':               # serve-043: the free pre-flight; nothing is submitted or charged
+            return client.lint(inputs['profile'], collected.files, inputs['fail_on'] or None, limits=lim, scope=scope,
+                               scope_binding=binding, accepted_scope_ref=inputs['accepted_scope_ref'],
+                               **extra), list(collected.ignored)
         verdict = client.submit(inputs['profile'], collected.files, inputs['fail_on'] or None, limits=lim,
                                 scope=scope, scope_binding=binding,
                                 accepted_scope_ref=inputs['accepted_scope_ref'],
@@ -756,13 +785,45 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
                 state['report'] = Refusal('api_error', 'the report request failed unexpectedly (%s)' % type(e).__name__)
         return verdict, list(collected.ignored)
 
+    def finish_lint(doc, ignored):
+        """serve-043: write the lint record to the output path, the findings to the job summary and as warnings, and the
+        outputs outcome `lint`, exit-code (0 when ok, else 2) and lint-findings. Never a charge, never a check."""
+        if doc.get('schema') != LINT_SCHEMA:
+            return failed(Refusal('api_error', 'no lint record'))
+        found = [f for f in doc['findings'] if isinstance(f, dict)]
+        code = 0 if doc.get('ok') is True and not found else 2
+        try:
+            summary = _lint_markdown(doc, found)
+        except Exception as e:  # the class name only, never a value
+            return failed(Refusal('api_error', 'the lint record could not be rendered (%s)' % type(e).__name__))
+        try:
+            _write_file(out_path, bundle.dumps(doc))
+        except (OSError, ValueError) as w:
+            return failed(Refusal('checker_error', 'the lint file could not be written (%s)' % type(w).__name__))
+        try:
+            _append(env.get('GITHUB_STEP_SUMMARY'), summary)
+        except OSError as w:
+            say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
+        for f in found:
+            say('::warning title=%s::%s' % (_cmd_prop('Assure lint'), _cmd_data(_lint_line(f))))
+        if ignored:
+            names = ignored[:MAX_NOTICE_NAMES]
+            more = len(ignored) - len(names)
+            say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
+                len(ignored), _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE, ', '.join(names),
+                (' and %d more' % more) if more else '')))
+        say('Assure: lint: %s; %d finding(s); nothing was charged; policy exit %d; %s' % (
+            'ready for a check' if code == 0 else 'fix these before a check', len(found), code, _cmd_data(out_text)))
+        outputs('lint', code, 'lint-findings=%d\n' % len(found), lint_colour='green' if code == 0 else 'red')
+        return code
+
     try:
         try:
             state['mode'] = _mode(env)
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'))   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
             state['fresh_check'] = parse_fresh_check(_plain(env, 'INPUT_FRESH_CHECK'))           # serve-023
-            if state['report_on'] and state['mode'] == 'local':
+            if state['report_on'] and state['mode'] != 'api':
                 raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
             inputs_profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
@@ -775,6 +836,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if state['scratch'] is not None:
             shutil.rmtree(state['scratch'], ignore_errors=True)
 
+    if state['mode'] == 'lint':
+        return finish_lint(verdict, ignored)
     if verdict.get('schema') != VERDICT_SCHEMA:
         return failed(Refusal('api_error' if state['mode'] == 'api' else 'checker_error', 'no verdict envelope'))
     code = verdict['policy']['exit']
