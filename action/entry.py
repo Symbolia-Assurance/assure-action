@@ -52,7 +52,9 @@ connection or a runner token.
   read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
   and its overage is charged. The summary adds one line from the record, "Report: cost USD x.xxx, charged USD y.yyy,
   allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted` past a monthly
-  allowance, "Report: allowance exhausted: USD q needed; set allow-overage or top up" (serve-030: past the free
+  allowance, "Report: allowance exhausted: USD q needed; set allow-overage or top up", or, when the account has no overage budget
+  and allow-overage cannot admit the report, "...; top up, or ask Symbolia to set an overage budget" (serve-039 R1;
+  serve-030: past the free
   report balance, which no top-up or overage admits, the refusal's own sentence alone, as for `job_ceiling`, DD-079
   Decision 10); the outputs add `report-cost-usd`, `report-charge-usd` and
   `report-allowance-remaining` (empty when the record carries none).
@@ -512,7 +514,8 @@ def _report_usage(report, first_checked_at=None):
     replay = isinstance(report, dict) and report.get('replay') is True
     if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted' and 'topup_needed_usd' in report.detail:
         # serve-030: a once-only balance (no top-up needed, overage never admits it) has its reason line only
-        line = render.report_exhausted_line(report.detail.get('topup_needed_usd'))
+        line = render.report_exhausted_line(report.detail.get('topup_needed_usd'), report.detail.get('admits'),
+                                            report.detail.get('overage_budget_usd'))
     elif isinstance(report, Refusal):
         line = None
     elif replay:
@@ -571,7 +574,7 @@ def _lint_line(f):
     return '%s: %s%s' % (f.get('stage'), f.get('text'), ' (%s)' % ', '.join(where) if where else '')
 
 
-def _lint_markdown(doc, found):
+def _lint_markdown(found):
     """serve-043: the job summary of a lint record: a headline, then one short line per finding."""
     if not found:
         return '## Assure lint: ready\n\nNo problems found. Nothing was charged.\n'
@@ -793,7 +796,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         found = [f for f in doc['findings'] if isinstance(f, dict)]
         code = 0 if doc.get('ok') is True and not found else 2
         try:
-            summary = _lint_markdown(doc, found)
+            summary = _lint_markdown(found)
         except Exception as e:  # the class name only, never a value
             return failed(Refusal('api_error', 'the lint record could not be rendered (%s)' % type(e).__name__))
         try:

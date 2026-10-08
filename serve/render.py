@@ -400,9 +400,22 @@ def report_replay_line(record, first_checked_at=None):
         _money(cost.get('usd') or 0.0, 3), _money(cost.get('charge_usd'), 3), when)
 
 
-def report_exhausted_line(needed_usd):
-    """serve-015: the line for a report refused `allowance_exhausted`."""
-    return 'Report: allowance exhausted: USD %s needed; set allow-overage or top up' % _money(needed_usd, 3)
+def report_exhausted_line(needed_usd, admits=None, overage_budget_usd=None):
+    """serve-015: the line for a report refused `allowance_exhausted`. serve-039 fix 2 (REFUTATION-FIX1-001 MEDIUM-2,
+    LOW-4): the Action's client keeps only scalar detail values, so the line keys on `overage_budget_usd`, which every
+    budget refusal carries. A budget of 0 (none set) says a top-up or a budget from Symbolia; a budget above 0 that is
+    spent says a raise or a top-up. Without the figure, `admits` (a list, when the caller has it) decides as before:
+    one that does not name `allow_overage` says the no-budget sentence."""
+    needed = _money(needed_usd, 3)
+    budget = overage_budget_usd if isinstance(overage_budget_usd, (int, float)) \
+        and not isinstance(overage_budget_usd, bool) else None
+    if budget is not None:
+        if budget > 0:
+            return 'Report: allowance exhausted: USD %s needed; ask Symbolia to raise your overage budget, or top up' % needed
+        return 'Report: allowance exhausted: USD %s needed; top up, or ask Symbolia to set an overage budget' % needed
+    if isinstance(admits, list) and 'allow_overage' not in admits:
+        return 'Report: allowance exhausted: USD %s needed; top up, or ask Symbolia to set an overage budget' % needed
+    return 'Report: allowance exhausted: USD %s needed; set allow-overage or top up' % needed
 
 
 # serve-019 (DD-072 Addendum 10): the allowance line a check response's `usage` block adds when a threshold is crossed
@@ -454,8 +467,49 @@ def first_line(envelope):
     unit, `machines_line` otherwise (None when the envelope carries neither)."""
     scope, machines = scope_line(envelope), machines_line(envelope)
     if scope is None:
-        return machines
-    return scope if machines is None else '%s; %s' % (scope, machines)
+        line = machines
+    else:
+        line = scope if machines is None else '%s; %s' % (scope, machines)
+    if line is not None and http_has_needs_intent(envelope):     # serve-041 rule 3 (b)
+        line += HTTP_NO_REQUIREMENT_TAIL
+    return line
+
+
+# serve-041: on the http-observed-baseline profile no requirements.md sentence can hold in this release, so a verdict
+# with an intent-bound reading says so on its first line instead of pointing at requirements.md.
+HTTP_PROFILE = 'http-observed-baseline'
+HTTP_NO_REQUIREMENT_TAIL = '; no HTTP requirement can hold in this release'
+HTTP_PLAIN_ACTION = ('no HTTP requirement can be stated in this release; the reading informs and asks nothing of you')
+DEAD_END_ACTIONS = ('state it in requirements.md', 'Supply a trusted adapter binding')   # never on an HTTP row
+
+
+def http_has_needs_intent(envelope):
+    """True when `envelope` is an http-observed-baseline verdict with any needs_intent row or not-established entry."""
+    env = envelope if isinstance(envelope, dict) else {}
+    if env.get('profile') != HTTP_PROFILE:
+        return False
+    return (any(r.get('status') == 'needs_intent' for r in _rows(env))
+            or any(isinstance(e, dict) and e.get('reason_class') == 'needs_intent'
+                   for e in env.get('not_established') or ()))
+
+
+def warning_texts(envelope):
+    """serve-041: the text of each entry of the verdict's `warnings` list (an envelope without one has none)."""
+    env = envelope if isinstance(envelope, dict) else {}
+    w = env.get('warnings')
+    return [w_['text'] for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str) and w_['text']] \
+        if isinstance(w, list) else []
+
+
+WARNING_TITLES = {'endpoint_non_success': 'Assure endpoint', 'known_limit': 'Assure known limit'}
+
+
+def warning_items(envelope):
+    """serve-048: (kind, text) of each entry of the verdict's `warnings` list, in order, for the annotation titles."""
+    env = envelope if isinstance(envelope, dict) else {}
+    w = env.get('warnings')
+    return [(w_.get('kind'), w_['text']) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str)
+            and w_['text']] if isinstance(w, list) else []
 
 
 # ---------- serve-016: the policy's tests and the verdict line (module docstring) ----------
@@ -1236,6 +1290,12 @@ def summary_markdown(envelope, now=None):
     meaning = meaning_line(env)                   # DD-073 Addendum 2 (a): what the first line means, in plain words
     if line is not None and meaning:
         out += [_esc_line(meaning), '']
+    shown = warning_texts(env)                    # serve-041: a warning sits right under the headline, in the first 10 lines
+    if shown:
+        out += ['- Warning: %s' % _esc_line(t) for t in shown[:5]]
+        if len(shown) > 5:
+            out.append('- and %d more warnings' % (len(shown) - 5))
+        out.append('')
     up_front = scope_notes_line(env)              # serve-012: a selected scope's bound sits under the headline
     if up_front is not None:
         out += ['Scope: %s' % esc(up_front), '']
@@ -1444,6 +1504,8 @@ def annotations(envelope):
     notes = scope_notes_line(envelope)
     if notes is not None:
         lines.append('::notice title=%s::%s' % (_cmd_prop('Assure scope'), _cmd_data(notes)))
+    for kind, text in warning_items(envelope)[:MAX_ANNOTATIONS]:   # serve-041 / serve-048: titled by the entry's kind
+        lines.append('::warning title=%s::%s' % (_cmd_prop(WARNING_TITLES.get(kind, 'Assure') if isinstance(kind, str) else 'Assure'), _cmd_data(text)))
     for level, r in picked[:MAX_ANNOTATIONS]:
         where = '%s %s' % (r.get('machine'), r.get('id')) if r.get('id') is not None else str(r.get('machine'))
         title = 'Assure %s %s' % (label(r.get('status')), where)

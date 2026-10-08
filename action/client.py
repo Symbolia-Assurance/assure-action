@@ -75,8 +75,6 @@ MAX_RESPONSE = 16 * 2 ** 20
 RESPONSE_LIMITS = bundle.Limits(body_bytes=MAX_RESPONSE, file_bytes=MAX_RESPONSE, files=1, json_depth=128)
 MAX_KEY = 512
 MAX_RETRY_AFTER_S = 60
-NEVER_RETRY = frozenset({'unauthenticated', 'bad_input', 'oversize_input', 'unknown_profile', 'credit_exhausted',
-                         'profile_not_servable', 'allowance_exhausted'})
 RETRY_TYPED = frozenset({'server_busy'})
 CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')

@@ -76,7 +76,7 @@ inputs:
     required: false
     default: 'false'
   allow-overage:
-    description: With report true, true lets a report beyond your account's monthly report allowance run, and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged.
+    description: "With report true, true lets a report beyond your account's monthly allowance run, within its overage budget (overage is off until a budget is set), and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged."
     required: false
     default: 'false'
   requirements:
