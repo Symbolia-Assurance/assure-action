@@ -48,7 +48,7 @@ inputs:
     required: false
     default: ''
   fail-on:
-    description: Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never. unresolved-security (strict) also fails the job on an obligation the checker marks `security: true` that is not resolved.
+    description: "Statuses that fail the job, a comma list the API checks against the profile (any status but holds and vacuous, or not_collected), or never. unresolved-security (strict) also fails the job on an obligation the checker marks `security: true` that is not resolved."
     required: false
     default: fails
   allow-partial:
@@ -107,7 +107,7 @@ outputs:
     description: The verdict's policy exit (0 nothing disproven or never, 1 something disproven or a status you chose to stop on, 3 could not look), 2 bad input or a missing, unknown or revoked key, 3 another typed refusal or an API failure.
     value: ${{ steps.assure.outputs.exit-code }}
   colour:
-    description: green (nothing disproven within the bounds the first line states); red (something disproven, a prove-class obligation not proven, a status you chose to stop on, an unresolved obligation under strict, bad input, or a missing, unknown or revoked key); yellow (could not look: nothing readable, the credit is spent, a rate limit, or another typed refusal).
+    description: "green (nothing disproven within the bounds the first line states); red (something disproven, a prove-class obligation not proven, a status you chose to stop on, an unresolved obligation under strict, bad input, or a missing, unknown or revoked key); yellow (could not look: nothing readable, the credit is spent, a rate limit, or another typed refusal)."
     value: ${{ steps.assure.outputs.colour }}
   not-established:
     description: How many obligations the check could not establish (each is named in the job summary). Empty for a failure.
