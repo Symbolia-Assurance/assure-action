@@ -40,6 +40,8 @@ The server deletes the collected facts when the check ends. It keeps the verdict
 
 In `mode: api` the Action also sends, by default, the text of the `requirements.md` at your repository root (when it is there and within 65536 bytes, 256 lines and 8192 bytes per line), your repository name and the commit (on a pull request, its head commit); the server keeps them with the check for 30 days. Set the `requirements` input to `none` to send no requirements text. Setting `requirements` to `none` stops the requirements text only: the repository and the commit are still sent and kept with the check for 30 days. The Action reads the requirements text from the files your workflow checked out; the commit it sends is a label for the run, not the source of the text. On `pull_request` the checkout is the merge commit GitHub made, and on `pull_request_target` it is the base branch, while the commit sent is the pull request's head commit.
 
+The requirements text comes from the checked-out workspace, not fetched from the named commit. A pull request workflow may read a merge tree, and `pull_request_target` may read the base branch, while the metadata names the pull request head. Align the checkout with the commit you intend to check; caller/runner provenance is not a GitHub attestation.
+
 ## What the runner needs
 
 - Outbound HTTPS to `api.symbolia.ai` (port 443).
@@ -370,7 +372,7 @@ Text from the checker or your files is shown as plain text. A web address in it 
 
 ## The report
 
-Set `report: true` to get a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. It needs `mode: api` and an account whose tier includes the report; otherwise the API refuses it with `tier_excludes`. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails that check is withheld. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
+Set `report: true` to get a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. It needs `mode: api`. Every plan served today includes the report: a free account draws it from the USD 1 report balance granted with its key, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails that check is withheld. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
 
 - **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
 - **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: \<reason>." A refused report adds one warning annotation, never an error.
@@ -622,7 +624,7 @@ The last line of the summary says what left your runner:
 
 A collection with gaps is still a verdict. Each gap reads **not observed** with the place it was looked for.
 
-`tier_excludes` never ends a job. With `report: true`, it means your account's tier does not include the report: the verdict, its summary and its exit stand, and the summary says the report was withheld. Leave `report` off, or ask Symbolia about a tier that includes the report.
+`tier_excludes` never ends a job. With `report: true`, it would mean your account's plan does not include the report; no plan served today excludes it, and a free account without its USD 1 report grant is refused `allowance_exhausted` instead. Either way the verdict, its summary and its exit stand, and the summary says the report was withheld. Leave `report` off, or ask Symbolia to grant the free report balance or move you to a paid plan.
 
 `allowance_exhausted` never ends a job either. With `report: true`, it means your plan's report allowance is not set or is spent for the month, and nothing pays for the report: the verdict, its summary and its exit stand, and the summary names the USD needed. Set `allow-overage: true`, or ask Symbolia to top up your account. On the free plan, it means your report balance is spent, and the summary says so.
 

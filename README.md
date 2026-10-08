@@ -15,7 +15,7 @@ Known-vulnerability scanners check your code against a list of what has broken b
 Assure is the check that reads green only when nothing it examined is disproven. It tells you the bounds of what it has established, and why it matters. In an age where machines generate code at a volume nobody can read, Assure shows that each change maintains its baseline security and reliability, and stays true to any formalised requirements.
 
 - `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote.
-- `postgresql-declared-model`: your server against a declaration you write (`raw/declaration.json`). Plain-sentence requirements in a `requirements.md` will be read on every pull request as this profile's human surface; this release does not read them yet.
+- `postgresql-declared-model`: your server against a declaration you write (`raw/declaration.json`). When the check carried your `requirements.md`, the verdict also carries `requirements`: one row per requirement line, with its `id`, its `sentence` as you wrote it, and one of three states.
 - `http-observed-baseline`: the response heads you captured for the endpoints you select, offline; the Action produces the scope binding itself.
 
 PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQL 17 and 18.

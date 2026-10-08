@@ -1148,6 +1148,16 @@ def _witness_fields(env, row):
     w = None
     try:
         rd = (env.get('readings') or {}).get(row.get('machine'))
+        profile = env.get('profile')
+        profile_id = profile.get('id') if isinstance(profile, dict) else profile
+        if profile_id == 'postgresql-declared-model' and row.get('machine') == 'M5' and isinstance(rd, dict):
+            projection = rd.get('actionability')
+            if isinstance(projection, dict) and projection.get('schema') == 'assure.declared-m5.actionability/v1':
+                projected = projection.get(row.get('id'))
+                if isinstance(projected, dict) and projected.get('verified') is True:
+                    fields = (projected.get('object'), projected.get('access_path'), projected.get('evidence_locator'))
+                    if all(_scalar(value) for value in fields):
+                        return tuple(_clip(value) for value in fields)
         rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
         obs = rd.get('obligations') if isinstance(rd, dict) else None
         ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
