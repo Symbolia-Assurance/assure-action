@@ -4,7 +4,7 @@ Assure checks the software your code runs on. From your own GitHub Actions workf
 
 The Action collects facts in your runner. The check runs on Symbolia's server at `api.symbolia.ai`. The verdict comes back into your runner and, on a pull request, onto the pull request as annotations.
 
-**Install.** Give this to your agent: `skills/assure/SKILL.md`. It knows the supported routes, what the Action needs from your repository, and where it stops. Pin the Action at the commit you fetched this file from. If you prefer to do it by hand, the quickstart below is the same path.
+**Install.** Give this to your agent: `skills/assure/SKILL.md`. It knows the supported routes, what the Action needs from your repository, and where it stops. 
 
 Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
