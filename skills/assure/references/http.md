@@ -33,7 +33,7 @@ A complete `manifest.json` for two endpoints:
 
 ```yaml
       - name: Assure check
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline
@@ -58,6 +58,8 @@ head -n 1 http-fixture/head-001.txt
 ```
 
 `-I` sends a HEAD request and writes the head as received, every line ending in CRLF, with the empty line that ends it. `--http1.1` matters: the first line of each head must be an HTTP/1.1 status line, such as `HTTP/1.1 200 OK`. A head whose first line is another version, such as `HTTP/2 200` from a capture without `--http1.1`, or `HTTP/1.0 200 OK` from a server that answers in HTTP/1.0, is recorded as not observed. Without `-L`, `curl` does not follow a redirect, so a `3xx` head is the endpoint's own answer.
+
+The `host` in each manifest endpoint must be the same host as the URL you capture with `curl`.
 
 Set `complete` to `true` for each head you captured this way.
 
@@ -98,7 +100,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline

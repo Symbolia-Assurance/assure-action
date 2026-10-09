@@ -114,7 +114,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline
@@ -132,9 +132,9 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a commit cannot.
+Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-Pin the Action at the commit you fetched this file from. Put that commit of `Symbolia-Assurance/assure-action`, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
 

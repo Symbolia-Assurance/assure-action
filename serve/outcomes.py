@@ -119,13 +119,18 @@ MALFORMATIONS = MappingProxyType({
                   'text without control characters',
     'provenance': 'repository (owner/name) and commit (40 lower-case hex) together, or neither; provenance caller '
                   'or runner, only with them',
+    # DD-105 Addendum 2: the agent feedback note
+    'feedback_body': 'a JSON object with kind (friction, wrong_reading, coverage_gap or model_proposal_intent) and text '
+                     '(1 to 4096 bytes of UTF-8 without control characters but LF and TAB), and optionally check_id, '
+                     'profile, obligation, package {name, version}, agent {model_id, client} and consent_follow_up',
 })
 # A field path the malformation may name: request fields, JSON fields the checks read, and derive locators.
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
                     'allow_partial', 'redaction_withheld', 'sanitised_sha256', 'entries', 'major', 'server.major',
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
                     'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
-                    'provenance', 'sentence'})
+                    'provenance', 'sentence', 'kind', 'text', 'check_id', 'obligation', 'package', 'agent',
+                    'consent_follow_up'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',

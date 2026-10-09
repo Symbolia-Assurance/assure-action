@@ -1,2 +1,2 @@
-source: 3be6b3dcf3d24a7126df0e0c54b45d00f9b32536; served profiles: postgresql-observed-baseline, postgresql-declared-model, http-observed-baseline
-pin: read it from the checkout you fetched this file from (git -C assure-action rev-parse HEAD); never put the source commit in a uses: line. If this folder was copied without its checkout, ask the operator for the pinned Action commit; never guess one.
+source: f8129b8bd59f3d4047e844f83c413bae3f3bedc4; served profiles: postgresql-observed-baseline, postgresql-declared-model, http-observed-baseline, mysql-declared-model
+pin: install at @beta (Symbolia-Assurance/assure-action@beta), or freeze at a full 40-character commit SHA of that repository (in a clone, git -C assure-action rev-parse HEAD prints it); never put the source commit in a uses: line. If this folder was copied without its checkout, install the Action at `@beta`; never guess a commit.

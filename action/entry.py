@@ -37,7 +37,7 @@ connection or a runner token.
   a key of their own), `artefacts` is that bundle and the wrapper is sent as written, as for any bound profile. `identity-key` takes only `pipe` (the default); any other value is masked first and refused (`bad_input`)
   before anything is read. The key is never printed, never in an environment variable or a file, and nothing persists
   between runs.
-  `report` (serve-014: `true` or `false`, default false; any other word is `bad_input` before anything is read): after
+  `report` (serve-014, DD-103: `true` or `false`; unset is on in api mode and off in local mode; any other word is `bad_input` before anything is read): after
   a verdict envelope comes back, the Action asks for its claim-tree report (`Client.report`: POST, then GET while 202,
   bounded). The job summary then carries the verdict's first line, the written body and the line naming the report
   page; for a withheld report, or one the API refused (`tier_excludes`, a delivery failure), it carries the
@@ -475,11 +475,13 @@ def parse_allow_partial(text):
     raise Refusal('bad_input', 'allow-partial must be true or false')
 
 
-def parse_report(text):
-    """serve-014: the `report` input: '', 'false' or '0' is False; 'true' or '1' is True (case-insensitive); else
-    bad_input."""
+def parse_report(text, mode='api'):
+    """serve-014, DD-103: the `report` input: unset or '' is True in api mode and False in any other mode; 'false' or
+    '0' is False; 'true' or '1' is True (case-insensitive); else bad_input."""
     v = (text or '').strip().lower()
-    if v in ('', 'false', '0'):
+    if v == '':
+        return mode == 'api'
+    if v in ('false', '0'):
         return False
     if v in ('true', '1'):
         return True
@@ -823,7 +825,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     try:
         try:
             state['mode'] = _mode(env)
-            state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'))   # serve-014: before anything is read
+            state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'), state['mode'])   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
             state['fresh_check'] = parse_fresh_check(_plain(env, 'INPUT_FRESH_CHECK'))           # serve-023
             if state['report_on'] and state['mode'] != 'api':

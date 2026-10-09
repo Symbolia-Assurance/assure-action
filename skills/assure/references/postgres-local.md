@@ -39,11 +39,11 @@ The collector runs a fixed, published set of `SELECT` queries. It writes nothing
 
 ## Running the collector yourself (section 9)
 
-The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same commit as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
+The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same ref as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
 
 ```sh
 git clone https://github.com/Symbolia-Assurance/assure-action assure-action
-git -C assure-action checkout <full commit sha>
+git -C assure-action checkout beta
 ```
 
 Set the standard libpq variables for the server (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`). Find the data directory first: ask the server with `psql -c 'SHOW data_directory'` ("A server on your own machine", below), and give that directory, as this machine sees it, in place of `<data directory>`. Then run:
@@ -137,7 +137,7 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
 
 ```yaml
       - name: Assure check from collected files
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-declared-model
@@ -186,7 +186,7 @@ jobs:
 
       - name: Assure check from collected files
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline

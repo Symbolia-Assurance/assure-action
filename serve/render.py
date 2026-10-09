@@ -524,6 +524,18 @@ CLASS_ACTIONS = {'missing_method': 'a method is a later profile version',
                  'missing_baseline': 'pin the baseline (Symbolia)', 'needs_intent': 'state it in requirements.md',
                  'representation': 're-collect with the pinned collector',
                  'not_observable_at_pin': 'collect with the collector successor (Symbolia)'}
+# A profile with no collector has nothing to re-collect with: its `representation` next step names its own input form.
+# The one place the choice is made; every other profile keeps CLASS_ACTIONS['representation'] byte for byte.
+NO_COLLECTOR_REPRESENTATION = {
+    'mysql-declared-model': 're-produce raw/submission.json to the `symbolia.mysql-declared-input.v0` shape '
+                            '(this profile has no collector)'}
+
+
+def representation_action(profile_id=None):
+    """The next step of a `representation` row for the profile `profile_id` (None or unlisted: the engine-wide text)."""
+    return NO_COLLECTOR_REPRESENTATION.get(profile_id, CLASS_ACTIONS['representation'])
+
+
 # coordination 2102 A22: who can establish each class, and what it needs (not_observed: 'collect <locator>';
 # missing_baseline: the major; representation: the row's reason). `unsupported` (A25): the product's own limits.
 CLASS_OWNERS = {'not_observed': 'agent', 'needs_intent': 'operator', 'missing_baseline': 'symbolia',
@@ -853,7 +865,7 @@ def _could_not_look_words(env):
         loc = re.search(r'raw/[A-Za-z0-9_./#\[\]=-]{1,200}', reasons[0])
         what = loc.group(0) if loc else 'the facts the machines read'
         return '%s: %s; collect %s' % (REASON_WORDS['not_observed'], what, what)
-    return '%s; %s' % (REASON_WORDS['representation'], CLASS_ACTIONS['representation'])
+    return '%s; %s' % (REASON_WORDS['representation'], representation_action(env.get('profile')))
 
 
 def _yellow_action(env):

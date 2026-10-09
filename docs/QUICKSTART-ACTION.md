@@ -8,7 +8,7 @@
 > - [ ] The API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
 > - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
 
-**Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
+**Served today:** four profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a collected `raw/submission.json` that you produce, because the Action has no MySQL collector; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
@@ -150,7 +150,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline
@@ -168,9 +168,9 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a commit cannot.
+Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-Pin the Action at the commit you fetched this file from. Put that commit of `Symbolia-Assurance/assure-action`, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
 
@@ -220,8 +220,8 @@ If a reading looks wrong, send Symbolia, through your Symbolia contact, the chec
 | `scope-binding` | none | A JSON file holding the whole `scope_binding` object, for a profile that binds its scope: the token map under the profile's map name, and any record the profile lists. The Action checks its keys before collecting. Both PostgreSQL profiles take none. For `http-observed-baseline`, leave it empty and the Action makes it. |
 | `identity-key` | `pipe` | For `http-observed-baseline`: how the endpoint identity key reaches the identity producer. Only `pipe`. The Action makes a fresh key for each job, passes it to the producer and then the collector on a pipe, and keeps nothing, so no key is an input, an environment variable or a file and nothing persists between runs; that is fine while no accepted scope exists, since a later comparison with an accepted scope will need a key kept across runs. Any other value is masked and refused before anything is read. |
 | `accepted-scope-ref` | none | Refused for now, before anything is collected or sent: no accepted scope record can be resolved yet. Leave it empty. |
-| `report` | `false` | `true` asks the API for the plain-language report of the check's claim tree after a verdict ("The report"). `mode: api` only. Any other word is `bad_input`. |
-| `allow-overage` | `false` | With `report: true`, `true` lets a report beyond your account's monthly allowance run, within its overage budget, and its overage is charged at cost x 1.2 ("The report"). Any other word is `bad_input`. |
+| `report` | unset | On by default in `mode: api`: the API writes the plain-language report of the check's claim tree after a verdict ("The report"). `report: false` skips it, and `mode: local` never asks for one. Any other word, or `true` with `mode: local`, is `bad_input`. |
+| `allow-overage` | `false` | With the report on, `true` lets a report beyond your account's monthly allowance run, within its overage budget, and its overage is charged at cost x 1.2 ("The report"). Any other word is `bad_input`. |
 | `requirements` | `requirements.md` at the repository root | A requirements file to send with the check. With the input empty, the Action sends the repository root's `requirements.md` when there is one, and nothing when there is none. A file you name that is missing, unreadable or a symbolic link, or one beyond 65536 bytes, 256 lines (a final newline ends the last line) or 8192 bytes per line, or not UTF-8 text, is `bad_input` (exit 2) before anything is collected or sent. A repository-root `requirements.md` you did not name that cannot be sent for one of those reasons is not sent, and the run goes on with one notice: "requirements.md at the repository root was not sent (\<reason>). To send it, ...; to keep it and silence this notice, set requirements to none." The text travels as a request field, never as a collected file. The Action also sends the repository and the commit as their provenance: `GITHUB_REPOSITORY`, and on a pull request the head commit of the pull request (`GITHUB_SHA` is then a merge commit GitHub made), else `GITHUB_SHA`. `mode: api` only. `none` sends no requirements text and prints no notice (a file named `none` is then reached as `./none`). Only `none` in lower case is the sentinel: `NONE` names a file, and on a file system that ignores case, such as the default on macOS, a file named `none` answers to it. |
 | `fresh-check` | `false` | `true` sends a random `Idempotency-Key`, so the same bundle is checked, and charged, again (section 9). By default the key comes from the content of the request, and a repeat of the same request gets the stored verdict back. Any other word is `bad_input`. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
@@ -374,7 +374,7 @@ Text from the checker or your files is shown as plain text. A web address in it 
 
 ## The report
 
-Set `report: true` to get a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. It needs `mode: api`. Every plan served today includes the report: a free account draws it from the USD 1 report balance granted with its key, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails that check is withheld. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
+The report is on by default in `mode: api`, and `report: false` skips it. It is a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. `mode: local` never asks for one. Every plan served today includes the report: a free account draws it from the USD 1 report balance granted with its key, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails a fact rule of that check is withheld. A report that passes every fact rule but misses a style target is served as it is, after at most one retry. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
 
 - **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
 - **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: \<reason>." A refused report adds one warning annotation, never an error.
@@ -401,7 +401,7 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
 
 ```yaml
       - name: Assure check from collected files
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-declared-model
@@ -448,7 +448,7 @@ jobs:
 
       - name: Assure check from collected files
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline
@@ -486,11 +486,11 @@ The earlier job uploads the whole folder as the collector wrote it, under the na
 
 ### Running the collector yourself
 
-The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same commit as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
+The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same ref as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
 
 ```sh
 git clone https://github.com/Symbolia-Assurance/assure-action assure-action
-git -C assure-action checkout <full commit sha>
+git -C assure-action checkout beta
 ```
 
 Set the standard libpq variables for the server (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`). Find the data directory first: ask the server with `psql -c 'SHOW data_directory'` ("A server on your own machine", below), and give that directory, as this machine sees it, in place of `<data directory>`. Then run:
@@ -626,9 +626,9 @@ The last line of the summary says what left your runner:
 
 A collection with gaps is still a verdict. Each gap reads **not observed** with the place it was looked for.
 
-`tier_excludes` never ends a job. With `report: true`, it would mean your account's plan does not include the report; no plan served today excludes it, and a free account without its USD 1 report grant is refused `allowance_exhausted` instead. Either way the verdict, its summary and its exit stand, and the summary says the report was withheld. Leave `report` off, or ask Symbolia to grant the free report balance or move you to a paid plan.
+`tier_excludes` never ends a job. With the report on, it would mean your account's plan does not include the report; no plan served today excludes it, and a free account without its USD 1 report grant is refused `allowance_exhausted` instead. Either way the verdict, its summary and its exit stand, and the summary says the report was withheld. Set `report: false`, or ask Symbolia to grant the free report balance or move you to a paid plan.
 
-`allowance_exhausted` never ends a job either. With `report: true`, it means your plan's allowance is not set or is spent for the month, and nothing pays for the report (overage is off until you set a budget): the verdict, its summary and its exit stand, and the summary names the USD needed. Ask Symbolia to set an overage budget and set `allow-overage: true`, or to top up your account. On the free plan, it means your report balance is spent, and the summary says so.
+`allowance_exhausted` never ends a job either. With the report on, it means your plan's allowance is not set or is spent for the month, and nothing pays for the report (overage is off until you set a budget): the verdict, its summary and its exit stand, and the summary names the USD needed. Ask Symbolia to set an overage budget and set `allow-overage: true`, or to top up your account. On the free plan, it means your report balance is spent, and the summary says so.
 
 `overage_ceiling` never ends a job: this month's report overage billed later, beyond your top-up, would pass a monthly overage limit set on your account, so the report does not run, even with `allow-overage`. Your top-up is spent before any overage, whatever the limit. `job_ceiling` never ends a job: the report's quote is above your account's job ceiling, so the report does not run, even with `allow-overage`; the summary names the quote and the ceiling. `daily_report_cap` never ends a job: your account has had its reports for the day (UTC). Nothing runs and nothing is charged for any of them.
 
@@ -637,6 +637,7 @@ A collection with gaps is still a verdict. Each gap reads **not observed** with 
 - `postgresql-declared-model` checks your server against a declaration you supply in `raw/declaration.json` (and optionally `raw/clients.json`). It needs `artefacts`: the collector does not write a declaration, so with `connection` this profile reads `bad_input` for the missing `raw/declaration.json`. Collect first, add your declaration under `raw/`, then run with `artefacts`.
 - `postgresql-observed-baseline` reads your server and compares it with observed facts and pinned public baselines. You declare nothing.
 - `http-observed-baseline` reads the response heads you captured for the HTTP endpoints you select (section 12).
+- `mysql-declared-model` reads the submission you produce in `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`). The Action has no MySQL collector, so you collect the file yourself and run with `artefacts`; `connection` is not available for this profile. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
 
 What each profile claims, and what it does not, is in [SCOPE.md](SCOPE.md) and, for `http-observed-baseline`, in section 12. What is collected and where it goes is in [DATA.md](DATA.md).
 
@@ -673,7 +674,7 @@ A complete `manifest.json` for two endpoints:
 
 ```yaml
       - name: Assure check
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline
@@ -700,6 +701,8 @@ head -n 1 http-fixture/head-001.txt
 ```
 
 `-I` sends a HEAD request and writes the head as received, every line ending in CRLF, with the empty line that ends it. `--http1.1` matters: the first line of each head must be an HTTP/1.1 status line, such as `HTTP/1.1 200 OK`. A head whose first line is another version, such as `HTTP/2 200` from a capture without `--http1.1`, or `HTTP/1.0 200 OK` from a server that answers in HTTP/1.0, is recorded as not observed. Without `-L`, `curl` does not follow a redirect, so a `3xx` head is the endpoint's own answer.
+
+The `host` in each manifest endpoint must be the same host as the URL you capture with `curl`.
 
 Set `complete` to `true` for each head you captured this way.
 
@@ -740,7 +743,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline
@@ -771,6 +774,16 @@ A full read of the two `https` endpoints above has the first line "green: 2 of 2
 Choose endpoints that answer HEAD with 2xx or 3xx; a 4xx or 5xx endpoint hides policy checks for the whole run and the verdict's `warnings` names them. No HTTP requirement can be stated in this release: a `requirements.md` sentence on this profile cannot hold, and the readings inform and ask nothing of you.
 
 The policy exits are those of section 7: `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read; `disproven` (1, red) when a reading has a status you fail on; `could_not_look` (3, yellow) when no endpoint was observed or no machine could be read.
+
+## 13. Checking MySQL from a submission
+
+`mysql-declared-model` checks a MySQL server against a submission you produce. The Action has no MySQL collector, so you collect the file yourself and give the Action its folder with `artefacts`.
+
+Give the Action an artefacts folder that holds one file, `raw/submission.json`. Its schema is `symbolia.mysql-declared-input.v0`. It carries `collection`, `declared_policy`, `grant_tables`, `mysql_user`, `system_variables`, `replication_channels`, `version` and `configuration_sha256`, with `material` set to `mysql` and the seven flags at their standing values (`execution_authorized`, `hardware_authorized`, `industrial_release_authorized`, `release_allowed`, `physical_validation` and `self_approved` false; `simulation` true).
+
+The check reads the file and contacts no server. Seven machines read it: M1, M2, M3, M4, M6, M7 and M8. A machine whose section the submission lacks reads `representation`, with the machine's own reason. A submission that holds a secret, such as a password or a key, is refused before anything is read, and the refusal names the path and the kind, never the value.
+
+A report for this profile is withheld with `profile_unqualified` until the report writer is qualified for MySQL. The obligation listing, requirements and formalisation for this profile arrive in a later release.
 
 ## Rules for an agent
 

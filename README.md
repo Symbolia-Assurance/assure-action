@@ -4,11 +4,11 @@ Assure checks the software your code runs on. From your own GitHub Actions workf
 
 The Action collects facts in your runner. The check runs on Symbolia's server at `api.symbolia.ai`. The verdict comes back into your runner and, on a pull request, onto the pull request as annotations.
 
-**Install.** Give this to your agent: `skills/assure/SKILL.md`. It knows the supported routes, what the Action needs from your repository, and where it stops. 
+**Install.** Give this to your agent: `skills/assure/SKILL.md`. It knows the supported routes, what the Action needs from your repository, and where it stops.
 
 Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
-**Served today:** three profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe.
+**Served today:** four profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a collected `raw/submission.json` that you produce, because the Action has no MySQL collector; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
@@ -17,6 +17,7 @@ Assure is the check that reads green only when nothing it examined is disproven.
 - `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote.
 - `postgresql-declared-model`: your server against a declaration you write (`raw/declaration.json`). When the check carried your `requirements.md`, the verdict also carries `requirements`: one row per requirement line, with its `id`, its `sentence` as you wrote it, and one of three states.
 - `http-observed-baseline`: the response heads you captured for the endpoints you select, offline; the Action produces the scope binding itself.
+- `mysql-declared-model`: a MySQL server's state as a submission you produce, in `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`). The Action has no MySQL collector, so you collect the file yourself and give the Action its folder with `artefacts`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
 
 PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQL 17 and 18.
 
@@ -49,7 +50,7 @@ The declared profile reads collected files. Put the collector's output in a dire
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@<full commit sha>
+        uses: Symbolia-Assurance/assure-action@beta
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-declared-model
@@ -57,9 +58,9 @@ The declared profile reads collected files. Put the collector's output in a dire
           fail-on: fails
 ```
 
-Pin every `uses:` line to a full 40-character commit SHA. A tag can move; a commit cannot.
+Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-Put the commit of `Symbolia-Assurance/assure-action` you fetched this file from, in full, in place of `<full commit sha>`. In a clone, `git -C assure-action rev-parse HEAD` prints it. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know the commit you fetched, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 `SOURCE-CONTRACT.json` at the top of this repository records the digest of the Assure source the tree was built from, the files that built it and the digest of every file it ships, with its details in `SOURCE-CONTRACT-DETAIL.json`; `DIST-MANIFEST.json` lists each shipped file with its digest and the reason it ships.
 
@@ -95,7 +96,7 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 
 The colour is green, red or yellow. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `fail-on: unresolved-security` is the strict preset; it is never the default, and while a profile marks no obligation it changes nothing ("strict: no obligations marked").
 
-The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with `report: true` also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`.
+The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with the report on also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`.
 
 ## Where the verdict goes
 

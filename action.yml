@@ -72,11 +72,11 @@ inputs:
     required: false
     default: pipe
   report:
-    description: true asks the Assure API for the plain-language report of the check's claim tree (api mode only; your account's tier must include it). The job summary then carries the report after the first line, or the summary and the reason it was withheld. The verdict, its file and the exit code never change. Default false.
+    description: The report is on by default in api mode, so the job summary carries the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; report false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
     required: false
-    default: 'false'
+    default: ''
   allow-overage:
-    description: "With report true, true lets a report beyond your account's monthly allowance run, within its overage budget (overage is off until a budget is set), and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged."
+    description: "With the report on, true lets a report beyond your account's monthly allowance run, within its overage budget (overage is off until a budget is set), and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged."
     required: false
     default: 'false'
   requirements:
@@ -122,19 +122,19 @@ outputs:
     description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a paid run). Empty otherwise."
     value: ${{ steps.assure.outputs.lint-findings }}
   report-status:
-    description: With report true, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.
+    description: With the report on, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.
     value: ${{ steps.assure.outputs.report-status }}
   report-url:
-    description: With report true, the report page on the API (open it with your API key). Empty otherwise.
+    description: With the report on, the report page on the API (open it with your API key). Empty otherwise.
     value: ${{ steps.assure.outputs.report-url }}
   report-cost-usd:
-    description: With report true, what the report cost at the model's price, in USD. Empty otherwise.
+    description: With the report on, what the report cost at the model's price, in USD. Empty otherwise.
     value: ${{ steps.assure.outputs.report-cost-usd }}
   report-charge-usd:
-    description: With report true, what the report was charged, in USD (0 within the monthly allowance). Empty otherwise.
+    description: With the report on, what the report was charged, in USD (0 within the monthly allowance). Empty otherwise.
     value: ${{ steps.assure.outputs.report-charge-usd }}
   report-allowance-remaining:
-    description: With report true, the report allowance left this month, in USD. Empty otherwise.
+    description: With the report on, the report allowance left this month, in USD. Empty otherwise.
     value: ${{ steps.assure.outputs.report-allowance-remaining }}
 
 runs:
