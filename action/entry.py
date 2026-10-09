@@ -613,8 +613,12 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     id_key = str(env.get('INPUT_IDENTITY_KEY') or '')
     pasted = (id_key, id_key.strip()) if id_key.strip() not in ('', http_identity.KEY_SOURCE) else ()
     first = [v for v in dict.fromkeys((raw_key, raw_key.strip(), conn_text.strip()) + pasted) if v]
+    # serve-060 (dogfood INC 3372): `::add-mask::` is a GitHub runner command; printed anywhere else it shows the
+    # secret it was meant to hide. Emit it only on a GitHub runner; the scrub below still keeps every value out of output.
+    on_runner = str(env.get('GITHUB_ACTIONS') or '').strip().lower() == 'true'
     for v in first:                                    # before anything else is printed
-        say(_mask(v))
+        if on_runner:
+            say(_mask(v))
     scrub = _Scrub(first)
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
@@ -667,7 +671,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         except Refusal as e:
             return None, e
         for line in collect.mask_commands(conn, conn_text):
-            if line not in (_mask(v) for v in first):
+            if on_runner and line not in (_mask(v) for v in first):
                 say(line)
         scrub.add(conn.secrets)
         return conn, None

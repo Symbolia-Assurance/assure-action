@@ -82,6 +82,7 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 | `config-dirs` | none | Directories outside the data directory that hold configuration files. Used with `connection`. |
 | `fail-on` | `fails` | Which statuses fail the job, or `never`. |
 | `requirements` | `requirements.md` at the repository root | A requirements file to send with the check, `mode: api` only. Empty sends the repository root's `requirements.md` when it can be sent; when it cannot (over 65536 bytes, 256 lines or 8192 bytes per line, a symbolic link, not a regular file or not UTF-8), nothing is sent and one notice says why. A file you name that cannot be sent stops the run with exit 2. `none` sends no requirements text and prints no notice (a file named `none` is then reached as `./none`). Only `none` in lower case is the sentinel: `NONE` names a file, and on a file system that ignores case, such as the default on macOS, a file named `none` answers to it. `mode: local` does not read requirements. The repository and the commit (on a pull request, its head commit) are sent on every `mode: api` run, with `none` too. |
+| `report` | unset | The report is on by default in `mode: api`, and `report: false` turns it off. Local mode never asks for one. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so. |
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. |
 

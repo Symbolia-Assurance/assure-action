@@ -18,7 +18,7 @@ A reading for each obligation Assure checks: holds, fails, deviates, vacuous, or
 2. Let the runner read the server's configuration files, preferably copies (section 6, option b).
 3. From the runner, test the connection string with `psql` and `sslmode=require` (section 3). Store it as the secret `ASSURE_PG_CONNECTION`, and your key as `ASSURE_API_KEY`.
 4. Add the workflow from section 4. Leave `profile` at its default.
-5. Run it, and read the first line of the job summary.
+5. Run it, and read the first line of the job summary. The report is on by default in `mode: api`, and `report: false` turns it off. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
 
 If the key is wrong or revoked, or you hit a rate limit, the API refuses the first request, for the profile list, before anything is collected or sent; the summary's last line says so.
 
