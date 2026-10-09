@@ -8,7 +8,7 @@ The Action collects facts in your runner. The check runs on Symbolia's server at
 
 Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
-**Served today:** four profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a collected `raw/submission.json` that you produce, because the Action has no MySQL collector; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL.
+**Served today:** four profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
@@ -17,7 +17,7 @@ Assure is the check that reads green only when nothing it examined is disproven.
 - `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote.
 - `postgresql-declared-model`: your server against a declaration you write (`raw/declaration.json`). When the check carried your `requirements.md`, the verdict also carries `requirements`: one row per requirement line, with its `id`, its `sentence` as you wrote it, and one of three states.
 - `http-observed-baseline`: the response heads you captured for the endpoints you select, offline; the Action produces the scope binding itself.
-- `mysql-declared-model`: a MySQL server's state as a submission you produce, in `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`). The Action has no MySQL collector, so you collect the file yourself and give the Action its folder with `artefacts`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
+- `mysql-declared-model`: a MySQL server, from a `mysql://` connection and your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
 
 PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQL 17 and 18.
 

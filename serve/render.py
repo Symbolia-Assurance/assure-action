@@ -527,8 +527,8 @@ CLASS_ACTIONS = {'missing_method': 'a method is a later profile version',
 # A profile with no collector has nothing to re-collect with: its `representation` next step names its own input form.
 # The one place the choice is made; every other profile keeps CLASS_ACTIONS['representation'] byte for byte.
 NO_COLLECTOR_REPRESENTATION = {
-    'mysql-declared-model': 're-produce raw/submission.json to the `symbolia.mysql-declared-input.v0` shape '
-                            '(this profile has no collector)'}
+    'mysql-declared-model': 're-collect with the MySQL collector and your declaration file '
+                            '(the section this machine reads is absent from the submission)'}
 
 
 def representation_action(profile_id=None):
@@ -954,6 +954,14 @@ def verdict_line(envelope):
         return '%s: %s' % (c, '; '.join(parts))
     held = len([r for r in obligations if r.get('status') == 'holds' and r.get('machine') in read])
     entries = [e for e in env.get('not_established') or () if isinstance(e, dict)]
+    # serve-064 (dogfood fb-20261009-b841067fe3d852c9): every reading class on the machines read is named, so the parts
+    # add up to N; a vacuous reading was counted nowhere ("established: 4 of 12; not established: 3" hid five)
+    counted = {e.get('id') for e in entries}
+    others = {}
+    for r in obligations:
+        st = r.get('status')
+        if r.get('machine') in read and st and st not in ('holds', 'deviates') and r.get('id') not in counted:
+            others[label(st)] = others.get(label(st), 0) + 1
     # R5-3: an entry strict added for an obligation with no reading counts in N too, so the parts add up
     with_rows = {r.get('id') for r in obligations}
     obligations = obligations + [{'id': e.get('id')} for e in entries if e.get('id') not in with_rows]
@@ -963,6 +971,7 @@ def verdict_line(envelope):
         parts.append('nothing could be established (0 of %d obligations hold)' % len(obligations))
     if deviations:
         parts.append('deviations: %d' % deviations)
+    parts += ['%s: %d' % (word, n) for word, n in sorted(others.items())]
     tail = 'not established: %d' % len(entries)
     top = top_entry(entries)
     if top is not None:                               # 2129 W2, W3: the count becomes a path

@@ -6,7 +6,7 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_REPORT, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_FRESH_CHECK, INPUT_OUTPUT), with
+INPUT_REPORT, INPUT_FEEDBACK, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_FRESH_CHECK, INPUT_OUTPUT, INPUT_DECLARATION), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP, and (serve-019) GITHUB_WORKSPACE, GITHUB_REPOSITORY and GITHUB_SHA
 for `requirements_upload`. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
@@ -48,6 +48,10 @@ connection or a runner token.
   and `report-url` (the page, `<api-url>/v1/checks/<id>/report.html`, opened with the key). The
   verdict file is the envelope byte for byte, so the page is named in the summary and the outputs, never inside it.
   `mode: local` refuses `report: true` (`bad_input`) before anything is read: the report runs on the API only.
+  `feedback` is separately off by default. One deliberate JSON object or workflow-written file path sends one note
+  only in api mode, after the primary file, outputs and summary. The actual server check id overrides the note's id.
+  Its bounded, single-attempt request adds only a validated receipt or a known typed outcome to the summary; no note
+  text, path, server reason or exception message is displayed. A feedback fault never changes the check result.
   serve-015: `allow-overage` (`true` or `false`, default false; any other word is `bad_input` before anything is
   read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
   and its overage is charged. The summary adds one line from the record, "Report: cost USD x.xxx, charged USD y.yyy,
@@ -117,10 +121,12 @@ This module imports, at its top, the standard library and modules that never imp
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -130,9 +136,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from action import http_identity, withhold  # noqa: E402
-from action.client import CHECK_ID_RE, DEFAULT_URL, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
+from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, markers, render  # noqa: E402
-from serve.outcomes import Refusal, malformation  # noqa: E402
+from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
@@ -427,9 +433,10 @@ def local_requirements_notice(env):
     return None
 
 
-def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
+def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None, is_mysql=False):
     profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
     artefacts = _plain(env, 'INPUT_ARTEFACTS')
+    declaration_text = _plain(env, 'INPUT_DECLARATION')
     has_conn = bool(str(env.get('INPUT_CONNECTION') or '').strip())
     if bool(artefacts) == has_conn:
         raise Refusal('bad_input', 'set exactly one of connection and artefacts (%s set)'
@@ -442,12 +449,45 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None):
     allow_partial = parse_allow_partial(_plain(env, 'INPUT_ALLOW_PARTIAL'))
     data_dir_text = _plain(env, 'INPUT_DATA_DIR')
     config_dirs_text = env.get('INPUT_CONFIG_DIRS')      # line breaks separate items, so it is not read by _plain
+    # MySQL connection: profile must be mysql-declared-model, declaration required, PG-only inputs refused.
+    # Exit 3 (could not look): nothing was collected or checked, the inputs are wrong for this connection type.
+    if is_mysql:
+        if profile != 'mysql-declared-model':
+            raise Refusal('bad_input', 'a mysql:// connection requires profile mysql-declared-model', exit_code=3)
+        if not declaration_text:
+            raise Refusal('bad_input', 'declaration is required with a mysql connection', exit_code=3)
+        if _plain(env, 'INPUT_COLLECTION_PRIVILEGES'):
+            priv = _plain(env, 'INPUT_COLLECTION_PRIVILEGES')
+            if priv and {x.strip() for x in priv.split(',') if x.strip()} != {'pg_read_all_settings', 'pg_read_all_stats'}:  # not the default, in any order
+                raise Refusal('bad_input', 'collection-privileges applies only to PostgreSQL connections', exit_code=3)
+        if data_dir_text:
+            raise Refusal('bad_input', 'data-dir applies only to PostgreSQL connections', exit_code=3)
+        if str(config_dirs_text or '').strip(' \t\r\n:'):
+            raise Refusal('bad_input', 'config-dirs applies only to PostgreSQL connections', exit_code=3)
+    # PostgreSQL or artefacts with a declaration: refused
+    if not is_mysql and declaration_text:
+        if artefacts and declaration_text:
+            raise Refusal('bad_input', 'declaration applies only with a mysql connection', exit_code=3)
+        if has_conn and declaration_text:
+            raise Refusal('bad_input', 'declaration applies only with a mysql connection', exit_code=3)
     if conn_error is not None:
         raise conn_error
     out = {'profile': profile, 'fail_on': fail_on, 'artefacts': artefacts or None, 'allow_partial': allow_partial,
            'scope': _json_input(env, 'INPUT_SCOPE', 'scope_missing', None, cwd),
            'scope_binding': _json_input(env, 'INPUT_SCOPE_BINDING', 'scope_binding', 'scope_binding', cwd),
            'accepted_scope_ref': None}
+    if is_mysql:
+        declaration_path = Path(declaration_text) if Path(declaration_text).is_absolute() \
+            else Path(cwd or os.getcwd()) / declaration_text
+        collect.check_declaration(declaration_path)
+        role_text = _plain(env, 'INPUT_COLLECTION_ROLE')
+        out['role'] = role_text.strip() if role_text.strip() else (conn.user if conn is not None else None)
+        if not out['role']:
+            raise Refusal('bad_input', 'collection-role is empty and the connection names no user', exit_code=3)
+        if len(out['role']) > 80 or out['role'].startswith('-') or any(ord(c) < 32 or ord(c) == 127 for c in out['role']):
+            raise Refusal('bad_input', 'collection-role is not a usable MySQL user name', exit_code=3)
+        out['declaration'] = str(declaration_path)
+        return out
     if artefacts:
         if data_dir_text:
             raise Refusal('bad_input', 'data-dir applies only with connection; with artefacts, put the collected '
@@ -594,8 +634,67 @@ def _scratch(env):
     return Path(tempfile.mkdtemp(prefix='assure-', dir=temp_root))
 
 
+def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
+    """Bounded JSON string or plain regular-file path; input values are never shown.
+
+    Object/array/quoted/numeric/literal-looking inputs are JSON, including malformed JSON. A caller can name a file
+    with such a name explicitly as ./name. Field validation remains the server's; only transport bounds live here.
+    """
+    try:
+        raw_text = str(text)
+        text = raw_text.strip()
+        if len(raw_text.encode('utf-8')) > FEEDBACK_BODY_BYTES:
+            raise Refusal('oversize_input', 'the feedback input exceeds its byte limit')
+        inline = text[:1] in ('{', '[', '"', '-') or text[:1].isdigit() \
+            or re.match(r'^(?:true|false|null|NaN|Infinity)(?:\b|$)', text) is not None
+        if inline:
+            data = raw_text.encode('utf-8')
+        else:
+            if _CONTROL.search(raw_text):
+                raise Refusal('bad_input', 'the feedback input is invalid')
+            path = Path(text) if Path(text).is_absolute() else Path(cwd) / text
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise Refusal('bad_input', 'the feedback input is invalid')
+                chunks, remaining = [], FEEDBACK_BODY_BYTES + 1
+                while remaining:
+                    part = os.read(fd, remaining)
+                    if not part:
+                        break
+                    chunks.append(part)
+                    remaining -= len(part)
+                data = b''.join(chunks)
+            finally:
+                os.close(fd)
+        note = bundle.parse_json(data, FEEDBACK_LIMITS)
+        if not isinstance(note, dict):
+            raise Refusal('bad_input', 'the feedback body must be one JSON object')
+
+        def contains_secret(value):
+            if isinstance(value, str):
+                return any(secret in value for secret in secrets_to_refuse if secret)
+            if isinstance(value, dict):
+                return any(contains_secret(k) or contains_secret(v) for k, v in value.items())
+            if isinstance(value, list):
+                return any(contains_secret(v) for v in value)
+            return False
+
+        if contains_secret(note):
+            raise Refusal('bad_input', 'the feedback input contains a known secret')
+        note['check_id'] = check_id
+        encoded = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+        if len(encoded) > FEEDBACK_BODY_BYTES:
+            raise Refusal('oversize_input', 'the feedback body exceeds its byte limit')
+        return note
+    except Refusal as e:
+        raise Refusal(e.outcome, 'the feedback input is invalid') from None
+    except (OSError, ValueError, UnicodeError):
+        raise Refusal('bad_input', 'the feedback input is invalid') from None
+
+
 def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_dir=None, collector_sha256=_FROZEN,
-         psql='psql', collect_timeout=None, check_timeout=60, limits=None, cwd=None, client_factory=None) -> int:
+         psql='psql', mysql='mysql', collect_timeout=None, check_timeout=60, limits=None, cwd=None, client_factory=None) -> int:
     """Run one check as the Action; return the exit code. `load_checker`, `pin_path`, `collector_dir`,
     `collector_sha256`, `psql`, `limits` and `client_factory(base_url, api_key) -> Client` are test seams; production
     passes none of them."""
@@ -612,10 +711,26 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     conn_text = str(env.get('INPUT_CONNECTION') or '')
     id_key = str(env.get('INPUT_IDENTITY_KEY') or '')
     pasted = (id_key, id_key.strip()) if id_key.strip() not in ('', http_identity.KEY_SOURCE) else ()
-    first = [v for v in dict.fromkeys((raw_key, raw_key.strip(), conn_text.strip()) + pasted) if v]
+    # MySQL: the password is masked FIRST, before the URI that embeds it; extract it early with a lightweight match
+    conn_password = ()
+    _conn_masked = conn_text.strip()
+    if _conn_masked.lower().startswith('mysql'):
+        try:
+            from action import collect as _c
+            if _c.is_mysql_connection(conn_text):
+                _parsed = _c.parse_mysql_connection(conn_text)
+                conn_password = tuple(_parsed.secrets)
+                _t = _conn_masked
+                for _s in conn_password:
+                    _t = _t.replace(_s, '***')
+                _conn_masked = _t
+        except Exception:
+            pass
+    first = [v for v in dict.fromkeys(conn_password + (raw_key, raw_key.strip(), _conn_masked) + pasted) if v]
     # serve-060 (dogfood INC 3372): `::add-mask::` is a GitHub runner command; printed anywhere else it shows the
     # secret it was meant to hide. Emit it only on a GitHub runner; the scrub below still keeps every value out of output.
-    on_runner = str(env.get('GITHUB_ACTIONS') or '').strip().lower() == 'true'
+    on_runner = env.get('GITHUB_ACTIONS') == 'true'          # the exact value GitHub sets on its runners
+    feedback_known_secrets = list(first)
     for v in first:                                    # before anything else is printed
         if on_runner:
             say(_mask(v))
@@ -623,6 +738,33 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False}
+
+    def finish_feedback():
+        """After the primary file, summary and outputs: a feedback fault can change none of them."""
+        if state['mode'] != 'api':
+            return
+        text = env.get('INPUT_FEEDBACK')
+        if text is None or not str(text).strip():
+            return
+        try:
+            candidates = (state.get('server_check_id'), state.get('feedback_server_check_id'),
+                          getattr(state.get('client'), '_feedback_check_id', None))
+            cid = next((candidate for candidate in candidates
+                        if isinstance(candidate, str) and CHECK_ID_RE.fullmatch(candidate)), None)
+            if cid is None:
+                raise Refusal('bad_input', 'feedback needs the server check id')
+            note = _feedback_note(text, cwd, cid, feedback_known_secrets)
+            receipt = state['client'].feedback(note)
+            line = 'Feedback: accepted; id %s; duplicate %s' % (receipt['id'], str(receipt['duplicate']).lower())
+        except Refusal as e:
+            outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
+            line = 'Feedback: %s; note not confirmed.' % outcome
+        except Exception:
+            line = 'Feedback: api_error; note not confirmed.'
+        try:
+            _append(env.get('GITHUB_STEP_SUMMARY'), '\n' + line + '\n')
+        except Exception:
+            pass                                  # no secondary warning, value, path or exception text
 
     def outputs(outcome, code, extra='', verdict=None, lint_colour=None):
         if lint_colour is not None:               # serve-043: a lint answer is green with no findings, else red
@@ -643,8 +785,12 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             say('::warning title=Assure::%s' % _cmd_data('the step outputs could not be written (%s)' % type(w).__name__))
 
     def failed(e):
+        if e.detail.get('answered') in ('check', 'poll'):
+            cid = e.detail.get('check_id') or e.detail.get('sent_check_id')
+            if isinstance(cid, str) and CHECK_ID_RE.fullmatch(cid):
+                state['feedback_server_check_id'] = cid
         e = scrub.refusal(e)
-        code = e.exit if e.exit is not None else 3
+        code = e.detail.pop('exit_code', None) or (e.exit if e.exit is not None else 3)
         server_cid = state.get('server_check_id')
         if 'check_id' not in e.detail and isinstance(server_cid, str) and CHECK_ID_RE.fullmatch(server_cid):
             e.detail['check_id'] = server_cid          # a verdict came back, so the check reached the server
@@ -660,21 +806,24 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             pass
         say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data('%s: %s' % (e.outcome, e.reason))))
         outputs(e.outcome, code)
+        finish_feedback()
         return code
 
     def connection(collect):
-        """Parse the connection (when set) and mask its secrets; (conn, deferred Refusal or None)."""
+        """Parse the connection (when set) and mask its secrets; (conn, deferred Refusal or None, is_mysql)."""
         if not conn_text.strip():
-            return None, None
+            return None, None, False
+        is_mysql = collect.is_mysql_connection(conn_text)
         try:
-            conn = collect.parse_connection(conn_text)
+            conn = collect.parse_mysql_connection(conn_text) if is_mysql else collect.parse_connection(conn_text)
         except Refusal as e:
-            return None, e
+            return None, e, is_mysql
         for line in collect.mask_commands(conn, conn_text):
             if on_runner and line not in (_mask(v) for v in first):
                 say(line)
         scrub.add(conn.secrets)
-        return conn, None
+        feedback_known_secrets.extend(conn.secrets)
+        return conn, None, is_mysql
 
     def collect_kw(collect, inputs):
         return dict(role=inputs['role'], privileges=inputs['privileges'], data_dir=inputs['data_dir'],
@@ -704,22 +853,35 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if out_error is not None:
             raise out_error
         from action import collect                             # after the pin, like every local-mode import
-        conn, conn_error = connection(collect)
-        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd)
+        conn, conn_error, is_mysql = connection(collect)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd, is_mysql=is_mysql)
         state['scratch'] = _scratch(env)
+        if is_mysql and not inputs.get('artefacts'):
+            ckw = dict(role=inputs['role'], declaration=inputs['declaration'],
+                       collector_dir=collector_dir,
+                       frozen_sha256=collect.FROZEN_MYSQL_COLLECTOR_SHA256 if collector_sha256 is _FROZEN
+                       else collector_sha256,
+                       mysql=mysql, path=env.get('PATH') or '/usr/bin:/bin',
+                       timeout=collect.DEFAULT_TIMEOUT if collect_timeout is None else collect_timeout,
+                       runner_env=env)
+        elif inputs.get('artefacts'):
+            ckw = None
+        else:
+            ckw = collect_kw(collect, inputs)
         verdict, ignored, state['withheld'] = local_mode.run(
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
-            collect_kw=None if inputs['artefacts'] else collect_kw(collect, inputs), scratch=state['scratch'], cwd=cwd,
+            collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
-            on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)), on_collected=session)
+            on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)), on_collected=session,
+            is_mysql=is_mysql)
         return verdict, ignored
 
     def run_api():
         if out_error is not None:
             raise out_error
         collect = load_collect() if conn_text.strip() else None
-        conn, conn_error = connection(collect) if collect is not None else (None, None)
-        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd)
+        conn, conn_error, is_mysql = connection(collect) if collect is not None else (None, None, False)
+        inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd, is_mysql=is_mysql)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
         upload, state['requirements_notice'] = requirements_upload(env, cwd)   # serve-019: before anything is sent
@@ -727,6 +889,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             say('::notice title=Assure requirements::%s' % _cmd_data(state['requirements_notice'], cap=None))
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
         client = (client_factory or Client)(url, raw_key.strip())
+        state['client'] = client
         allow = allow_list(client.profiles(), inputs['profile'])
         if inputs['scope'] is not None and allow.scope is None:     # serve-007 F2: refused before collection
             raise Refusal('bad_input', 'profile %s checks a fixed scope and takes no scope' % inputs['profile'],
@@ -762,6 +925,18 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             art = Path(inputs['artefacts'])
             collected = withhold.apply(bundle.from_directory(art if art.is_absolute() else Path(cwd) / art, allow,
                                                              lim), allow)
+        elif is_mysql:
+            state['scratch'] = _scratch(env)
+            work = state['scratch'] / 'collect'
+            work.mkdir(mode=0o700)
+            ckw = dict(role=inputs['role'], declaration=inputs['declaration'],
+                       collector_dir=collector_dir,
+                       frozen_sha256=collect.FROZEN_MYSQL_COLLECTOR_SHA256 if collector_sha256 is _FROZEN
+                       else collector_sha256,
+                       mysql=mysql, path=env.get('PATH') or '/usr/bin:/bin',
+                       timeout=collect.DEFAULT_TIMEOUT if collect_timeout is None else collect_timeout,
+                       runner_env=env)
+            collected = collect.collect_mysql(conn, profile=allow, scratch=work, limits=lim, **ckw)
         else:
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'
@@ -900,6 +1075,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line, cap=None) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
     outputs(verdict['outcome'], code, report_extra, verdict)
+    finish_feedback()
     return code
 
 

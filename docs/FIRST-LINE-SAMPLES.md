@@ -7,7 +7,7 @@ The first line of the job summary, word for word, as the serving path writes it 
 The observed profile on the official PostgreSQL 18 image (the successor build's recorded readings), `fail-on: fails`. Every machine was read; four obligations hold; two readings deviate from vendor guidance and are counted on their own; 21 obligations could not be established, and the top action names what would establish most of them.
 
 ```text
-green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; not established: 21 — top action: state it in requirements.md
+green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; vacuous: 13; not established: 21 — top action: state it in requirements.md
 ```
 
 ## Red: something disproven

@@ -746,4 +746,259 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     raise Refusal('checker_error', 'the collector exited %s%s' % (rc, (': ' + detail) if detail else ''),
                   collector_exit=rc)
 
+
+# ---------- MySQL ----------
+MYSQL_COLLECTOR = 'collect_mysql.py'
+MYSQL_PIN_NAME = 'COLLECTOR-PIN-MYSQL.json'
+MYSQL_PIN_SCHEMA = 'assure.serve.collector-pin/v1'
+MAX_DECLARATION = 64 * 1024
+_MYSQL_URI_RE = re.compile(r'mysql://', re.IGNORECASE)
+TEST_SEAM_FLAG = 'ASSURE_ACTION_TEST_SEAMS'     # FAKE_* variables reach the collector and client only when this is '1'
+_MYSQL_KW_RE = re.compile(r'^mysql\s', re.IGNORECASE)
+MYSQL_KEYWORDS = {'host': 'MYSQL_HOST', 'port': 'MYSQL_TCP_PORT', 'user': None, 'password': 'MYSQL_PWD'}
+MYSQL_SECRET_KEYWORDS = ('password',)
+MYSQL_HOST_KEYWORDS = ('host',)
+MYSQL_REFUSED_KEYWORDS = frozenset({
+    'options', 'socket', 'protocol', 'ssl-mode', 'ssl-ca', 'ssl-cert', 'ssl-key',
+    'connect-timeout', 'compress', 'default-character-set', 'default-auth', 'plugin-dir'})
+
+
+def is_mysql_connection(text):
+    """True when `text` is a MySQL connection string (a mysql:// URI or a keyword/value string starting with 'mysql ')."""
+    if not isinstance(text, str):
+        return False
+    s = text.strip()
+    return bool(_MYSQL_URI_RE.match(s)) or bool(_MYSQL_KW_RE.match(s))
+
+
+def _mysql_bad(reason):
+    # exit 3 like the other MySQL bad_inputs (detail field `exit_code`); the PG parser's _bad is unchanged
+    return Refusal('bad_input', 'connection: ' + reason, exit_code=3)
+
+
+def _mysql_decode(text):
+    """RFC 3986 percent-decoding of one URI component; a fault is the MySQL bad_input (exit 3), never the PG one."""
+    try:
+        return _decode(text)
+    except Refusal as e:
+        raise _mysql_bad(str(e.reason).split('connection: ', 1)[-1]) from None
+
+
+def _parse_mysql_keyword_value(s):
+    """Parse 'mysql host=… port=… user=… password=…' into (key, value) pairs."""
+    pairs = []
+    rest = s[len('mysql'):].strip()
+    for part in rest.split():
+        if '=' not in part:
+            raise _mysql_bad('malformed: every keyword needs "=" and a value in "mysql host=… port=… user=… password=…"')
+        key, _, value = part.partition('=')
+        pairs.append((key.lower(), value, None))
+    return pairs
+
+
+def _parse_mysql_uri(s):
+    """Parse 'mysql://user:pw@host[:port]/[db]' into (key, value) pairs."""
+    rest = s[len('mysql://'):]
+    rest, _, query = rest.partition('?')
+    if query:
+        raise _mysql_bad('a mysql:// URI takes no query parameters in this Action')
+    authority, slash, path = rest.partition('/')
+    if slash and '@' in path:       # a raw "/" before the "@" cut the authority inside the user name or password
+        raise _mysql_bad('a "/" in the user name or password must be written %2F (RFC 3986 userinfo); the URI was cut at it')
+    userinfo, at, hostspec = authority.rpartition('@')
+    if not at:
+        userinfo, hostspec = '', authority
+    pairs = []
+    if userinfo:
+        user, colon, pw = userinfo.partition(':')
+        if user:
+            decoded = _mysql_decode(user) if '%' in user else user
+            pairs.append(('user', decoded, None))
+        if colon:
+            raw = pw
+            decoded = _mysql_decode(pw) if '%' in pw else pw
+            pairs.append(('password', decoded, raw))
+    if hostspec:
+        if hostspec.startswith('['):                       # an IPv6 literal: [::1]:3306
+            close = hostspec.find(']')
+            if close < 0:
+                raise _mysql_bad('malformed: an IPv6 host opens "[" and never closes it')
+            host, port = hostspec[1:close], hostspec[close + 1:]
+            if port and not port.startswith(':'):
+                raise _mysql_bad('malformed: text follows the IPv6 host')
+            port = port[1:]
+        else:
+            host, _, port = hostspec.partition(':')
+        if host:
+            decoded = _mysql_decode(host) if '%' in host else host
+            pairs.append(('host', decoded, None))
+        if port:
+            decoded = _mysql_decode(port) if '%' in port else port
+            pairs.append(('port', decoded, None))
+    return pairs
+
+
+def parse_mysql_connection(text):
+    """The `connection` input as a Connection for MySQL; `bad_input` on any fault. No value is ever quoted."""
+    if not isinstance(text, str):
+        raise _mysql_bad('not text')
+    if len(text) > MAX_CONNECTION:
+        raise _mysql_bad('longer than %d characters' % MAX_CONNECTION)
+    if _CONTROL.search(text):
+        raise _mysql_bad('holds a control character or a line break')
+    s = text.strip()
+    m = _MYSQL_URI_RE.match(s)
+    pairs = _parse_mysql_uri(s) if m else _parse_mysql_keyword_value(s)
+    env, secrets, hosts, seen, user = {}, [], [], set(), None
+    for key, value, raw in pairs:
+        if key in seen:
+            raise _mysql_bad('a keyword is given twice')
+        seen.add(key)
+        if key not in MYSQL_KEYWORDS:
+            if key in MYSQL_REFUSED_KEYWORDS:
+                raise _mysql_bad('the keyword %s is not accepted by the Action' % key)
+            raise _mysql_bad('an unrecognised keyword; accepted: %s' % ', '.join(sorted(MYSQL_KEYWORDS)))
+        if _CONTROL.search(value) or len(value) > MAX_VALUE:
+            raise _mysql_bad('a value holds a control character or is longer than %d characters' % MAX_VALUE)
+        if value == '':
+            continue
+        if key == 'port' and not (re.fullmatch(r'[0-9]{1,5}', value) and 1 <= int(value) <= 65535):
+            raise _mysql_bad('the port must be digits only, from 1 to 65535')
+        env_var = MYSQL_KEYWORDS[key]
+        if env_var is not None:
+            env[env_var] = value
+        if key in MYSQL_SECRET_KEYWORDS:
+            for v in (value, raw):
+                if v and v not in secrets:
+                    secrets.append(v)
+        if key in MYSQL_HOST_KEYWORDS:
+            hosts.extend(h for h in value.split(',') if h)
+        if key == 'user':
+            user = value
+    return Connection(env=env, secrets=tuple(secrets), user=user, hosts=tuple(dict.fromkeys(hosts)))
+
+
+def _refused_mysql(out, stdout_text, conn, rc):
+    """The MySQL collector's refusal. C1 writes REFUSAL.json as {refusal_type, reason, queries_run, flags}; the kind
+    `collector_cannot_connect` is the outcome of that name, every other kind is `collector_refused` with its typed
+    reason. No value is quoted (the collector scrubs the reason; it is sanitised again here)."""
+    doc = _refusal_doc(out, stdout_text)
+    if not doc:
+        return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc)
+    kind = doc.get('refusal_type') if isinstance(doc.get('refusal_type'), str) else 'unknown'
+    kind = kind if re.fullmatch(r'[a-z_]{1,64}', kind) else 'unknown'
+    reason = doc.get('reason') if isinstance(doc.get('reason'), str) else ''
+    if kind == 'collector_cannot_connect':
+        return Refusal('collector_cannot_connect', sanitise(reason or 'the first read could not reach the server as the '
+                       'collection role', conn), collector_exit=rc, collector_refusal=kind)
+    return Refusal('collector_refused', sanitise('%s: %s' % (kind, reason or 'no reason given'), conn),
+                   collector_exit=rc, collector_refusal=kind)
+
+
+def _mysql_mismatch(name, why):
+    return Refusal('engine_digest_mismatch', 'collector/%s (%s)' % (name, why), path='collector/' + name)
+
+
+def verify_collector_mysql(collector_dir=None, frozen_sha256=None):
+    """Verify the MySQL collector directory against its COLLECTOR-PIN-MYSQL.json; return {collector_sha256, files,
+    generation, filter_sha256}."""
+    d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
+    pin_path = d / MYSQL_PIN_NAME
+    try:
+        pst = os.lstat(pin_path)
+    except OSError:
+        raise _mysql_mismatch(MYSQL_PIN_NAME, 'missing') from None
+    if not stat.S_ISREG(pst.st_mode) or pst.st_size > MAX_PIN_BYTES:
+        raise _mysql_mismatch(MYSQL_PIN_NAME, 'a link, not a regular file, or too large')
+    try:
+        doc = parse_json(pin_path.read_bytes())
+    except Refusal:
+        raise _mysql_mismatch(MYSQL_PIN_NAME, 'malformed') from None
+    required = {'schema', 'files', 'source', 'flags'}
+    optional = {'generation', 'filter_sha256'}
+    ok = (isinstance(doc, dict) and required <= set(doc) <= required | optional
+          and doc['schema'] == MYSQL_PIN_SCHEMA and doc['flags'] == FLAGS
+          and _hex_files(doc['files']) and MYSQL_COLLECTOR in doc['files'])
+    if not ok:
+        raise _mysql_mismatch(MYSQL_PIN_NAME, 'malformed')
+    if frozen_sha256 is not None and doc['files'][MYSQL_COLLECTOR] != frozen_sha256:
+        raise _mysql_mismatch(MYSQL_COLLECTOR, 'the pin does not name the frozen collector')
+    for name in sorted(doc['files']):
+        if _hash_regular(d / name, name) != doc['files'][name]:
+            raise _mysql_mismatch(name, 'digest differs')
+    return {'collector_sha256': doc['files'][MYSQL_COLLECTOR], 'files': dict(doc['files']),
+            'generation': doc.get('generation', 'my1'), 'filter_sha256': doc.get('filter_sha256')}
+
+
+FROZEN_MYSQL_COLLECTOR_SHA256 = 'cd76d25e0659a0fb9c30dc83427eaae4aa7acf5bb2c7037b8c7957b396d59f6d'
+
+
+def check_declaration(path):
+    """A regular file of at most 64 KiB, never a link; `bad_input` otherwise. Exit 3 (could not look): the
+    declaration is a prerequisite, and nothing was collected or checked. Returns the resolved path."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise Refusal('bad_input', 'declaration must name a readable file', exit_code=3) from None
+    if stat.S_ISLNK(st.st_mode):
+        raise Refusal('bad_input', 'declaration is a symbolic link; name the file directly', exit_code=3)
+    if not stat.S_ISREG(st.st_mode):
+        raise Refusal('bad_input', 'declaration must name a regular file', exit_code=3)
+    if st.st_size > MAX_DECLARATION:
+        raise Refusal('bad_input', 'declaration is larger than %d bytes' % MAX_DECLARATION, exit_code=3)
+    return str(path)
+
+
+def collect_mysql(conn, *, role, declaration, profile, scratch, collector_dir=None,
+                  frozen_sha256=FROZEN_MYSQL_COLLECTOR_SHA256, mysql='mysql', path=None,
+                  timeout=DEFAULT_TIMEOUT, python=None, limits=LIMITS, runner_env=None):
+    """Verify and run the MySQL collector into `scratch`; return the bundle (`bundle.Collected`). Every fault is a
+    Refusal. `runner_env`, when given, is the entry-point's env dict; FAKE_* test seams are forwarded from it."""
+    d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
+    verify_collector_mysql(d, frozen_sha256)
+    path = path or '/usr/bin:/bin'
+    env = {'PATH': path, 'LC_ALL': 'C'}
+    env.update(conn.env if conn is not None else {})
+    src = runner_env if runner_env is not None else os.environ
+    if src.get(TEST_SEAM_FLAG) == '1':             # test seams of a fake client only; never set in production
+        env.update({k: v for k, v in src.items() if k.startswith('FAKE_')})
+    mysql_path = shutil.which(mysql, path=path)
+    if mysql_path is None:
+        if os.path.isabs(mysql) and os.path.isfile(mysql) and os.access(mysql, os.X_OK):
+            mysql_path = mysql
+        else:
+            raise Refusal('collector_cannot_connect', 'mysql client is not installed on the runner or not on its PATH; '
+                          'install the mysql client')
+    mysql_path = os.path.abspath(mysql_path)
+    scratch = Path(scratch)
+    out = scratch / 'collect-out'
+    stdout_p, stderr_p = scratch / 'collector.stdout', scratch / 'collector.stderr'
+    py = python or sys.executable
+    argv = [py, '-I', '-B', str(d / MYSQL_COLLECTOR), '--out', str(out), '--role', role,
+            '--declaration', declaration, '--mysql', mysql_path, '--login-user', conn.user or role]
+    with open(stdout_p, 'wb') as so, open(stderr_p, 'wb') as se:
+        proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=so, stderr=se,
+                                cwd=str(scratch), start_new_session=True, close_fds=True)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            raise Refusal('checker_timeout', 'the collector ran past its %d s limit' % timeout) from None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    if rc in (0, 1):
+        return _gather(out, profile, limits)
+    if rc == 3:
+        raise _refused_mysql(out, _read_bounded(stdout_p), conn, rc)
+    lines = _read_bounded(stderr_p).strip().splitlines()
+    detail = sanitise(lines[-1] if lines else '', conn)
+    raise Refusal('checker_error', 'the collector exited %s%s' % (rc, (': ' + detail) if detail else ''),
+                  collector_exit=rc)
+
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

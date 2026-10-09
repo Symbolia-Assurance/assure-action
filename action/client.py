@@ -50,6 +50,7 @@ names, so the Action can check the keys of the `scope_binding` it sends), else N
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import http.client
 import json
@@ -69,6 +70,12 @@ VERDICT_SCHEMA = 'assure.serve.verdict/v1'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
 REPORT_SCHEMA = 'assure.serve.report/v1'
 LINT_SCHEMA = 'assure.serve.lint/v1'
+FEEDBACK_SCHEMA = 'assure.serve.feedback/v1'
+FEEDBACK_BODY_BYTES = 16384
+FEEDBACK_RESPONSE_BYTES = 65536
+FEEDBACK_LIMITS = bundle.Limits(body_bytes=FEEDBACK_BODY_BYTES, json_depth=32)
+FEEDBACK_RESPONSE_LIMITS = bundle.Limits(body_bytes=FEEDBACK_RESPONSE_BYTES, json_depth=32)
+FEEDBACK_ID_RE = re.compile(r'fb-([0-9]{8})-[0-9a-f]{16}')
 DEFAULT_URL = 'https://api.symbolia.ai'
 LOOPBACK = frozenset({'127.0.0.1', '::1', 'localhost'})
 MAX_RESPONSE = 16 * 2 ** 20
@@ -191,17 +198,18 @@ class Client:
         return 'Client(%r)' % self.base
 
     # ---------- one HTTP exchange ----------
-    def _read(self, fp):
+    def _read(self, fp, max_response=None):
+        cap = self.max_response if max_response is None else max_response
         try:
-            data = fp.read(self.max_response + 1)
+            data = fp.read(cap + 1)
         except (OSError, http.client.HTTPException) as e:
             raise _Delivery('unreachable' if isinstance(e, OSError) else 'error',
                             'the answer could not be read (%s)' % type(e).__name__) from None
-        if len(data) > self.max_response:
-            raise _Delivery('error', 'the answer is larger than %d bytes' % self.max_response)
+        if len(data) > cap:
+            raise _Delivery('error', 'the answer is larger than %d bytes' % cap)
         return data
 
-    def _exchange(self, method, path, body=None, headers=None):
+    def _exchange(self, method, path, body=None, headers=None, *, timeout_s=None, max_response=None):
         """(status, Retry-After text or None, body bytes); _Delivery on a connection or read failure."""
         h = {'Authorization': self._auth, 'Accept': 'application/json', 'User-Agent': 'assure-action'}
         if body is not None:
@@ -209,10 +217,10 @@ class Client:
         h.update(headers or {})
         req = urllib.request.Request(self.base + path, data=body, headers=h, method=method)
         try:
-            resp = self.opener.open(req, timeout=self.timeout_s)
+            resp = self.opener.open(req, timeout=self.timeout_s if timeout_s is None else timeout_s)
         except urllib.error.HTTPError as e:
             try:
-                return e.code, e.headers.get('Retry-After') if e.headers is not None else None, self._read(e)
+                return e.code, e.headers.get('Retry-After') if e.headers is not None else None, self._read(e, max_response)
             finally:
                 e.close()
         except urllib.error.URLError as e:
@@ -225,7 +233,7 @@ class Client:
         except http.client.HTTPException as e:
             raise _Delivery('error', 'the API answer is malformed (%s)' % type(e).__name__) from None
         try:
-            return resp.status, resp.headers.get('Retry-After'), self._read(resp)
+            return resp.status, resp.headers.get('Retry-After'), self._read(resp, max_response)
         finally:
             resp.close()
 
@@ -327,6 +335,7 @@ class Client:
         built here under `limits` (default the serving limits) with the scope fields and the serve-019 requirements
         fields (requirements, repository, commit, provenance) that are not None.
         `key_from_bundle=True` sends `check_key` of the request (it needs `files`), else a random key."""
+        self._feedback_check_id = None            # private provenance; never changes an existing failure envelope
         started = self.clock()
         if key_from_bundle and (files is None or body is not None):
             raise ValueError('a key from the bundle is derived from the files and the scope fields, not a built body')
@@ -360,6 +369,7 @@ class Client:
             cid = doc.get('check_id')
             if not isinstance(cid, str) or not CHECK_ID_RE.fullmatch(cid):
                 raise Refusal('api_error', 'the API answered 202 without a check id')
+            self._feedback_check_id = cid
             if self.clock() - started >= self.total_wait_s:
                 raise Refusal('checker_timeout', 'the check did not finish within %d s; check %s'
                               % (int(self.total_wait_s), cid), check_id=cid)
@@ -374,6 +384,51 @@ class Client:
         if doc.get('schema') != VERDICT_SCHEMA:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
         return doc
+
+    def feedback(self, note):
+        """One deliberate note, one exchange, no retry even after Retry-After or an uncertain delivery.
+
+        Return only the validated receipt fields. Customer text and the server's reason never enter a refusal.
+        The five-second timeout and 64 KiB response ceiling apply to this request alone.
+        """
+        try:
+            if not isinstance(note, dict):
+                raise Refusal('bad_input', 'the feedback body must be one JSON object')
+            body = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            if len(body) > FEEDBACK_BODY_BYTES:
+                raise Refusal('oversize_input', 'the feedback body exceeds its byte limit')
+        except Refusal:
+            raise
+        except Exception:
+            raise Refusal('bad_input', 'the feedback input is invalid') from None
+        try:
+            status, ignored, data = self._exchange('POST', '/v1/feedback', body,
+                                                  timeout_s=5, max_response=min(self.max_response, FEEDBACK_RESPONSE_BYTES))
+            if 300 <= status < 400:
+                raise Refusal('api_error', 'the feedback receipt was not confirmed')
+            try:
+                doc = bundle.parse_json(data, FEEDBACK_RESPONSE_LIMITS)
+            except Refusal:
+                raise Refusal('api_error', 'the feedback receipt was not confirmed') from None
+            if isinstance(doc, dict) and doc.get('schema') == FAILURE_SCHEMA:
+                outcome = doc.get('outcome')
+                outcome = outcome if isinstance(outcome, str) and outcome in OUTCOMES else 'api_error'
+                raise Refusal(outcome, 'the feedback receipt was not confirmed')
+            fid = doc.get('id') if isinstance(doc, dict) else None
+            match = FEEDBACK_ID_RE.fullmatch(fid) if isinstance(fid, str) else None
+            if (status != 200 or not isinstance(doc, dict) or doc.get('schema') != FEEDBACK_SCHEMA or not match
+                    or type(doc.get('duplicate')) is not bool or not isinstance(doc.get('kind'), str)
+                    or doc['kind'] != note.get('kind')):
+                raise Refusal('api_error', 'the feedback receipt was not confirmed')
+            datetime.datetime.strptime(match[1], '%Y%m%d')
+            return {'id': fid, 'duplicate': doc['duplicate'], 'kind': doc['kind']}
+        except _Delivery as e:
+            raise Refusal('api_unreachable' if e.kind == 'unreachable' else 'api_error',
+                          'the feedback receipt was not confirmed') from None
+        except Refusal as e:
+            raise Refusal(e.outcome, 'the feedback receipt was not confirmed') from None
+        except Exception:
+            raise Refusal('api_error', 'the feedback receipt was not confirmed') from None
 
     def lint(self, profile_id, files, fail_on=None, *, allow_partial=False, scope=None, scope_binding=None,
              accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None):

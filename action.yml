@@ -28,7 +28,11 @@ inputs:
     required: false
     default: ''
   connection:
-    description: A libpq keyword/value connection string or a postgresql:// URI. Pass it from a secret.
+    description: A libpq keyword/value connection string (or postgresql:// URI) for PostgreSQL, or a mysql://user:pw@host:port/ URI (or mysql host=… port=… user=… password=…) for MySQL. Pass it from a secret.
+    required: false
+    default: ''
+  declaration:
+    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim.
     required: false
     default: ''
   collection-role:
@@ -79,6 +83,10 @@ inputs:
     description: "With the report on, true lets a report beyond your account's monthly allowance run, within its overage budget (overage is off until a budget is set), and its overage is charged at cost x 1.2. False (the default) refuses such a report (allowance_exhausted) unless your account's top-up covers it; nothing runs and nothing is charged."
     required: false
     default: 'false'
+  feedback:
+    description: A deliberate feedback note as one JSON object or a plain path to a UTF-8 JSON file written by the workflow, at most 16384 bytes. Empty is off. In api mode, after the check the Action sends one note with its server check id attached. A feedback error adds only a typed outcome to the job summary and never changes the verdict, outputs or exit. Local and lint modes do not read or send it.
+    required: false
+    default: ''
   requirements:
     description: A requirements file to send with the check, api mode only (a path relative to the workspace). Empty sends the repository root's requirements.md when it can be sent; when it cannot (over 65536 bytes, 256 lines or 8192 bytes per line, a symbolic link, not a regular file or not UTF-8) nothing is sent and one notice says why. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements.
     required: false
@@ -149,6 +157,7 @@ runs:
         INPUT_PROFILE: ${{ inputs.profile }}
         INPUT_ARTEFACTS: ${{ inputs.artefacts }}
         INPUT_CONNECTION: ${{ inputs.connection }}
+        INPUT_DECLARATION: ${{ inputs.declaration }}
         INPUT_COLLECTION_ROLE: ${{ inputs.collection-role }}
         INPUT_COLLECTION_PRIVILEGES: ${{ inputs.collection-privileges }}
         INPUT_DATA_DIR: ${{ inputs.data-dir }}
@@ -160,6 +169,7 @@ runs:
         INPUT_ACCEPTED_SCOPE_REF: ${{ inputs.accepted-scope-ref }}
         INPUT_IDENTITY_KEY: ${{ inputs.identity-key }}
         INPUT_REPORT: ${{ inputs.report }}
+        INPUT_FEEDBACK: ${{ inputs.feedback }}
         INPUT_ALLOW_OVERAGE: ${{ inputs.allow-overage }}
         INPUT_REQUIREMENTS: ${{ inputs.requirements }}
         INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
