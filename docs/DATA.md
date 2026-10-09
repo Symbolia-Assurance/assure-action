@@ -12,6 +12,8 @@ It reads files only inside the data directory you give it (`data-dir`) and the c
 
 Three catalog views are open only to a superuser: `pg_hba_file_rules` and `pg_file_settings` on every PostgreSQL major, and `pg_ident_file_mappings` from PostgreSQL 15. `pg_read_all_settings` and `pg_read_all_stats` do not open them, so with the collection role of the quick start each one is a gap with the status `unreadable`. The readings that need it read not observed and name the view. The collector still reads `pg_hba.conf`, `pg_ident.conf` and `postgresql.conf` themselves when they are inside `data-dir` or `config-dirs`.
 
+The collector this Action ships is generation rf31. The `postgresql-observed-baseline` check was qualified on the generation before it, rf28, and the collector pin its reading names is rf28 (`5fb5ca431643`). rf31 reads everything rf28 reads, plus table inheritance and partitions.
+
 ## What is never read
 
 - Table contents.
