@@ -10,6 +10,10 @@ from __future__ import annotations
 import re
 from types import MappingProxyType
 
+# The one not_found reason: an unknown, another account's and a malformed check id read alike (serve/store.py,
+# serve/profiles.py resolve_scope_ref).
+NOT_FOUND_REASON = 'no check with that id exists for this account'
+
 _TABLE = {
     'bad_input': (400, 2, 'Fix the request so every file is allow-listed for the profile and well formed, then send it again.'),
     'oversize_input': (413, 2, 'Send fewer or smaller files, within the published size and count limits.'),
@@ -27,6 +31,9 @@ _TABLE = {
     'checker_timeout': (504, 3, 'Send a smaller input or try again later, because the check ran past its time limit.'),
     'server_busy': (503, None, 'Try again in a minute, because the queue is full.'),
     'not_found': (404, None, 'Check the check id, because no check with that id exists for this account.'),
+    # serve-062 parts 3-4: a record the server keeps for this account (an accepted scope) no longer reads as it was
+    # written. A serving fault, never a verdict and never the customer's input; nothing ran and nothing was charged.
+    'server_fault': (500, 3, 'Report the check id to Symbolia, because a record the server keeps for this account no longer reads as it was written; nothing ran and nothing was charged.'),
     'secret_in_input': (422, 2, 'Remove the secret the reason names from the input, then send it again; nothing was stored.'),
     'store_unavailable': (503, None, 'Try again in a minute, because the result store cannot be reached just now.'),
     # serve-014: the account's tier does not include the claim-tree report (refused before any model call).
@@ -112,7 +119,8 @@ MALFORMATIONS = MappingProxyType({
                      'that maps every selected id to its own token of 1 to 63 characters of A-Z, a-z, 0-9, _, . and '
                      '-; a profile that declares none takes none',
     'scope_ref': 'no accepted_scope_ref: no accepted scope record can be resolved yet, so a first-run comparison '
-                 'omits it; a profile whose scope is fixed takes none',
+                 'omits it; a profile whose scope is fixed takes none; a profile that declares '
+                 'scope.context.accepts_prior reads one of its own earlier checks of this account, by its check_id',
     # serve-019 (coordination 2136): the requirements upload fields
     'requirements': 'requirements as UTF-8 text of at most 65536 bytes, 256 lines and 8192 bytes per line',
     'quote_body': 'a JSON object with exactly the keys profile and sentence: one sentence of 1 to 8192 bytes of UTF-8 '

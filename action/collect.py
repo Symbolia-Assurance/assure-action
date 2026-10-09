@@ -27,12 +27,13 @@ a progress file and then replaces itself with psql, so on a wall-clock expiry th
 still on its first query (cannot connect) or later (timeout).
 
 The collector generation. COLLECTOR-PIN.json names it (`generation`), and the name is bound to the collector's digest
-(`COLLECTOR_GENERATIONS`; refutation 009, G1): `rf28` exactly when the pinned `collect_pg.py` is the RF-28 digest, where
-the field is mandatory, and `rf19` exactly when it is the RF-19 digest, where a pin without the field is `rf19` (the
-collector shipped up to this swap). Any other combination, a digest of no known generation included, is
-`engine_digest_mismatch` before anything runs, so an edited pin cannot select the RF-19 path for RF-28 bytes. `rf28` is
-the collector that writes a withheld rule or setting as a marker line, takes `--login-user` and records the session's
-read-only and TLS facts; it is the one this tree ships. The pin's `previous` block records the digests of the collector
+(`COLLECTOR_GENERATIONS`; refutation 009, G1): `rf31` exactly when the pinned `collect_pg.py` is the RF-31 gen-2 digest and
+`rf28` exactly when it is the RF-28 digest, where the field is mandatory, and `rf19` exactly when it is the RF-19
+digest, where a pin without the field is `rf19` (the collector shipped up to the RF-28 swap). Any other combination, a
+digest of no known generation included, is `engine_digest_mismatch` before anything runs, so an edited pin cannot
+select the RF-19 path for later bytes. `rf28` is the collector that writes a withheld rule or setting as a marker line,
+takes `--login-user` and records the session's read-only and TLS facts; `rf31` is `rf28` plus one query, table
+inheritance and partitions (`inherits`, from pg_inherits), and is the one this tree ships. The pin's `previous` block records the digests of the collector
 it replaced (a record only; nothing is verified against it).
 
 The login name and the collection role. `collection-role` is the role's name inside the database: the collector checks
@@ -119,12 +120,15 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'      # rf28
-RF19_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'        # the pin's `previous`
-RF19, RF28 = 'rf19', 'rf28'
-GENERATIONS = (RF19, RF28)
+FROZEN_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'      # rf31
+RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'        # the pin's `previous`
+RF19_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'
+RF19, RF28, RF31 = 'rf19', 'rf28', 'rf31'
+GENERATIONS = (RF19, RF28, RF31)
+# The generations whose collector takes --login-user and accepts only the two least-privilege roles.
+LEAST_PRIVILEGE_GENERATIONS = frozenset({RF28, RF31})
 # The generation each collector digest is (refutation 009, G1): the pin's `generation` must name it.
-COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF28, RF19_COLLECTOR_SHA256: RF19}
+COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF31, RF28_COLLECTOR_SHA256: RF28, RF19_COLLECTOR_SHA256: RF19}
 COLLECTOR_DIR = Path(__file__).resolve().parent / 'collector'
 COLLECTOR = 'collect_pg.py'
 PIN_NAME = 'COLLECTOR-PIN.json'
@@ -139,8 +143,8 @@ DEFAULT_CONNECT_TIMEOUT = '10'
 APP_NAME = 'assure-action'
 DEFAULT_PRIVILEGES = 'pg_read_all_settings,pg_read_all_stats'
 READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')   # rf19
-LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28
-ROLES_BY_GENERATION = {RF19: READ_ONLY_ROLES, RF28: LEAST_PRIVILEGE_ROLES}
+LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28, rf31
+ROLES_BY_GENERATION = {RF19: READ_ONLY_ROLES, RF28: LEAST_PRIVILEGE_ROLES, RF31: LEAST_PRIVILEGE_ROLES}
 # A collector refusal with a fixed next step (no customer text in it).
 NEXT_STEPS = {'collection_role_not_least_privilege': 'grant the collection role only pg_read_all_settings and '
                                                      'pg_read_all_stats, and revoke the broader role'}
@@ -436,12 +440,12 @@ def _bound_generation(doc):
 
 def pin_generation(collector_dir=None):
     """The verified generation of the collector directory (`verify_collector`, without the frozen-digest test). A pin
-    that cannot be verified gives `rf28`, the stricter rule for the inputs; `collect` refuses that pin before anything
-    runs."""
+    that cannot be verified gives `rf31`, the stricter rule for the inputs (the least-privilege roles); `collect`
+    refuses that pin before anything runs."""
     try:
         return verify_collector(collector_dir, frozen_sha256=None)['generation']
     except Refusal:
-        return RF28
+        return RF31
 
 
 def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
@@ -511,7 +515,7 @@ def login_args(conn, role):
     return [] if user is None else ['--login-user', user]
 
 
-def check_privileges(text, generation=RF28):
+def check_privileges(text, generation=RF31):
     """The `collection-privileges` input for the collector `generation`; `bad_input` for a repeat or a name that
     collector does not accept."""
     roles = ROLES_BY_GENERATION.get(generation, LEAST_PRIVILEGE_ROLES)
@@ -693,7 +697,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
     generation = verify_collector(d, frozen_sha256)['generation']
     env = child_env(conn, path=path)
-    if generation == RF28:                          # the collector's own option, one argument item
+    if generation in LEAST_PRIVILEGE_GENERATIONS:   # the collector's own option, one argument item
         login = login_args(conn, role)
     else:                                           # rf19: the shim's -U rewrite, out of band
         login = []

@@ -208,6 +208,17 @@ QUERIES = [
             'pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid '
             'JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace', 'n.nspname, c.relname, p.polname'),
        'row-level security policies (relation by name, roles by name, expressions deparsed)'),
+    # serve-065 (R-A item 3, 3488 / 3492): table inheritance and partitioning, so a reader can tell when a parent's
+    # row-level security covers a child (derive_observed gap (6)); identical rows on 14.24 / 15.19 / 16.15 / 17.11 /
+    # 18.6 (3498)
+    _q('inherits', 'inherits', ['pg_inherits', 'pg_class', 'pg_namespace'], 14, 18, 'catalog_snapshot',
+       _agg([('child', 'c.relname::text'), ('child_schema', 'cn.nspname::text'), ('parent', 'p.relname::text'),
+             ('parent_schema', 'pn.nspname::text'), ('seqno', 'i.inhseqno'), ('detach_pending', 'i.inhdetachpending')],
+            'pg_catalog.pg_inherits i JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid '
+            'JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace '
+            'JOIN pg_catalog.pg_class p ON p.oid = i.inhparent '
+            'JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace', 'cn.nspname, c.relname, i.inhseqno'),
+       'table inheritance and partitions (child and parent by schema and name; detach_pending from 14)'),
     _q('functions', 'functions', ['pg_proc', 'pg_namespace'], 14, 18, 'catalog_snapshot',
        _agg([('proname', 'p.proname::text'), ('schema', 'n.nspname::text'),
              ('arguments', 'pg_catalog.pg_get_function_identity_arguments(p.oid)'), ('prokind', 'p.prokind::text'),
