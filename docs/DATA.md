@@ -4,7 +4,7 @@
 
 The collector runs in your runner. It connects as your collection role and runs a fixed, published set of `SELECT` queries. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so. It reads:
 
-- catalog views: roles, role memberships, objects and their ACLs, default ACLs, row-level security policies, functions, schemas, table inheritance and partitions (parent and child table names), replication slots, publications and their tables, subscriptions and their tables, settings, the database list and its ACLs, and server times;
+- catalog views: roles, role memberships, objects and their ACLs, default ACLs, row-level security policies, functions, which functions an extension maintains, schemas, table inheritance and partitions (parent and child table names), replication slots, publications and their tables, subscriptions and their tables, settings, the database list and its ACLs, and server times;
 - configuration files, when it can read them: `postgresql.conf` and its includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`.
 - facts about its own session, in its record `COLLECTION-SIDECAR.json`: the login name it used and the role it examined; whether the session was read-only (`transaction_read_only` and `default_transaction_read_only`); TLS as the server reports it for that session (on or off, the protocol, the cipher and the key bits); and the kind of client address (Unix socket, loopback, link-local, private, global or other), never the address itself. The job summary states two of them: `The collection session was read-only: yes`, `no` or `not recorded`, and `TLS to the server: yes (<protocol>, <cipher>, <bits> bits)`, `no` or `not recorded`. Behind a connection pooler they describe the pooler's session to the server.
 
@@ -12,7 +12,7 @@ It reads files only inside the data directory you give it (`data-dir`) and the c
 
 Three catalog views are open only to a superuser: `pg_hba_file_rules` and `pg_file_settings` on every PostgreSQL major, and `pg_ident_file_mappings` from PostgreSQL 15. `pg_read_all_settings` and `pg_read_all_stats` do not open them, so with the collection role of the quick start each one is a gap with the status `unreadable`. The readings that need it read not observed and name the view. The collector still reads `pg_hba.conf`, `pg_ident.conf` and `postgresql.conf` themselves when they are inside `data-dir` or `config-dirs`.
 
-The collector this Action ships is generation rf31. The `postgresql-observed-baseline` check was qualified on the generation before it, rf28, and the collector pin its reading names is rf28 (`5fb5ca431643`). rf31 reads everything rf28 reads, plus table inheritance and partitions.
+The collector this Action ships is generation rf32. The `postgresql-observed-baseline` check was qualified on rf28, and the collector pin its reading names is rf28 (`5fb5ca431643`); its end-to-end test feeds it rf32's own output on PostgreSQL 14, 16 and 18. rf31 reads everything rf28 reads, plus table inheritance and partitions. rf32 reads everything rf31 reads, plus which functions an extension maintains, so a SECURITY DEFINER function an extension installed is reported as the extension's, not as yours.
 
 ## What is never read
 

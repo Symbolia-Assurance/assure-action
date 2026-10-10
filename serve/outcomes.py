@@ -54,6 +54,10 @@ _TABLE = {
     # refused before any model call, free of charge, not counted on the daily cap.
     'job_ceiling': (402, None, 'Ask Symbolia to raise this account\'s job ceiling, or send a smaller request; nothing '
                                'ran and nothing was charged.'),
+    # serve-079 (Director's decision 3902): paid formalisation is on Premium and above; a free account is refused before
+    # anything is held, written or charged, and `detail` names the tier, its monthly price and what it adds.
+    'tier_required': (403, None, 'Ask Symbolia to move this account to Premium (USD 20 a month), or keep the free quote '
+                                 'beside each requirement row; nothing was held and nothing was charged.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),
@@ -195,7 +199,12 @@ RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
                 # serve-032 (DD-083): the once-only balance is below zero; a recharge first clears what is owed
                 ('allowance_exhausted', 'once_balance_debt'):
                 'Recharge the free report balance, and the recharge first clears what is owed, or move to a paid plan; '
-                'nothing ran and nothing was charged.'}
+                'nothing ran and nothing was charged.',
+                # serve-079 (3899 MEDIUM-1): while no paid formalisation runner is bound, no step of the customer's
+                # (another profile, a retry, allow_overage, a top-up) would succeed, so the action names none
+                ('profile_not_servable', 'runner_unbound'):
+                'Nothing to change on your side; the paid formalisation runner is not bound on this server yet, and '
+                'the free quote beside each requirement row stands until Symbolia binds it.'}
 
 
 # serve-072 (3797, dogfood fb-20261009-ac2d8e303fa3089d): a bad_input whose malformation is a request field or body,

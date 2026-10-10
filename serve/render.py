@@ -273,11 +273,24 @@ def _machines(env):
     return m
 
 
+def _machines_words(env, m):
+    """'5 of 8 machines read, 3 refused[, 2 out of scope][ (inferred)]': the one machines phrase every surface prints
+    (serve-077 r3, REFUTATION-PR114-001 M1). A machine a scope limit names is out of scope, not refused, and leaves
+    the total (3817 point 2); without a limit the phrase is byte-identical to the base's."""
+    limited = scope_limited_machines(env)
+    refused = [r for r in m['refused'] if not (isinstance(r, dict) and r.get('machine') in limited)]
+    line = '%d of %d machines read' % (len(m['read']), int(m['total']) - len(limited))
+    line += ', %d refused' % len(refused) if refused else ''
+    line += ', %d out of scope' % len(limited) if limited else ''
+    return line + (' (inferred)' if m.get('source') == 'inferred' else '')
+
+
 def machines_line(envelope):
     """'5 of 8 machines read, 3 refused', '8 of 8 machines read, none refused', 'No machine could be read (8 refused)',
     or None when the envelope carries no `machines` block. An inferred set (`source: inferred`) says so in the phrase
     itself: '8 of 8 machines read, none refused (inferred)', 'No machine could be read (8 refused, inferred)'
-    (refutation-007 G3)."""
+    (refutation-007 G3). Scope-limited machines read as `verdict_line` reads them: '5 of 5 machines read, 3 out of
+    scope' (serve-077 r3, M1), so the report projection, the stored record and the Action's fallback agree."""
     m = _machines(envelope) if isinstance(envelope, dict) else None
     if m is None:
         return None
@@ -288,10 +301,8 @@ def machines_line(envelope):
         inner += ['inferred'] if inferred else []
         return 'No machine could be read' + (' (%s)' % ', '.join(inner) if inner else '')
     if n_refused == 0:
-        line = '%d of %d machines read, none refused' % (n_read, total)
-    else:
-        line = '%d of %d machines read, %d refused' % (n_read, total, n_refused)
-    return line + (' (inferred)' if inferred else '')
+        return '%d of %d machines read, none refused' % (n_read, total) + (' (inferred)' if inferred else '')
+    return _machines_words(envelope, m)
 
 
 def _scope(env):
@@ -599,6 +610,91 @@ def kept_on_refused(envelope, row):
     return row.get('status') in _verdicts(env) and row.get('machine') not in _read_set(env)
 
 
+# ---------- serve-077 (3817): the attribution consumer ----------
+# OB-ATTRIBUTION-001 (#102) puts `readings.attribution` {rule, platform, extension_members, counts, scope_limits} on the
+# observed checker's output and `findings` on every reading whose witnesses name a function: {object, object_kind, owner,
+# owner_class (app | unknown | platform | extension), owner_class_basis, property, writers, witness_count, fix {kind,
+# statement, then} | null, fix_note}. Serving reads them and never derives them.
+OWNER_CLASSES = ('app', 'unknown', 'platform', 'extension')
+OTHERS_CLASSES = ('platform', 'extension')          # someone else's: Supabase's or an extension's
+PLATFORM_OWNED = 'platform_owned'
+
+
+def attribution_block(envelope):
+    """`readings.attribution` when it is an object, else None."""
+    env = envelope if isinstance(envelope, dict) else {}
+    rd = env.get('readings') if isinstance(env.get('readings'), dict) else {}
+    a = rd.get('attribution')
+    return a if isinstance(a, dict) else None
+
+
+def scope_limits(envelope):
+    """The well-formed entries of `readings.attribution.scope_limits`: each with a `machines` list, `text` and
+    `action` strings; [] when there are none."""
+    a = attribution_block(envelope) or {}
+    out = []
+    for e in a.get('scope_limits') if isinstance(a.get('scope_limits'), list) else ():
+        if (isinstance(e, dict) and isinstance(e.get('machines'), list) and isinstance(e.get('text'), str)
+                and isinstance(e.get('action'), str)):
+            out.append(e)
+    return out
+
+
+def scope_limited_machines(envelope):
+    """The union of the scope limits' machines, within the envelope's own refused machines (3817 contract point 2;
+    REFUTATION-PR114-001 L5: a limit naming a read machine never shrinks the denominator)."""
+    env = envelope if isinstance(envelope, dict) else {}
+    m = _machines(env)
+    every = {r.get('machine') for r in m['refused'] if isinstance(r, dict)} if m is not None else None
+    out = set()
+    for e in scope_limits(env):
+        out |= {x for x in e['machines'] if isinstance(x, str) and (every is None or x in every)}
+    return out
+
+
+def reading_findings(envelope, row):
+    """The `findings` list of the row's own reading (each a dict with an `owner_class`), or None when the reading
+    carries none."""
+    env = envelope if isinstance(envelope, dict) else {}
+    if not isinstance(row, dict):
+        return None
+    try:
+        rd = (env.get('readings') or {}).get(row.get('machine'))
+        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
+        obs = rd.get('obligations') if isinstance(rd, dict) else None
+        ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
+            (o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None) if isinstance(obs, list) \
+            else None
+    except (AttributeError, TypeError):
+        return None
+    found = ob.get('findings') if isinstance(ob, dict) else None
+    if not isinstance(found, list):
+        return None
+    return [f for f in found if isinstance(f, dict) and f.get('owner_class') in OWNER_CLASSES]
+
+
+def platform_owned(envelope, row):
+    """True when the row is a `fails` reading whose findings are present, non-empty and all platform or extension:
+    the disproof is someone else's (3817 contract point 1). A reading with no `findings` is the customer's, as today."""
+    if not isinstance(row, dict) or row.get('status') != 'fails':
+        return False
+    found = reading_findings(envelope, row)
+    return bool(found) and all(f.get('owner_class') in OTHERS_CLASSES for f in found)
+
+
+def _findings_rows(env):
+    """[(row, findings)] for every obligation row on a read machine whose reading carries findings, in row order."""
+    read = _read_set(env)
+    out = []
+    for r in _obligation_rows(env):
+        if r.get('machine') not in read or r.get('status') in MET:
+            continue
+        found = reading_findings(env, r)
+        if found:
+            out.append((r, found))
+    return out
+
+
 def red_findings(envelope):
     """What turns the colour red (DESIGN-004 section 1 row 4; REFUTATION-028 F1, F2), in order, as [(kind, obligation
     id, row or None)]:
@@ -624,6 +720,8 @@ def red_findings(envelope):
     out = [('disproven', r.get('id'), r) for r in rows                    # R4-1: holds and vacuous never are
            if r.get('machine') in read and r.get('status') not in MET
            and (r.get('status') == 'fails' or (r.get('status') in named and r.get('status') in verdicts))]
+    # serve-077: a platform-owned disproof is listed after the customer's own, so the first line leads with theirs
+    out = [f for f in out if not platform_owned(env, f[2])] + [f for f in out if platform_owned(env, f[2])]
     listed = {(r.get('machine'), r.get('id')) for _, _, r in out}
     by_id = {}
     for r in rows:
@@ -672,7 +770,8 @@ def binding_reason(envelope, finding):
     kind it is listed under, `never` included: `disproven` when it reads fails and fail-on names fails, else
     `not_proven`. Otherwise a disproof of a status fail-on names (`disproven`), a strict finding
     (`unresolved_strict`) and a chosen non-verdict status (`stopped_by_choice`) bind; under `never` nothing else does
-    (DD-076 rail 1, heading 2241: the reviewer's Q3 recommendation, Add.1's bias binds the exit)."""
+    (DD-076 rail 1, heading 2241: the reviewer's Q3 recommendation, Add.1's bias binds the exit). A prove-class obligation whose `fails` reading is platform-owned still binds exit 1
+    as `not_proven`: it is red unless proven, and no ownership sets that aside (REFUTATION-PR114-001 L4)."""
     env = envelope if isinstance(envelope, dict) else {}
     pol = env.get('policy') if isinstance(env.get('policy'), dict) else {}
     named = {s for s in pol.get('fail_on') or () if isinstance(s, str)} - {STRICT}
@@ -688,6 +787,8 @@ def binding_reason(envelope, finding):
     if not named and STRICT not in (pol.get('fail_on') or ()):
         return None
     if kind == 'disproven':
+        if platform_owned(env, row):                 # serve-077 (3817 point 1): someone else's disproof never binds
+            return None
         return 'disproven' if status in named else None
     return dict(EXIT_REASONS).get(kind)
 
@@ -721,7 +822,14 @@ def decide(envelope):
     for _, reason in EXIT_REASONS:
         if reason in reasons:
             return colour, 1, reason
-    return colour, 0, 'never' if never else 'disproven'
+    if never:
+        return colour, 0, 'never'
+    # serve-077 (3817 point 1): red with exit 0 because every disproof fail-on names is platform-owned
+    named = {s for s in pol.get('fail_on') or () if isinstance(s, str)} - {STRICT}
+    if any(k == 'disproven' and isinstance(r, dict) and r.get('status') in named and platform_owned(env, r)
+           for k, _, r in found):
+        return colour, 0, PLATFORM_OWNED
+    return colour, 0, 'disproven'
 
 
 def reason_words(entry, envelope=None):
@@ -770,9 +878,9 @@ def _coverage_words(env):
         parts.append(line)
     m = _machines(env)
     if m is not None:
-        line = '%d of %d machines read' % (len(m['read']), int(m['total']))
-        line += ', %d refused' % len(m['refused']) if m['refused'] else ''
-        parts.append(line + (' (inferred)' if m.get('source') == 'inferred' else ''))
+        # serve-077 (3817 point 2): a machine a scope limit names is out of scope, not refused, and not in the total;
+        # r3 (M1): the one phrase `machines_line` prints
+        parts.append(_machines_words(env, m))
     return '; '.join(parts)
 
 
@@ -879,7 +987,7 @@ def _yes(v):
 
 def completion_line(envelope, now=None):
     """Coordination 2102 A25: 'Usable readings: c of n. Coverage complete: yes|no. Job stops: no (exit 0 by your
-    fail-on)|yes (exit <n>).' (REFUTATION-028-R2, R2-10 c), with
+    fail-on)|no (exit 0: platform-owned)|yes (exit <n>).' (REFUTATION-028-R2, R2-10 c; serve-077 r3 M2), with
     'Collected at <time>, <s> s before this summary.' when the sidecar named a collection time (`now`, seconds since
     the epoch, defaults to the clock); None for an envelope without `completion`."""
     c = envelope.get('completion') if isinstance(envelope, dict) else None
@@ -887,8 +995,13 @@ def completion_line(envelope, now=None):
         return None
     u = c.get('usable_readings') if isinstance(c.get('usable_readings'), dict) else {}
     code = (envelope.get('policy') or {}).get('exit') if isinstance(envelope.get('policy'), dict) else None
-    # R2-10 (c): whether the job stops, in closed words, never "passes" beside a red line
-    stops = 'no (exit 0 by your fail-on)' if code == 0 else 'yes (exit %s)' % (code if type(code) is int else '?')
+    # R2-10 (c): whether the job stops, in closed words, never "passes" beside a red line; serve-077 r3 (M2): a
+    # platform-owned exit 0 is the policy's exclusion, not the customer's fail-on
+    pol = envelope.get('policy') if isinstance(envelope.get('policy'), dict) else {}
+    if code == 0 and pol.get('reason') == PLATFORM_OWNED:
+        stops = 'no (exit 0: platform-owned)'
+    else:
+        stops = 'no (exit 0 by your fail-on)' if code == 0 else 'yes (exit %s)' % (code if type(code) is int else '?')
     text = 'Usable readings: %s of %s. Coverage complete: %s. Job stops: %s.' % (
         u.get('count') if type(u.get('count')) is int else '?', u.get('of') if type(u.get('of')) is int else '?',
         _yes(c.get('coverage_complete')), stops)
@@ -943,6 +1056,13 @@ def machines_refused_line(envelope):
     """'Machines refused: n (<status> k, ...). A refused machine is not an obligation reading and is not in the table
     above.', or None when no machine was refused."""
     mr = machines_refused_block(envelope)
+    limited = scope_limited_machines(envelope)
+    if limited:                                       # serve-077: an out-of-scope machine is said once, as a scope row
+        by = {}
+        for r in machine_refusal_rows(envelope if isinstance(envelope, dict) else {}):
+            if r.get('machine') not in limited:
+                by[r.get('status')] = by.get(r.get('status'), 0) + 1
+        mr = {'count': sum(by.values()), 'by_status': by}
     if not mr['count']:
         return None
     by = ', '.join('%s %d' % (esc(label(s)), int(n)) for s, n in sorted(mr['by_status'].items(),
@@ -982,7 +1102,9 @@ def verdict_line(envelope):
         lead = lead_finding(env)
         words = _red_words(env, lead) if lead else 'disproven'
         pol = env.get('policy') if isinstance(env.get('policy'), dict) else {}
-        if pol.get('exit') == 0:                      # REFUTATION-028 F1, Q3: red, and the exit the customer chose
+        if pol.get('exit') == 0 and pol.get('reason') == PLATFORM_OWNED:     # serve-077: someone else's disproof
+            words += ' (exit 0: platform-owned)'
+        elif pol.get('exit') == 0:                    # REFUTATION-028 F1, Q3: red, and the exit the customer chose
             words += ' (exit 0 by your fail-on: %s)' % (_clip(','.join(pol.get('fail_on') or ())) or 'never')
         elif pol.get('exit') == 1:                    # R2-2: the finding that set exit 1, when the line leads with another
             binding = binding_findings(env)
@@ -1343,6 +1465,114 @@ def _outcome_words(env):
     return 'Readings'
 
 
+def _sql_line(statement):
+    """One line of SQL for a fenced block: control characters and newlines become spaces; a fence inside is broken;
+    bounded."""
+    text = _CONTROL.sub(' ', ' '.join(str(statement).splitlines()))
+    text = text.replace('```', '` ` `')
+    return text if len(text) <= CAP * 2 else text[:CAP * 2 - 1] + '…'
+
+
+def _grouped(entries):
+    """3908 (1): one entry per (object, fix statement), in first-seen order, naming every machine and obligation that
+    carries it ("M6 SD-1-OB, SD-3-OB; M7 SD-1-OB"). The checker attaches the same finding to each obligation an
+    object fails (3817); the reader sees the object once."""
+    order, refs = [], {}
+    for r, f in entries:
+        fix = f.get('fix') if isinstance(f.get('fix'), dict) else {}
+        key = (f.get('object'), fix.get('statement') if isinstance(fix.get('statement'), str) else None)
+        if key not in refs:
+            order.append((key, f))
+            refs[key] = {}
+        ids = refs[key].setdefault(r.get('machine'), [])
+        if r.get('id') not in ids:
+            ids.append(r.get('id'))
+    return [('; '.join('%s %s' % (esc(m), ', '.join(esc(i) for i in ids)) for m, ids in refs[key].items()), f)
+            for key, f in order]
+
+
+def disclosure_lines(f):
+    """3946 (as revised in 3971, absent-safe): the finding's `disclosures` ([{text, witnesses}], the checker's own
+    sentences, never derived here), one line each: '<text> (<witnesses> of <witness_count> paths)', or the bare text
+    when `witnesses` equals `witness_count`. [] when the finding carries no well-formed entry."""
+    entries = f.get('disclosures') if isinstance(f, dict) and isinstance(f.get('disclosures'), list) else ()
+    count = f.get('witness_count') if isinstance(f, dict) else None
+    out = []
+    for e in entries:
+        if not isinstance(e, dict) or not isinstance(e.get('text'), str) or not e['text']:
+            continue
+        n = e.get('witnesses')
+        text = _clip(e['text'])
+        if type(n) is int and type(count) is int and n != count:
+            text += ' (%d of %d paths)' % (n, count)
+        out.append(text)
+    return out
+
+
+def _fix_lines(f, lead=None):
+    fix = f.get('fix') if isinstance(f.get('fix'), dict) else {}
+    out = []
+    if isinstance(fix.get('statement'), str) and fix['statement']:
+        out += [''] + (['  %s' % lead] if lead else []) + ['```sql', _sql_line(fix['statement']), '```', '']
+    if isinstance(fix.get('then'), str) and fix['then']:
+        out += ['  %s' % esc(fix['then']), '']
+    told = disclosure_lines(f)                        # 3946/3971: each disclosure under the fix line
+    if told:
+        out += ['  %s' % esc(t) for t in told] + ['']
+    return out
+
+
+def _section(out, title, entries, line, suffix=''):
+    if not entries:
+        return
+    out += ['%s: %d%s' % (title, len(entries), suffix), '']
+    for refs, f in entries[:MAX_ANNOTATIONS]:
+        out += line(refs, f)
+    if len(entries) > MAX_ANNOTATIONS:
+        out.append('- and %d more' % (len(entries) - MAX_ANNOTATIONS))
+    while out and out[-1] == '':
+        out.pop()
+    out.append('')
+
+
+def findings_lines(envelope):
+    """serve-077 (3817 point 4; 3908): the first screen's findings, from the readings' `findings` on read machines
+    (never derived here). Each object is listed once with every machine and obligation that carries it, and counts
+    are distinct objects (3908 (1)). The customer's own first: each app finding with its `fix.statement` as a
+    one-line ```sql block, then its `then` sentence. A fix of kind `sql_if_intended` (3836) sits on a reading that is
+    not a verdict: it goes under "To review", led by "If this is what you intend:", and never under "Your findings"
+    (3908 (2)). Unknown next with its `fix_note`; platform and extension under one secondary heading with their
+    counts, each with its `fix_note` (who maintains it). [] when no reading carries findings."""
+    env = envelope if isinstance(envelope, dict) else {}
+    groups = {c: [] for c in OWNER_CLASSES}
+    review = []
+    for r, found in _findings_rows(env):
+        for f in found:
+            fix = f.get('fix') if isinstance(f.get('fix'), dict) else {}
+            if f['owner_class'] == 'app' and fix.get('kind') == 'sql_if_intended':
+                review.append((r, f))
+            else:
+                groups[f['owner_class']].append((r, f))
+    if not any(groups.values()) and not review:
+        return []
+    out = []
+
+    def note(f):
+        n = f.get('fix_note') if isinstance(f.get('fix_note'), str) else ''
+        return ' — %s' % esc(n) if n else ''
+    _section(out, '### Your findings', _grouped(groups['app']),
+             lambda refs, f: ['- %s: %s' % (refs, esc(f.get('object')))] + _fix_lines(f))
+    _section(out, '### To review', _grouped(review),
+             lambda refs, f: ['- %s: %s' % (refs, esc(f.get('object')))] + _fix_lines(f, 'If this is what you intend:'))
+    _section(out, '### Not resolved to one function', _grouped(groups['unknown']),
+             lambda refs, f: ['- %s: %s%s' % (refs, esc(f.get('object')), note(f))])
+    platform, extension = _grouped(groups['platform']), _grouped(groups['extension'])
+    _section(out, "#### Platform-owned, someone else's to fix", platform + extension,
+             lambda refs, f: ['- %s: %s (%s)%s' % (refs, esc(f.get('object')), esc(f.get('owner_class')), note(f))],
+             ' (platform %d, extension %d)' % (len(platform), len(extension)))
+    return out
+
+
 def _headline(env):
     line = first_line(env)
     words = _outcome_words(env)
@@ -1396,6 +1626,8 @@ def summary_markdown(envelope, now=None):
         if len(limits) > MAX_ANNOTATIONS:
             out.append('- and %d more' % (len(limits) - MAX_ANNOTATIONS))
         out.append('')
+    if line is not None:                          # serve-077 (3817 point 4): the findings, yours first, on the first screen
+        out += findings_lines(env)
     why = why_lines(env) if line is not None else []
     if why:                                       # DD-073 Addendum 2 (b): why each disproof or deviation matters
         out += ['### Why it matters', '']
@@ -1433,6 +1665,10 @@ def summary_markdown(envelope, now=None):
         out.append('Policy: readings never stop the job. This run: exit %s.' % code)
     elif reason == 'could_not_look':              # serve-016: the three new reasons
         out.append('Could not look: nothing could be read, so the job stops with exit %s.' % code)
+    elif reason == PLATFORM_OWNED:                # serve-077 (3817 point 1): someone else's disproof, excluded
+        out.append('This run: exit %s. Every disproof your fail-on names is platform-owned (its findings are all '
+                   'platform or extension), so it is excluded from the exit; it stays red above, and the platform '
+                   'is named below as the owner.' % code)
     elif reason == 'disproven' and policy.get('exit') == 0:     # REFUTATION-028 F1: red, exit as fail-on chose
         out.append('This run: exit %s. Something is disproven, and your fail-on leaves its status out, so the job does '
                    'not stop.' % code)
@@ -1502,11 +1738,19 @@ def summary_markdown(envelope, now=None):
     if machines is not None and machines.get('source') == 'inferred' and not machines['refused']:
         out += ['', 'The checker did not report which machines it refused; which machines were read is inferred from the '
                 'readings.']
-    if machines is not None and machines['refused']:
+    limits = scope_limits(env) if line is not None else []
+    limited = scope_limited_machines(env) if line is not None else set()
+    if limits:                                    # serve-077 (3817 point 3): each permanent limit said once
+        out += ['', '### Out of scope', '']
+        for e in limits[:MAX_ANNOTATIONS]:
+            out.append('- %s %s' % (esc(e['text']), esc(e['action'])))
+    refused_here = [r for r in machines['refused'] if not (isinstance(r, dict) and r.get('machine') in limited)] \
+        if machines is not None else []
+    if refused_here:
         out += ['', '### Machines not read', '']
         if machines.get('source') == 'inferred':
             out += ['The checker did not report which machines it refused; this list is inferred from the readings.', '']
-        for r in machines['refused']:
+        for r in refused_here:
             r = r if isinstance(r, dict) else {}
             out.append('- %s: %s' % (esc(r.get('machine')), _reason(r.get('reason'))))
             for row in refusal_rows:                  # serve-071: its own status and what admits it

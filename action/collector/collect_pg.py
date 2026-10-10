@@ -228,6 +228,22 @@ QUERIES = [
             "n.nspname NOT IN ('pg_catalog', 'information_schema')",
             'n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)'),
        'functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL'),
+    # serve-076 (M-U4 + M-U6, 3806 / 3817): which functions an extension maintains, so the observed reading can name
+    # them as the extension's (owner_class `extension`) instead of the customer's. Same schema filter and identity
+    # arguments as `functions`, so each row matches one `functions` row; class is read through pg_class, so it does
+    # not depend on the session's search_path
+    _q('extension_members', 'extension_members', ['pg_depend', 'pg_extension', 'pg_proc', 'pg_namespace', 'pg_class'],
+       14, 18, 'catalog_snapshot',
+       _agg([('class', '(SELECT k.relname::text FROM pg_catalog.pg_class k WHERE k.oid = d.classid)'),
+             ('extname', 'e.extname::text'), ('schema', 'n.nspname::text'), ('name', 'p.proname::text'),
+             ('arguments', 'pg_catalog.pg_get_function_identity_arguments(p.oid)')],
+            'pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid '
+            "AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass "
+            "JOIN pg_catalog.pg_proc p ON d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND p.oid = d.objid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE d.deptype = 'e' AND "
+            "n.nspname NOT IN ('pg_catalog', 'information_schema')",
+            'e.extname, n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)'),
+       'functions an extension maintains (pg_depend deptype e), outside pg_catalog/information_schema'),
     _q('schemas', 'schemas', ['pg_namespace'], 14, 18, 'catalog_snapshot',
        _agg([('nspname', 'n.nspname::text'), ('nspowner', 'pg_catalog.pg_get_userbyid(n.nspowner)'),
              ('nspacl', 'n.nspacl::text[]')],

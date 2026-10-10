@@ -212,6 +212,22 @@
       "purpose": "functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL"
     },
     {
+      "id": "extension_members",
+      "key": "extension_members",
+      "views": [
+        "pg_depend",
+        "pg_extension",
+        "pg_proc",
+        "pg_namespace",
+        "pg_class"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('class', (SELECT k.relname::text FROM pg_catalog.pg_class k WHERE k.oid = d.classid), 'extname', e.extname::text, 'schema', n.nspname::text, 'name', p.proname::text, 'arguments', pg_catalog.pg_get_function_identity_arguments(p.oid)) ORDER BY e.extname, n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)), '[]'::json) FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass JOIN pg_catalog.pg_proc p ON d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND p.oid = d.objid JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE d.deptype = 'e' AND n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      "purpose": "functions an extension maintains (pg_depend deptype e), outside pg_catalog/information_schema"
+    },
+    {
       "id": "schemas",
       "key": "schemas",
       "views": [
