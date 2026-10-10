@@ -873,7 +873,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
             on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)), on_collected=session,
-            is_mysql=is_mysql)
+            is_mysql=is_mysql, root=root)       # issue #206: the identity producer's tree, as run_api gives it
         return verdict, ignored
 
     def run_api():
