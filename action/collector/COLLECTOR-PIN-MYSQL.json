@@ -2,14 +2,15 @@
  "schema": "assure.serve.collector-pin/v1",
  "generation": "my1",
  "files": {
-  "collect_mysql.py": "cd76d25e0659a0fb9c30dc83427eaae4aa7acf5bb2c7037b8c7957b396d59f6d",
-  "sensitive_field_filter_rev19.py": "fd7f4ec275f0b56fab2f817e109447de2a79e7bc30a64d5025c658bd81343ab6"
+  "collect_mysql.py": "8e0289962c44ed367221fa32da193d567eb932904184b4b570377c97de20bc45",
+  "sensitive_field_filter_rev20.py": "575549c5e02a11e986c3ba1ac1d06eb6623812e201f61d51e086f12359916104"
  },
- "filter_sha256": "fd7f4ec275f0b56fab2f817e109447de2a79e7bc30a64d5025c658bd81343ab6",
+ "filter_sha256": "575549c5e02a11e986c3ba1ac1d06eb6623812e201f61d51e086f12359916104",
  "source": {
-  "collect_mysql.py": "Symbolia read-only MySQL collector, first generation (my1): fixed SELECT/SHOW reads through the mysql client, password by MYSQL_PWD only, never authentication_string; the observable sections of symbolia.mysql-declared-input.v0 merged with the customer declaration file; the frozen sensitive-field filter (rev 19) run over the whole document before any byte is written",
-  "filter": "action/collector/sensitive_field_filter_rev19.py: the frozen sensitive-field filter, revision 19, byte-identical to the registry copy it is pinned to (its sha256 is in files); shipped beside the collector and imported statically from there, digest-checked before use",
-  "authored": "2026-10-09, MySQL stage 3 lane; proposal, approves nothing"
+  "collect_mysql.py": "Symbolia read-only MySQL collector, first generation (my1): fixed SELECT/SHOW reads through the mysql client, password by MYSQL_PWD only, never authentication_string; the observable sections of symbolia.mysql-declared-input.v0 merged with the customer declaration file; the frozen sensitive-field filter (rev 20) run over the whole document before any byte is written",
+  "filter": "action/collector/sensitive_field_filter_rev20.py: the frozen sensitive-field filter, revision 20, byte-identical to the registry copy it is pinned to (its sha256 is in files); shipped beside the collector and imported statically from there, digest-checked before use",
+  "authored": "2026-10-09, MySQL stage 3 lane; proposal, approves nothing",
+  "revised": "2026-10-10, trial lane trial-013 (REG-003, Assure #174): filter revision 20, a $ between two letters separates word-like segments so MySQL sys schema names read as names; proposal, approves nothing"
  },
  "flags": {
   "execution_authorized": false,

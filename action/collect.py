@@ -939,7 +939,7 @@ def verify_collector_mysql(collector_dir=None, frozen_sha256=None):
             'generation': doc.get('generation', 'my1'), 'filter_sha256': doc.get('filter_sha256')}
 
 
-FROZEN_MYSQL_COLLECTOR_SHA256 = 'cd76d25e0659a0fb9c30dc83427eaae4aa7acf5bb2c7037b8c7957b396d59f6d'
+FROZEN_MYSQL_COLLECTOR_SHA256 = '8e0289962c44ed367221fa32da193d567eb932904184b4b570377c97de20bc45'
 
 
 def check_declaration(path):

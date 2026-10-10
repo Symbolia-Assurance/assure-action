@@ -131,6 +131,10 @@ A requirement no method states carries a free quote (the API quick start, "The f
 
 **What is kept, and for how long.** The files you send go to a scratch folder made for this one run and are deleted when the run ends, whatever the result. The verdict is kept 30 days, then deleted. Your requirements text and its SHA-256, the repository and commit, and the id, schema and SHA-256 of your declaration are kept beside the verdict for 30 days, then deleted. The quote and the charge, with each stage's tokens, cost, route and model, are kept with the charges. A formula the run establishes is kept for your account as a stored method, so the same sentence is never quoted again: it holds the formula, the digests of the records that produced it and the route taken, never your source bytes, a verdict, a reading or a requirement line number.
 
+## Billing (Stripe)
+
+Payment runs through Stripe. When you ask for a checkout link (`POST /v1/billing/checkout`), Stripe receives your account id and the tier you chose, and nothing else from this server: never repository content, never a file of a check, never a verdict, never a requirement sentence, never a key. The card details go from your human's browser to Stripe; this server never sees them. Once a month Stripe receives, per paid account, one number: the overage charged in that month, in cents. A refund is made by the operator against one Stripe charge of your account. Stripe's own events (a completed checkout, a subscription change, a cancellation) reach this server over its signed webhook; each applied event is kept as one append-only row (the event id, its type, the account, the plan before and after, the time), and the row holds no card data and no Stripe key.
+
 ## Tenant separation
 
 - Each check gets its own scratch folder, created for that check alone and removed when it ends.

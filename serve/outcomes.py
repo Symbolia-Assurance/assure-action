@@ -58,6 +58,10 @@ _TABLE = {
     # anything is held, written or charged, and `detail` names the tier, its monthly price and what it adds.
     'tier_required': (403, None, 'Ask Symbolia to move this account to Premium (USD 20 a month), or keep the free quote '
                                  'beside each requirement row; nothing was held and nothing was charged.'),
+    # serve-084: Stripe billing is not configured on this server, or Stripe could not be reached; a typed refusal of
+    # the billing routes, never a 500. Nothing was written and no tier changed.
+    'billing_unavailable': (503, None, 'Ask Symbolia to move this account by hand, or try the checkout link again later, '
+                                       'because billing is not available on this server just now; no tier changed.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),

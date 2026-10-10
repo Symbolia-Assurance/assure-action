@@ -161,7 +161,7 @@ On the official PostgreSQL 18 image the checker reads: needs intent 17, vacuous 
 
 ## 8. The declared profile
 
-`postgresql-declared-model` reads per machine against a declaration you supply. Its statuses are holds, fails, vacuous, missing method, missing premise, representation and not evaluated. Holds, fails and vacuous are its verdicts. **Missing premise** means the declaration lacks a value the model needs. **Not evaluated** means the machine was not run; the reason says why. Both profiles are served. In the job summary, each fails line shows its witness from `readings`, such as `witness: path postgres:direct, command SELECT, outcome allowed, ...` (at most 5 witnesses per line); the verdict file holds them all.
+`postgresql-declared-model` reads per machine against a declaration you supply. Its statuses are holds, fails, vacuous, missing method, missing premise, representation and not evaluated. Holds, fails and vacuous are its verdicts. **Missing premise** means the declaration lacks a value the model needs. **Not evaluated** means the machine was not run; the reason says why. Both profiles are served. A holds on a tenant filter that reads a session setting (such as `current_setting(...)` or `auth.uid()`) means isolation holds given the application sets the setting from an authenticated identity before any query; a direct database login can set it. The observed profile prints this condition in the reason; the declared profile applies it without printing it. In the job summary, each fails line shows its witness from `readings`, such as `witness: path postgres:direct, command SELECT, outcome allowed, ...` (at most 5 witnesses per line); the verdict file holds them all.
 
 ## 9. The policy exit
 
