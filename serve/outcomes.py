@@ -198,6 +198,17 @@ RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
                 'nothing ran and nothing was charged.'}
 
 
+# serve-072 (3797, dogfood fb-20261009-ac2d8e303fa3089d): a bad_input whose malformation is a request field or body,
+# not a file of the upload, says how to fix that field; the file action ("every file is allow-listed") misled an agent.
+REQUEST_KINDS = frozenset({'allow_partial', 'body_encoding', 'body_not_json', 'body_not_utf8', 'body_shape',
+                           'email_address', 'fail_on', 'feedback_body', 'idempotency_key', 'query', 'quote_body',
+                           'report_body', 'requirements', 'scope_binding', 'scope_missing', 'scope_ref'})
+REQUEST_ACTION = ('Fix what the reason names so it has the shape detail.malformation.expected gives, then send the '
+                  'request again.')
+KIND_ACTIONS = {'feedback_body': 'Fix the field the reason names so it has the shape detail.malformation.expected '
+                                 'gives, then send the note again; nothing was stored.'}
+
+
 class Refusal(Exception):
     """A typed outcome: `Refusal(outcome, reason, **detail)`. An unknown outcome name is a ValueError at construction."""
 
@@ -219,7 +230,14 @@ class Refusal(Exception):
 
     @property
     def action(self):
-        return RULE_ACTIONS.get((self.outcome, self.detail.get('rule')), OUTCOMES[self.outcome]['action'])
+        rule = RULE_ACTIONS.get((self.outcome, self.detail.get('rule')))
+        if rule is not None:
+            return rule
+        m = self.detail.get('malformation')
+        kind = m.get('kind') if isinstance(m, dict) else None
+        if self.outcome == 'bad_input' and kind in REQUEST_KINDS:
+            return KIND_ACTIONS.get(kind, REQUEST_ACTION)
+        return OUTCOMES[self.outcome]['action']
 
     def to_dict(self):
         return {'outcome': self.outcome, 'reason': self.reason, 'action': self.action, 'detail': dict(self.detail)}

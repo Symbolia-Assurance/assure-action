@@ -912,6 +912,55 @@ def _obligation_rows(env):
     return [r for r in _rows(env) if r.get('id') is not None]
 
 
+# serve-071 (3786): a row without an `id` is a refused machine's own line, not an obligation reading. One definition,
+# shipped with the Action tree; `serve.envelope` imports it.
+MACHINE_REFUSAL_KIND = 'machine_refusal'
+NEEDS_UNTABLED = 'what admits it is not tabled yet (the reason is kept as written)'
+
+
+def is_machine_refusal(row):
+    """True for a row without an obligation `id` (or one already marked `kind: machine_refusal`)."""
+    return isinstance(row, dict) and (row.get('id') is None or row.get('kind') == MACHINE_REFUSAL_KIND)
+
+
+def machine_refusal_rows(env):
+    return [r for r in _rows(env) if is_machine_refusal(r)]
+
+
+def machines_refused_block(env):
+    """The envelope's `machines_refused` {count, by_status}, or the same derived from the rows of an older stored
+    envelope (one built before serve-071)."""
+    mr = env.get('machines_refused') if isinstance(env, dict) else None
+    if isinstance(mr, dict) and type(mr.get('count')) is int and isinstance(mr.get('by_status'), dict):
+        return mr
+    by = {}
+    for r in machine_refusal_rows(env if isinstance(env, dict) else {}):
+        by[r.get('status')] = by.get(r.get('status'), 0) + 1
+    return {'count': sum(by.values()), 'by_status': by}
+
+
+def machines_refused_line(envelope):
+    """'Machines refused: n (<status> k, ...). A refused machine is not an obligation reading and is not in the table
+    above.', or None when no machine was refused."""
+    mr = machines_refused_block(envelope)
+    if not mr['count']:
+        return None
+    by = ', '.join('%s %d' % (esc(label(s)), int(n)) for s, n in sorted(mr['by_status'].items(),
+                                                                       key=lambda kv: (-int(kv[1]), str(kv[0]))))
+    return ('Machines refused: %d (%s). A refused machine is not an obligation reading and is not in the table above.'
+            % (int(mr['count']), by))
+
+
+def needs_words(row):
+    """'<status>; needs <kind> <key>: <action>' for a machine-refusal row with tabled `needs`, or
+    '<status>; <NEEDS_UNTABLED>' when `needs` is null."""
+    n = row.get('needs') if isinstance(row, dict) else None
+    status = esc(label(row.get('status'))) if isinstance(row, dict) else ''
+    if isinstance(n, dict) and n.get('kind') and n.get('key') and n.get('action'):
+        return '%s; needs %s %s: %s' % (status, esc(n['kind']), esc(n['key']), esc(n['action']))
+    return '%s; %s' % (status, NEEDS_UNTABLED)
+
+
 def verdict_line(envelope):
     """serve-016: the one first line (module docstring), plain text with every part bounded; None for an envelope
     without `colour` (an older server). One denominator per line (REFUTATION-028 F7): N counts every obligation reading;
@@ -1429,7 +1478,11 @@ def summary_markdown(envelope, now=None):
     out += ['', '| Status | Count |', '| --- | --- |']
     for s in precedence:
         out.append('| %s | %d |' % (esc(label(s)), int(counts.get(s, 0))))
-    rows = env.get('rows') or []
+    refused_line = machines_refused_line(env)            # serve-071: the table counts the obligation rows only
+    if refused_line:
+        out += ['', refused_line]
+    refusal_rows = machine_refusal_rows(env)
+    rows = [r for r in env.get('rows') or [] if not any(r is x for x in refusal_rows)]
     kept = [r for r in rows if kept_on_refused(env, r)] if line is not None else []
     if kept:                                      # R3-1 (ii): the raw counts stand; the kept rows are coverage
         out += ['', 'Readings the checker kept on refused machines and read as not observed: %d.' % len(kept)]
@@ -1456,6 +1509,9 @@ def summary_markdown(envelope, now=None):
         for r in machines['refused']:
             r = r if isinstance(r, dict) else {}
             out.append('- %s: %s' % (esc(r.get('machine')), _reason(r.get('reason'))))
+            for row in refusal_rows:                  # serve-071: its own status and what admits it
+                if row.get('machine') == r.get('machine'):
+                    out.append('  - %s' % needs_words(row))
             for k in kept:                            # R3-1 (ii): under its refused machine, never under its status
                 if k.get('machine') == r.get('machine'):
                     out.append('- %s refused — %s %s' % (esc(k.get('machine')), esc(k.get('id')), KEPT_WORDS))
