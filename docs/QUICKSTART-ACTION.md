@@ -780,7 +780,18 @@ A full read of the two `https` endpoints above has the first line "green: 2 of 2
 
 Choose endpoints that answer HEAD with 2xx or 3xx; a 4xx or 5xx endpoint hides policy checks for the whole run and the verdict's `warnings` names them. No HTTP requirement can be stated in this release: a `requirements.md` sentence on this profile cannot hold, and the readings inform and ask nothing of you.
 
-The policy exits are those of section 7: `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read; `disproven` (1, red) when a reading has a status you fail on; `platform_owned` (0, red) when every disproof your `fail-on` names is platform-owned; `could_not_look` (3, yellow) when no endpoint was observed or no machine could be read. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix.
+The policy exits are those of section 7. `policy.reason` takes exactly one of these eight values, the serving core's closed list, in the source's order (the policy decides them in the order docs/customer/VERDICTS.md section 9 gives):
+
+- `never` (0, as the readings give) when your `fail-on` is `never`; a prove-class obligation that is not proven still exits 1 as `not_proven`.
+- `could_not_look` (3, yellow) when nothing could be read at all: the input gate stopped the check, no machine was read, or no selected unit was observed.
+- `disproven` (1, red) when a reading on a read machine has a status your `fail-on` names; a disproof your `fail-on` leaves out keeps this reason, red, with exit 0.
+- `not_proven` (1, red) when a prove-class obligation has no `holds` on a machine that was read, under every `fail-on`.
+- `unresolved_strict` (1, red) when under `fail-on: unresolved-security`, an obligation marked `security: true` is unresolved.
+- `stopped_by_choice` (1, red) when a reading has a status that is not a verdict and that your `fail-on` names, such as `not_observed`.
+- `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read.
+- `platform_owned` (0, red) when every disproof your `fail-on` names is platform-owned, someone else's to fix.
+
+A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix.
 
 ## 13. Checking MySQL from a submission
 

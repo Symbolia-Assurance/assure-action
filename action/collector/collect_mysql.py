@@ -353,6 +353,24 @@ def read_declaration(path):
     return doc
 
 
+VENDOR_SCHEMAS = ('sys', 'mysql', 'performance_schema', 'information_schema')   # MySQL's own schemas
+
+
+def describe(f, submission):
+    """A finding as the refusal names it: its path and kind, then the type and schema of the row the path points into
+    (`VIEW in schema sys`) when that row carries both, and whether the schema is MySQL's own. The flagged value itself
+    is never quoted: type and schema are enough to recognise a vendor object (#271)."""
+    text = '%s (%s)' % (f.path, f.kind)
+    parts = f.path.split('/')
+    rows = submission.get(parts[0]) if len(parts) > 2 else None
+    row = rows[int(parts[1])] if isinstance(rows, list) and parts[1].isdigit() and int(parts[1]) < len(rows) else None
+    if isinstance(row, dict) and isinstance(row.get('type'), str) and isinstance(row.get('database'), str):
+        text += ': %s in schema %s' % (row['type'], row['database'])
+        if row['database'].lower() in VENDOR_SCHEMAS:
+            text += ", MySQL's own"
+    return text
+
+
 def canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
 
@@ -381,7 +399,7 @@ def build(args, env, flt):
     findings = flt.scan(submission)
     if findings:
         raise Refuse('sensitive_field', 'the submission holds a field that must not be stored: ' +
-                     '; '.join('%s (%s)' % (f.path, f.kind) for f in findings[:20]))
+                     '; '.join(describe(f, submission) for f in findings[:20]))
     gaps = [s['name'] for s in sources if s['status'] != 'supplied']
     return submission, gaps, client.queries_run
 

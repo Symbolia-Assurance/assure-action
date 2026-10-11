@@ -7,7 +7,9 @@ changed: the pass works on the bytes in memory, after they are read and before a
 
 What the pass covers (serve-013). Everything below reads PostgreSQL inputs. The pass applies to a bundle only when the
 profile's input allow-list (the API listing in api mode, the loaded row in local mode) names one of the four PostgreSQL
-top-level files, serve/faithful.py `TOP`, or one of the two JSON files whose SQL it reads (`covers`). Any other bundle, such as the HTTP profile's response heads, passes
+top-level files, serve/faithful.py `TOP`, or raw/catalog_snapshot.json; raw/declaration.json alone does not decide, since the
+python-auth-declared-model row requires that name too and its repository is no PostgreSQL input (issue #236). Once covered,
+every comment and SQL literal is withheld, in a configuration file or one of the two JSON files whose SQL it reads (`covers`). Any other bundle, such as the HTTP profile's response heads, passes
 through byte for byte: no grammar is read, no collector marker check or count runs (`serve.faithful.check` and
 `check_binding` read PostgreSQL collectors' markers), and the counts say no file was covered (`files` 0), which
 `describe` states in its own sentence. `files` counts the files the pass covered.
@@ -543,11 +545,14 @@ def _withhold_json(files, literals, counts):
 # ---------- the pass ----------
 def covers(profile):
     """True when the profile's input allow-list (a loaded row, or the client's allow-list from the API listing: both
-    have `required` and `optional` rules with `matches`) names one of the PostgreSQL top-level files of serve/faithful.py
-    `TOP`, or one of the JSON files whose SQL literals the pass withholds (raw/catalog_snapshot.json,
-    raw/declaration.json: REFUTATION-SERVE-013 B-1), so the pass applies (module docstring, serve-013)."""
+    have `required` and `optional` rules with `matches`) names a PostgreSQL file of its own: one of the top-level files
+    of serve/faithful.py `TOP`, or the catalog snapshot (REFUTATION-SERVE-013 B-1), so the pass applies (module
+    docstring, serve-013). Of the two JSON files whose SQL literals the pass withholds (raw/catalog_snapshot.json,
+    raw/declaration.json), only the snapshot decides: raw/declaration.json is a name the python-auth-declared-model
+    row requires too, and its bundle holds Python source, not PostgreSQL configuration (issue #236, REG-007). The
+    decision is the profile's, by the files only PostgreSQL rows list, never by a name another profile shares."""
     rules = tuple(profile.required) + tuple(profile.optional)
-    names = [name for name, _ in TOP] + [SNAPSHOT, DECLARATION]
+    names = [name for name, _ in TOP] + [SNAPSHOT]
     return any(rule.matches(name) for name in names for rule in rules)
 
 

@@ -67,6 +67,16 @@ collected/
 
 The checker performs no SQL of its own. Its readings describe what the declared configuration satisfies under a declared model over pinned documentation; they prove nothing about the database software and give no deployment approval. An empty declared domain reads vacuous, which is not holds. See [VERDICTS.md](VERDICTS.md) for the current Action policy.
 
+## MySQL submissions
+
+`mysql-declared-model` reads one file, `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`, at most 4 MiB). The Action's MySQL collector writes it from a `mysql://` connection and your declaration file; for the API you produce it yourself. Its `sources` list records what the collector read, one entry per source file.
+
+A `sources` entry accepts exactly `name`, `status`, `sha256` and `reading`.
+
+`name` and `status` are required; `sha256` and `reading` are optional. `status` is one of `supplied`, `unreadable`, `absent` or `not_collected`. Only a `supplied` source carries a `sha256` (64 lowercase hex digits); for any other status it is null. `reading` is a short text. Machines M3 and M4 need all four keys on every entry; M2 and M8 accept an entry without `sha256` or `reading`. An entry with any other key reads representation on the machines that read it (M2 `sources malformed`, M8 `source_form`), and a `name` listed twice is a conflict.
+
+An unknown top-level key in `raw/submission.json` is carried, not projected: the derive notes it as a field read by no machine, no machine reads it and it is not written into any machine's input. Put a fact a machine should read in the field that machine reads, not in a new top-level key and not inside a `sources` entry.
+
 ## Requirements as reviewable sentences
 
 The requirement matcher accepts `requirements.md`: one sentence per line, optionally a Markdown bullet, a stable id and a scope tag. Tags are `[postgres]` or `[http METHOD /path]`; an unscoped sentence is also accepted. Explicit requirement ids must start with an ASCII letter, use only ASCII letters, digits, underscores, dots or hyphens, be at most 64 characters and contain at least one ASCII digit. Examples include `R1`, `own_rows2`, `Requirement7`, `false-positive1` and `NO1`. A word-shaped candidate label recognized by the ASCII label grammar before a colon or scope tag without a digit is ambiguous: `Not`, `Untrue`, `Disproven`, `Not-true`, `Requirement` and `own_rows` retain the complete source line and read not understood. The same rule refuses `not`, `never`, `no`, `false`, `none` and `without`, regardless of casing or digitless punctuation variants. In requirement matching, such a recognized ambiguous line cannot match a method or request a formalisation quote. Labels outside the candidate grammar remain part of the whole-line sentence and may request a no-method formalisation quote. Anonymous sentences without a candidate label remain accepted. For example:

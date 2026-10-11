@@ -128,7 +128,18 @@ Every reading summary carries the profile's three scope notes:
 
 A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 3; not established: 6 — top action: collect the facts HTTP-TLS10-NEGOTIATION reads": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 6; not established: 3 — top action: no HTTP requirement can be stated in this release; the reading informs and asks nothing of you". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red.
 
-The policy exits are those of section 7: `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read; `disproven` (1, red) when a reading has a status you fail on; `platform_owned` (0, red) when every disproof your `fail-on` names is platform-owned; `could_not_look` (3, yellow) when no endpoint was observed or no machine could be read. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix.
+The policy exits are those of section 7. `policy.reason` takes exactly one of these eight values, the serving core's closed list, in the source's order (the policy decides them in the order docs/customer/VERDICTS.md section 9 gives):
+
+- `never` (0, as the readings give) when your `fail-on` is `never`; a prove-class obligation that is not proven still exits 1 as `not_proven`.
+- `could_not_look` (3, yellow) when nothing could be read at all: the input gate stopped the check, no machine was read, or no selected unit was observed.
+- `disproven` (1, red) when a reading on a read machine has a status your `fail-on` names; a disproof your `fail-on` leaves out keeps this reason, red, with exit 0.
+- `not_proven` (1, red) when a prove-class obligation has no `holds` on a machine that was read, under every `fail-on`.
+- `unresolved_strict` (1, red) when under `fail-on: unresolved-security`, an obligation marked `security: true` is unresolved.
+- `stopped_by_choice` (1, red) when a reading has a status that is not a verdict and that your `fail-on` names, such as `not_observed`.
+- `nothing_disproven` (0, green) when nothing is disproven, whatever endpoints or machines could not be read.
+- `platform_owned` (0, red) when every disproof your `fail-on` names is platform-owned, someone else's to fix.
+
+A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix.
 
 Choose endpoints that answer HEAD with 2xx or 3xx; a 4xx or 5xx endpoint hides policy checks for the whole run and the verdict's `warnings` names them. No HTTP requirement can be stated in this release: a `requirements.md` sentence on this profile cannot hold, and the readings inform and ask nothing of you.
 
