@@ -109,6 +109,7 @@ import unicodedata
 
 CAP = 300
 MAX_ANNOTATIONS = 50
+COLLAPSE_SHARED_ACTIONS = 5     # issue #458: more rows than this sharing one next step print it once
 MAX_REQUIREMENT_LINES = 256                       # serve-019: requirements.md holds at most 256 lines
 REPORT_WITHHELD = {'lint_failed': 'the written text did not pass the deterministic check',
                    'writer_unavailable': 'the writer could not be reached',
@@ -543,14 +544,22 @@ CLASS_ACTIONS = {'missing_method': 'a method is a later profile version',
                  'not_observable_at_pin': 'collect with the collector successor (Symbolia)'}
 # A profile with no collector has nothing to re-collect with: its `representation` next step names its own input form.
 # The one place the choice is made; every other profile keeps CLASS_ACTIONS['representation'] byte for byte.
+# Issue #420: the pointer is followed by the machine's own reason (the profile's scope_notes[1]) when the row has one,
+# never a fixed claim that the section is absent (the section may be present but malformed, or a field of it missing).
 NO_COLLECTOR_REPRESENTATION = {
-    'mysql-declared-model': 're-collect with the MySQL collector and your declaration file '
-                            '(the section this machine reads is absent from the submission)'}
+    'mysql-declared-model': 're-collect with the MySQL collector and your declaration file'}
+REASON_CLIP = 200
 
 
-def representation_action(profile_id=None):
-    """The next step of a `representation` row for the profile `profile_id` (None or unlisted: the engine-wide text)."""
-    return NO_COLLECTOR_REPRESENTATION.get(profile_id, CLASS_ACTIONS['representation'])
+def representation_action(profile_id=None, reason=None):
+    """The next step of a `representation` row for the profile `profile_id` (None or unlisted: the engine-wide text).
+    For a profile of NO_COLLECTOR_REPRESENTATION, `reason` (the row's own reason, clipped to REASON_CLIP) follows the
+    pointer after ': ' when given; the pointer alone otherwise."""
+    pointer = NO_COLLECTOR_REPRESENTATION.get(profile_id)
+    if pointer is None:
+        return CLASS_ACTIONS['representation']
+    words = str(reason).strip()[:REASON_CLIP] if reason is not None else ''
+    return '%s: %s' % (pointer, words) if words else pointer
 
 
 # coordination 2102 A22: who can establish each class, and what it needs (not_observed: 'collect <locator>';
@@ -865,12 +874,39 @@ def _quote_words(quote):
     return ' — quote USD %s–%s' % (_money(q.get('low'), 2), _money(q.get('high'), 2))
 
 
+def not_established_words(entry, envelope=None):
+    """The words of a not-established line after its id: '<reason> — <owner>: <needs>[ — quote USD a–b]'."""
+    e = entry if isinstance(entry, dict) else {}
+    tail = '%s: %s' % (_clip(e['owner']), _clip(e.get('needs'))) if e.get('owner') else _clip(e.get('action'))
+    return '%s — %s%s' % (_clip(reason_words(e, envelope)), tail, _quote_words(e.get('quote')))
+
+
 def not_established_line(entry, envelope=None):
     """'<id>: <reason> — <owner>: <needs>[ — quote USD a–b]' for one not-established entry (coordination 2102 A22;
     plain text, parts bounded); an entry without `owner` (an earlier serve-016 envelope) shows its action."""
     e = entry if isinstance(entry, dict) else {}
-    tail = '%s: %s' % (_clip(e['owner']), _clip(e.get('needs'))) if e.get('owner') else _clip(e.get('action'))
-    return '%s: %s — %s%s' % (_clip(e.get('id')), _clip(reason_words(e, envelope)), tail, _quote_words(e.get('quote')))
+    return '%s: %s' % (_clip(e.get('id')), not_established_words(e, envelope))
+
+
+def not_established_lines(entries, envelope=None):
+    """The summary's bullet lines for a not-established list. Issue #458: when more than COLLAPSE_SHARED_ACTIONS
+    entries share the words after their id, those words print once, '- Next step for <n> obligations: <words>', with
+    the ids on one sub-bullet under it, in the place of the first such entry; every other entry keeps its own line.
+    The Action's annotation lines and the API's per-row `next_step` are not read from here and stay per row."""
+    pairs = [(e, not_established_words(e, envelope)) for e in entries]
+    groups = {}
+    for e, words in pairs:
+        groups.setdefault(words, []).append(e)
+    out, shown = [], set()
+    for e, words in pairs:
+        group = groups[words]
+        if len(group) <= COLLAPSE_SHARED_ACTIONS:
+            out.append('- %s' % _esc_line(not_established_line(e, envelope)))
+        elif words not in shown:
+            shown.add(words)
+            out.append('- %s' % _esc_line('Next step for %d obligations: %s' % (len(group), words)))
+            out.append('  - %s' % _esc_line(', '.join(_clip(x.get('id') if isinstance(x, dict) else x) for x in group)))
+    return out
 
 
 def _coverage_words(env):
@@ -1633,7 +1669,7 @@ def summary_markdown(envelope, now=None):
     entries = [e for e in env.get('not_established') or () if isinstance(e, dict)] if line is not None else []
     gaps = [e for e in entries if e.get('id') not in unsupported]
     if env.get('colour') == 'green' and gaps:
-        out += ['- %s' % _esc_line(not_established_line(e, env)) for e in gaps[:MAX_ANNOTATIONS]]
+        out += not_established_lines(gaps[:MAX_ANNOTATIONS], env)
         if len(gaps) > MAX_ANNOTATIONS:
             out.append('- and %d more' % (len(gaps) - MAX_ANNOTATIONS))
         out.append('')
@@ -1647,7 +1683,7 @@ def summary_markdown(envelope, now=None):
     limits = [e for e in entries if e.get('id') in unsupported]
     if limits:                                    # A25: the profile's own limits, apart from the customer's gaps
         out += ['### Unsupported by this profile version: %d' % len(limits), '']
-        out += ['- %s' % _esc_line(not_established_line(e, env)) for e in limits[:MAX_ANNOTATIONS]]
+        out += not_established_lines(limits[:MAX_ANNOTATIONS], env)
         if len(limits) > MAX_ANNOTATIONS:
             out.append('- and %d more' % (len(limits) - MAX_ANNOTATIONS))
         out.append('')

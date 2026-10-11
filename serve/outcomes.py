@@ -160,10 +160,12 @@ NAME_RE = re.compile(r'raw/(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9
 MALFORMATION_KEYS = ('kind', 'file', 'line', 'field', 'expected')
 
 
-def malformation(kind, file=None, line=None, field=None, kinds=()):
+def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None):
     """The closed description of what was malformed (module comment above). An unknown kind is a ValueError: the
     vocabulary is closed in code, never at run time. `kinds` adds a profile row's own closed derive kinds (its
-    `derive_result.kinds`, checked against KIND_RE when the row is loaded) to the fields a malformation may name."""
+    `derive_result.kinds`, checked against KIND_RE when the row is loaded) to the fields a malformation may name.
+    `expected` (issue #414) replaces the kind's generic text with one built from a profile row by `scope_expected`;
+    any other text falls back to the generic one."""
     if kind not in MALFORMATIONS:
         raise ValueError('unknown malformation kind: %r' % (kind,))
     if file is not None:
@@ -172,7 +174,65 @@ def malformation(kind, file=None, line=None, field=None, kinds=()):
         line = None
     if field is not None and field not in FIELDS and field not in DERIVE_KINDS and field not in _row_kinds(kinds):
         field = None
-    return {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': MALFORMATIONS[kind]}
+    if not _row_expected(kind, expected):
+        expected = MALFORMATIONS[kind]
+    return {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': expected}
+
+
+# issue #414: a scope refusal's `expected` built from the profile row the reason was raised against, so an agent that
+# follows the action ("the shape detail.malformation.expected gives") builds a body the row accepts. The text is closed
+# by template: each hole takes only a value the row loader already checked (serve/profiles.py: a label of
+# SCOPE_WORD_RE, an input field of INPUT_FIELD_RE, max_ids 1..256, a grammar of up to MAX_GRAMMAR_CHARS printable
+# characters, a map and record names of SCOPE_NAME_RE, a record schema of RECORD_SCHEMA_RE, max_bytes 1..16384).
+GENERIC_ID_FORM = 'of A-Z, a-z, 0-9, _, . and -'
+GENERIC_TOKEN_FORM = 'of 1 to 63 characters of A-Z, a-z, 0-9, _, . and -'
+_GRAMMAR = r'[\x20-\x7e\x80-\U0010ffff]{1,128}'
+_NAME = r'[a-z][a-z0-9_]{0,31}'
+_PROFILE = r'[a-z0-9][a-z0-9-]{0,63}'
+SCOPE_EXPECTED_RE = {
+    'scope_missing': re.compile(
+        r'the selected [a-z][a-z ]{0,31} profile %s checks, in %s: a list of 1 to (?:[1-9][0-9]{0,2}) distinct ids '
+        r'(?:of the form %s|%s)' % (_PROFILE, _NAME, _GRAMMAR, re.escape(GENERIC_ID_FORM))),
+    'scope_binding': re.compile(
+        r'for profile %s, scope_binding as an object with exactly the key(?:s)? %s(?:, %s)*: %s maps every selected '
+        r'id to its own token (?:matching %s|%s), the tokens distinct(?:; %s is an object whose schema is '
+        r'[a-z0-9][a-z0-9._/-]{0,127}, of at most (?:[1-9][0-9]{0,4}) bytes)*'
+        % (_PROFILE, _NAME, _NAME, _NAME, _GRAMMAR, re.escape(GENERIC_TOKEN_FORM), _NAME)),
+}
+
+
+def _row_expected(kind, expected):
+    pattern = SCOPE_EXPECTED_RE.get(kind)
+    return pattern is not None and isinstance(expected, str) and pattern.fullmatch(expected) is not None
+
+
+def scope_expected(kind, profile_id, *, label=None, field=None, max_ids=256, id_pattern=None, map=None,
+                   records=None, token_pattern=None):
+    """The `expected` text of a `scope_missing` or `scope_binding` malformation built from a row that reads its scope
+    from the request (issue #414): the row's input field, label and id count and form; its binding map, every record
+    the row declares (name, schema, max_bytes) and its token form. None for a fixed-scope row, a row without a binding
+    or a value outside the closed template: the generic text then stands."""
+    if kind == 'scope_missing':
+        if label is None or field is None:
+            return None
+        text = 'the selected %s profile %s checks, in %s: a list of 1 to %d distinct ids %s' % (
+            label, profile_id, field, max_ids,
+            'of the form %s' % id_pattern if id_pattern is not None else GENERIC_ID_FORM)
+    elif kind == 'scope_binding':
+        if map is None:
+            return None
+        records = records or {}
+        keys = [map] + sorted(records)
+        text = 'for profile %s, scope_binding as an object with exactly the key%s %s: %s maps every selected id to ' \
+               'its own token %s, the tokens distinct' % (
+                   profile_id, 's' if len(keys) > 1 else '', ', '.join(keys), map,
+                   'matching %s' % token_pattern if token_pattern is not None else GENERIC_TOKEN_FORM)
+        for name in sorted(records):
+            text += '; %s is an object whose schema is %s, of at most %d bytes' % (
+                name, records[name].get('schema'), records[name].get('max_bytes', 0))
+    else:
+        return None
+    return text if _row_expected(kind, text) else None
 
 
 # A derive kind a profile row may declare (serve/profiles.py checks every row kind against it when loading the row).
@@ -189,7 +249,8 @@ def is_closed(value, kinds=()):
     if not isinstance(value, dict) or tuple(sorted(value)) != tuple(sorted(MALFORMATION_KEYS)):
         return False
     kind = value['kind']
-    return (kind in MALFORMATIONS and value['expected'] == MALFORMATIONS[kind]
+    return (kind in MALFORMATIONS
+            and (value['expected'] == MALFORMATIONS[kind] or _row_expected(kind, value['expected']))
             and (value['file'] is None or value['file'] == 'other'
                  or (isinstance(value['file'], str) and NAME_RE.fullmatch(value['file']) is not None))
             and (value['line'] is None or (type(value['line']) is int and value['line'] > 0))

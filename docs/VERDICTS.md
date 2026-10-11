@@ -199,7 +199,7 @@ Under the first line, one sentence says what it means in plain words, from a fix
 
 "Why it matters" lists each disproven or deviating obligation once: its plain statement and its consequence, both from the profile (the observed PostgreSQL profile states both for every obligation); a profile that states no plain statement falls back to the reading's own statement.
 
-Under a green line the summary names each obligation that could not be established, "\<obligation>: \<reason> — \<owner>: \<what it needs>". The reasons, their owners and what they need:
+Under a green line the summary names each obligation that could not be established, "\<obligation>: \<reason> — \<owner>: \<what it needs>". When more than five obligations share the same words after their id, the summary prints those words once, "Next step for \<n> obligations: \<reason> — \<owner>: \<what it needs>", with the n obligation ids on one line under it; five or fewer keep one line each. The JSON summary's per-row `next_step` and the Action's annotations are per obligation either way. The reasons, their owners and what they need:
 
 | `reason_class` | Reason | `owner` | `needs` | `action` |
 |---|---|---|---|---|

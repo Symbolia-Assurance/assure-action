@@ -63,7 +63,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
-from serve import bundle
+from serve import bundle, is_development
 from serve.outcomes import OUTCOMES, Refusal
 
 VERDICT_SCHEMA = 'assure.serve.verdict/v1'
@@ -383,6 +383,8 @@ class Client:
                 raise
         if doc.get('schema') != VERDICT_SCHEMA:
             raise Refusal('api_error', 'the API answered without a verdict envelope')
+        if is_development(doc):                          # serve-105: the API never serves a development verdict
+            raise Refusal('api_error', 'the API answered with a development verdict')
         return doc
 
     def feedback(self, note):

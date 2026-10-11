@@ -137,7 +137,7 @@ if str(_ROOT) not in sys.path:
 
 from action import http_identity, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
-from serve import FLAGS, bundle, markers, render  # noqa: E402
+from serve import FLAGS, bundle, is_development, markers, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
@@ -257,6 +257,8 @@ def check_verdict(v):
         return Refusal('api_error', 'the verdict from the API is malformed: %s' % what)
     if not isinstance(v, dict) or v.get('schema') != VERDICT_SCHEMA:
         raise bad('it is not a verdict envelope')
+    if is_development(v):                              # serve-105: never rendered as a served verdict
+        raise bad('it is a development verdict, which the API never serves')
     policy = v.get('policy')
     code = policy.get('exit') if isinstance(policy, dict) else None
     if type(code) is not int or not 0 <= code <= 125 or not isinstance(v.get('outcome'), str) \
