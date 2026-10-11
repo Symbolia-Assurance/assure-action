@@ -926,6 +926,9 @@ def _witness_parts(env, row):
         w = None
     parts = []
     if isinstance(w, dict):
+        pair = _declared_actual_words(w)
+        if pair is not None:                             # issue #365: M7 SU-1's {declared, actual} witness
+            return pair
         flow = w.get('flow') if isinstance(w.get('flow'), dict) else {}
         records = w.get('records') if isinstance(w.get('records'), list) else []
         for options in ((w.get('object'), w.get('role'), w.get('owner'), flow.get('user'), flow.get('role')),
@@ -934,11 +937,27 @@ def _witness_parts(env, row):
             v = next((x for x in options if _scalar(x)), None)
             if v is not None:
                 parts.append(_clip(v))
+        # issue #365: the M7 witness keys a bare name would not explain; each is named with its key
+        for key in ('application', 'capability'):
+            if _scalar(w.get(key)):
+                parts.append('%s %s' % (key, _clip(w.get(key))))
     elif _scalar(w):
         parts.append(_clip(w))
     if parts:
         return ', '.join(parts)
     return _clip(row.get('reason') or row.get('status_text') or row.get('status'))
+
+
+def _declared_actual_words(w):
+    """'declared <names>, actual <names>' for a witness carrying both `declared` and `actual` lists (the M7 SU-1
+    shape, explorer.py: administrators declared against the superusers seen), an empty side reading 'none'; None
+    when the witness is of another shape (issue #365)."""
+    declared, actual = w.get('declared'), w.get('actual')
+    if not isinstance(declared, list) or not isinstance(actual, list):
+        return None
+    def names(values):
+        return _clip(', '.join(str(v) for v in values if _scalar(v)) or 'none')
+    return 'declared %s, actual %s' % (names(declared), names(actual))
 
 
 def _red_words(env, finding):
@@ -1917,15 +1936,39 @@ def check_line(failure_envelope):
     return NOT_SENT
 
 
+NO_RAW_STEP = ('Point artefacts in the workflow step at the directory that holds raw/ (a path relative to the workspace, '
+               'or absolute), then run again.')
+MANIFEST_PROFILE = 'http-observed-baseline'
+
+
+def _layout_step(detail):
+    """Issue #274: the no-raw/ step naming the profile's expected layout, from the Action's `detail` (`profile`, `layout`
+    = the listing's required raw/ paths, `manifest` = manifest.json sits where raw/ was looked for). None without them."""
+    profile, layout = detail.get('profile'), detail.get('layout')
+    if not isinstance(profile, str) or not isinstance(layout, list) or not all(isinstance(p, str) for p in layout):
+        return None
+    files = ', '.join(layout) if layout else 'the files the profile lists'
+    if detail.get('manifest') is True:
+        # Refutation of PR #358 F1: `esc` clips the summary's What-to-do value at CAP, so the sentence stays under it
+        # for every served listing (test_issue_274_accept checks each); the second half names the other input, not the
+        # same profile twice, when the profile is already http-observed-baseline (a scope-binding file was given).
+        other = 'With a scope-binding file' if profile == MANIFEST_PROFILE else 'For profile %s' % profile
+        return ('manifest.json without raw/ is an endpoint manifest: it needs profile: %s with scope-binding empty. '
+                '%s, point artefacts at the directory that holds raw/ with %s, then run again.'
+                % (MANIFEST_PROFILE, other, files))
+    return ('Point artefacts in the workflow step at the directory that holds raw/ (a path relative to the workspace, '
+            'or absolute); profile %s expects %s under it. Then run again.' % (profile, files))
+
+
 # Refutation-010 F1: a bad_input whose cause is a workflow input, not a file, gets a next step naming the input instead
-# of the files sentence. Matched on the fixed reason text the Action writes; the step is fixed text.
+# of the files sentence. Matched on the fixed reason text the Action writes; the step is fixed text (issue #274: the
+# no-raw/ step names the profile's layout when the Action's detail carries it).
 _INPUT_STEPS = (
     (re.compile(r'fail-on '), 'Set fail-on in the workflow step to a comma list of statuses (for example '
                               'fails,deviates) or to never, then run again.'),
     (re.compile(r'allow-partial '), 'Set allow-partial in the workflow step to true or false, then run again.'),
     (re.compile(r'no raw/ directory under the artefacts path|the raw directory is a link or not a directory'),
-     'Point artefacts in the workflow step at the directory that holds raw/ (a path relative to the workspace, or '
-     'absolute), then run again.'),
+     NO_RAW_STEP),
     (re.compile(r'(?:mode|output|api-url|api-key|data-dir|config-dirs|collection-role|collection-privileges'
                 r'|connection)\b|set exactly one of connection and artefacts|the user in the connection'
                 r'|local mode is not available'),
@@ -1941,7 +1984,7 @@ def next_step(failure_envelope):
         reason = str(f.get('reason') or '')
         for pattern, text in _INPUT_STEPS:
             if pattern.match(reason):
-                return text
+                return (_layout_step(detail) or text) if text is NO_RAW_STEP else text
     return f.get('action')
 
 

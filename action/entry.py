@@ -223,6 +223,23 @@ def _append(path_text, text):
             fh.write(text)
 
 
+NO_RAW_REASON = 'no raw/ directory under the artefacts path'
+
+
+def _with_layout(e, allow, art):
+    """Issue #274: the no-raw/ refusal carries what the renderer needs to name the expected layout per profile: the
+    profile id, the listing's required raw/ paths, and whether manifest.json sits where raw/ was looked for (an endpoint
+    manifest given with the wrong profile, or with a scope-binding file). The reason text is unchanged."""
+    if e.outcome != 'bad_input' or e.reason != NO_RAW_REASON:
+        return e
+    try:
+        manifest = stat.S_ISREG(os.lstat(Path(art) / 'manifest.json').st_mode)
+    except OSError:
+        manifest = False
+    return Refusal(e.outcome, e.reason, profile=allow.id, layout=[r.path for r in allow.required], manifest=manifest,
+                   **e.detail)
+
+
 def failure_envelope(check_id, refusal):
     """The failure envelope (`assure.serve.failure/v1`), the same object `serve.envelope.failure` builds."""
     doc = {'schema': FAILURE_SCHEMA, 'check_id': check_id}
@@ -923,8 +940,11 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
-            collected = withhold.apply(bundle.from_directory(art if art.is_absolute() else Path(cwd) / art, allow,
-                                                             lim), allow)
+            art = art if art.is_absolute() else Path(cwd) / art
+            try:
+                collected = withhold.apply(bundle.from_directory(art, allow, lim), allow)
+            except Refusal as e:
+                raise _with_layout(e, allow, art) from None
         elif is_mysql:
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'
