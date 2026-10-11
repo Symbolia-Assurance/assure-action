@@ -151,6 +151,11 @@ MAX_SCOPE_FILE = 65536
 SCOPE_REF_REASON = ('no accepted scope record can be resolved for this account and profile yet; omit '
                     'accepted_scope_ref for a first-run comparison')
 MAX_NOTICE_NAMES = 20
+# Issue #397: the lines the Action prints, exported so docs/customer/README-ACTION.md ("Lines the Action prints") can
+# show each with its placeholders and the docs test can render them; each `%(name)s` is the README's `<name>`.
+NOTICE_LINE = '::notice title=Assure::%(count)d name(s) not read by profile %(profile)s: %(names)s'
+LINT_LINE = 'Assure: lint: %(reading)s; %(findings)d finding(s); nothing was charged; policy exit %(exit)d; %(output)s'
+WITHHELD_LINE = 'Assure: %(withheld)s'
 MAX_LINT_LINES = 50
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 _FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, -]{0,100}')     # serve-016: '-' for unresolved-security
@@ -169,6 +174,16 @@ def _cmd_data(value, cap=300):
 
 def _cmd_prop(value):
     return _cmd_data(value).replace(':', '%3A').replace(',', '%2C')
+
+
+def _notice_line(ignored, profile):
+    """NOTICE_LINE for the names the profile does not read: the first MAX_NOTICE_NAMES, then ` and N more`."""
+    names = ignored[:MAX_NOTICE_NAMES]
+    more = len(ignored) - len(names)
+    line = NOTICE_LINE % {'count': len(ignored), 'profile': profile,
+                          'names': ', '.join(names) + ((' and %d more' % more) if more else '')}
+    head, sep, data = line.partition('title=Assure::')       # the data part escaped and capped as one, as before
+    return head + sep + _cmd_data(data)
 
 
 def _mask(value):
@@ -891,7 +906,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
             collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
-            on_withheld=lambda counts: say('Assure: ' + withhold.describe(counts)), on_collected=session,
+            on_withheld=lambda counts: say(WITHHELD_LINE % {'withheld': withhold.describe(counts)}), on_collected=session,
             is_mysql=is_mysql, root=root)       # issue #206: the identity producer's tree, as run_api gives it
         return verdict, ignored
 
@@ -965,7 +980,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             work.mkdir(mode=0o700)
             collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs))
         state['withheld'] = collected.withheld
-        say('Assure: ' + withhold.describe(collected.withheld))
+        say(WITHHELD_LINE % {'withheld': withhold.describe(collected.withheld)})
         session(collected.files)
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
@@ -1013,13 +1028,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         for f in found:
             say('::warning title=%s::%s' % (_cmd_prop('Assure lint'), _cmd_data(_lint_line(f))))
         if ignored:
-            names = ignored[:MAX_NOTICE_NAMES]
-            more = len(ignored) - len(names)
-            say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
-                len(ignored), _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE, ', '.join(names),
-                (' and %d more' % more) if more else '')))
-        say('Assure: lint: %s; %d finding(s); nothing was charged; policy exit %d; %s' % (
-            'ready for a check' if code == 0 else 'fix these before a check', len(found), code, _cmd_data(out_text)))
+            say(_notice_line(ignored, _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE))
+        say(LINT_LINE % {'reading': 'ready for a check' if code == 0 else 'fix these before a check',
+                         'findings': len(found), 'exit': code, 'output': _cmd_data(out_text)})
         outputs('lint', code, 'lint-findings=%d\n' % len(found), lint_colour='green' if code == 0 else 'red')
         return code
 
@@ -1077,10 +1088,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     for line in notes:
         say(line)
     if ignored:
-        names = ignored[:MAX_NOTICE_NAMES]
-        more = len(ignored) - len(names)
-        say('::notice title=Assure::%s' % _cmd_data('%d name(s) not read by profile %s: %s%s' % (
-            len(ignored), inputs_profile, ', '.join(names), (' and %d more' % more) if more else '')))
+        say(_notice_line(ignored, inputs_profile))
     if state['report_on']:
         if isinstance(state['report'], dict):
             say('Assure: report %s; %s' % (_cmd_data(state['report'].get('status')), _cmd_data(state['report_url'])))

@@ -107,6 +107,18 @@ The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`,
 
 When the Action cannot produce a verdict, it writes a failure file at the `output` path instead, with the outcome, the reason and what to do.
 
+## Lines the Action prints
+
+Three lines the Action prints to the job log, with their placeholders, so a workflow step or a test can match them without reading the source. `action/entry.py` exports each format as the constant named in the first column.
+
+| Line | Format | Placeholders |
+|---|---|---|
+| Names not read (`NOTICE_LINE`) | `::notice title=Assure::<count> name(s) not read by profile <profile>: <names>` | `<count>` is how many collected names the profile does not read; `<profile>` is your `profile` input; `<names>` is the first 20 of them, comma separated, then ` and N more` when there are more. Printed only when at least one name was not read. |
+| Lint summary (`LINT_LINE`) | `Assure: lint: <reading>; <findings> finding(s); nothing was charged; policy exit <exit>; <output>` | `<reading>` is `ready for a check` or `fix these before a check`; `<findings>` is the number of findings; `<exit>` is 0 or 2; `<output>` is the `output` path the lint record was written to. The last line of a `mode: lint` run. |
+| Withheld (`WITHHELD_LINE`) | `Assure: <withheld>` | `<withheld>` is the sentence of counts starting `Withheld in the runner before anything was sent:`, followed by one more sentence starting ` Also:` when expressions, unparseable lines or not-observed lines were also withheld; the same text as the job summary's "Withheld in the runner" section. Printed before anything is sent. |
+
+The text after `title=Assure::` in the notice and the `<output>` path in the lint summary are printed as workflow-command data: a `%` in them is printed as `%25` and a newline as `%0A`, and the notice's text is cut to 300 characters ending in `…` when a long name list exceeds that.
+
 ## Read more
 
 - [Beta tester brief: one page for your first run](docs/BETA-TESTER-BRIEF.md)

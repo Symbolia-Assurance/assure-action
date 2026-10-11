@@ -69,7 +69,7 @@ The checker performs no SQL of its own. Its readings describe what the declared 
 
 ## MySQL submissions
 
-`mysql-declared-model` reads one file, `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`, at most 4 MiB). The Action's MySQL collector writes it from a `mysql://` connection and your declaration file; for the API you produce it yourself. Its `sources` list records what the collector read, one entry per source file.
+`mysql-declared-model` reads one file, `raw/submission.json` (schema `symbolia.mysql-declared-input.v0`, at most 4 MiB). The Action's MySQL collector, `action/collector/collect_mysql.py`, writes it from a `mysql://` connection and your declaration file (schema `symbolia.mysql-declaration.v0`); for the API you run that same collector yourself: the API quick start (`QUICKSTART-API.md`, a document of the hosted API that the Action tree does not ship), section 2, gives its command and the environment it reads the password from, and section 3 lists the file's top-level keys with the machine that needs each; [the Action quick start](QUICKSTART-ACTION.md), section 13, gives the Action's own MySQL inputs. Its `sources` list records what the collector read, one entry per source file.
 
 A `sources` entry accepts exactly `name`, `status`, `sha256` and `reading`.
 

@@ -175,6 +175,12 @@ def _rule_for(name, profile):
     return None
 
 
+def accepted_inputs(profile):
+    """The required paths and optional paths or patterns published for this profile, in row order."""
+    return {'required': [r.path for r in profile.required],
+            'optional': [r.path if r.path is not None else r.pattern for r in profile.optional]}
+
+
 def check_name(name, profile):
     """Return `name` when it is a safe relative POSIX path on the profile's allow-list; else `bad_input`."""
     if not isinstance(name, str):
@@ -197,8 +203,11 @@ def check_name(name, profile):
         raise Refusal('bad_input', 'file name is under %s/, which the server writes: %s' % (SERVING_DIR, shown),
                       malformation=malformation('file_name', field='files'))
     if _rule_for(name, profile) is None:
-        raise Refusal('bad_input', 'file name is not accepted by profile %s: %s' % (profile.id, shown),
-                      malformation=malformation('file_name', file=name, field='files'))
+        accepted = accepted_inputs(profile)
+        shown_inputs = ' and '.join(', '.join(accepted[k]) + ' (%s)' % k
+                                    for k in ('required', 'optional') if accepted[k]) or 'no file'
+        raise Refusal('bad_input', '%s is not an input of %s; it accepts %s' % (shown, profile.id, shown_inputs),
+                      malformation=malformation('file_name', file=name, field='files'), accepted=accepted)
     return name
 
 
@@ -224,15 +233,20 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
         if not isinstance(value, str):
             raise Refusal('bad_input', 'a file value is not a base64 string',
                           malformation=malformation('file_value', file=name, field='files'))
+        # issue #939: name the file (not yet checked, so quoted as check_name does) and its size, as the files stage does
+        shown = name[:80].encode('unicode_escape').decode('ascii')
         if len(value) // 4 * 3 > limits.file_bytes + 2:
-            raise Refusal('oversize_input', 'a file is larger than %d bytes' % limits.file_bytes)
+            raise Refusal('oversize_input', '%s is about %d bytes; the limit is %d'
+                          % (shown, len(value) // 4 * 3, limits.file_bytes),
+                          malformation=malformation('oversize_input', file=name, field='files'))
         try:
             data = base64.b64decode(value.encode('ascii'), validate=True)
         except (binascii.Error, ValueError, UnicodeEncodeError):
             raise Refusal('bad_input', 'a file value is not strict base64',
                           malformation=malformation('file_value', file=name, field='files')) from None
         if len(data) > limits.file_bytes:
-            raise Refusal('oversize_input', 'a file is larger than %d bytes' % limits.file_bytes)
+            raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (shown, len(data), limits.file_bytes),
+                          malformation=malformation('oversize_input', file=name, field='files'))
         files[name] = data
     if not with_scope:
         return profile_id, files

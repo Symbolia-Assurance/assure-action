@@ -219,6 +219,9 @@ def _one_witness(w):
         return str(w)
     if not isinstance(w, dict):
         return None
+    pair = _declared_actual_words(w)
+    if pair is not None:                                 # issue #492: M7 SU-1's {declared, actual} lists
+        return pair
     items = [(k, w[k]) for k in _WITNESS_KEYS if _scalar(w.get(k))]
     if not items:
         items = [(k, v) for k, v in sorted(w.items(), key=lambda kv: str(kv[0]))
@@ -255,12 +258,14 @@ def witness_text(envelope, row):
 
 def _row_extra(env, r):
     """The bracketed text after a row's status text: its reason when that adds something, or for a `fails` row with
-    no reason, its witness; None when neither."""
+    no reason, its witness; None when neither. A `fails` row whose reason is its first witness's words (issue #492,
+    serve/envelope.py witness_reasons) shows the fuller witness line instead of repeating them."""
+    if r.get('status') == 'fails' and (not _extra_reason(r) or r.get('reason') == witness_words(env, r)):
+        w = witness_text(env, r)
+        if w:
+            return esc(w)
     if _extra_reason(r):
         return _reason(r.get('reason'))
-    if r.get('status') == 'fails':
-        w = witness_text(env, r)
-        return esc(w) if w else None
     return None
 
 
@@ -547,7 +552,10 @@ CLASS_ACTIONS = {'missing_method': 'a method is a later profile version',
 # Issue #420: the pointer is followed by the machine's own reason (the profile's scope_notes[1]) when the row has one,
 # never a fixed claim that the section is absent (the section may be present but malformed, or a field of it missing).
 NO_COLLECTOR_REPRESENTATION = {
-    'mysql-declared-model': 're-collect with the MySQL collector and your declaration file'}
+    'mysql-declared-model': 're-collect with the MySQL collector and your declaration file',
+    # Issue #794: no server is contacted; the input is the repository and raw/declaration.json themselves
+    'python-auth-declared-model': 'rewrite the registration the reason names as a static route registration, or move '
+                                  'it outside app_roots, and resubmit the repository and declaration'}
 REASON_CLIP = 200
 
 
@@ -847,13 +855,34 @@ def decide(envelope):
     return colour, 0, 'disproven'
 
 
+# Issue #652: a not-observed entry whose reading named no gap, locator or raw/ path gets serve/envelope.py's fallback
+# action 'collect the facts <id> reads'; its line says so instead of reading as a collected locator.
+ACTION_SOURCES = ('row', 'class_default', 'locator_fallback')
+LOCATOR_FALLBACK_WORDS = 'no locator on the row; action from the profile default'
+
+
+def action_source(entry):
+    """Where a not-established entry's action came from: 'locator_fallback' when a not-observed entry's action is the
+    envelope's locator fallback ('collect the facts <id> reads', serve/envelope.py `_locator`); 'row' when a
+    not-observed entry's action names a locator the reading itself gave (its gap, premise locator or raw/ path);
+    'class_default' for every other class, whose action is the fixed text of CLASS_ACTIONS / representation_action."""
+    e = entry if isinstance(entry, dict) else {}
+    if e.get('reason_class') != 'not_observed':
+        return 'class_default'
+    if e.get('action') == 'collect the facts %s reads' % e.get('id'):
+        return 'locator_fallback'
+    return 'row'
+
+
 def reason_words(entry, envelope=None):
     """The words of a not-established entry's reason class: "a fact was not collected: <locator>" (from its action
-    'collect <locator>'), "no pinned baseline for major <n>" (from the envelope's version pins), or the class's fixed
-    words."""
+    'collect <locator>'; LOCATOR_FALLBACK_WORDS in the locator's place when the action is the fallback, issue #652),
+    "no pinned baseline for major <n>" (from the envelope's version pins), or the class's fixed words."""
     cls = entry.get('reason_class') if isinstance(entry, dict) else None
     words = REASON_WORDS.get(cls, REASON_WORDS['representation'])
     if cls == 'not_observed':
+        if action_source(entry) == 'locator_fallback':
+            return '%s: %s' % (words, LOCATOR_FALLBACK_WORDS)
         action = str(entry.get('action') or '')
         return '%s: %s' % (words, action[len('collect '):] if action.startswith('collect ') else 'unknown')
     if cls == 'not_observable_at_pin':           # the pin the registry carries, or that it names none
@@ -947,7 +976,16 @@ def _prove_words(env):
 def _witness_parts(env, row):
     """'<object>, <access path>, <locator>' from the row's first witness in `readings` (each part present only when the
     witness names it), else the row's reason or status text. Plain text, bounded."""
-    w = None
+    words = witness_words(env, row)
+    if words is not None:
+        return words
+    return _clip(row.get('reason') or row.get('status_text') or row.get('status'))
+
+
+def _first_witness(env, row):
+    """The row's first witness in `readings` (its obligation's `witnesses[0]`, else its `witness`) and the
+    obligation's sibling `locator` (the M5 explorer writes one beside the witness, issue #833); (None, None) when the
+    reading carries none."""
     try:
         rd = (env.get('readings') or {}).get(row.get('machine'))
         rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
@@ -957,31 +995,32 @@ def _witness_parts(env, row):
             else None
         if isinstance(ob, dict):
             ws = ob.get('witnesses')
-            w = ws[0] if isinstance(ws, list) and ws else ob.get('witness')
+            return (ws[0] if isinstance(ws, list) and ws else ob.get('witness')), ob.get('locator')
     except (AttributeError, TypeError):
-        w = None
-    parts = []
+        pass
+    return None, None
+
+
+def witness_words(env, row):
+    """The row's first witness in `readings` in the first line's words: '<object>, <access path>, <locator>' (each
+    part present only when the witness names it, read by `_witness_fields`, the projection the meaning line reads),
+    'declared <names>, actual <names>' for the M7 SU-1 pair, a key-named application or capability. Plain text,
+    bounded; None when the reading carries no witness or the witness gives no words. The envelope's row `reason`
+    takes these words when the checker wrote none (issue #492)."""
+    w, _ = _first_witness(env, row)
     if isinstance(w, dict):
         pair = _declared_actual_words(w)
         if pair is not None:                             # issue #365: M7 SU-1's {declared, actual} witness
             return pair
-        flow = w.get('flow') if isinstance(w.get('flow'), dict) else {}
-        records = w.get('records') if isinstance(w.get('records'), list) else []
-        for options in ((w.get('object'), w.get('role'), w.get('owner'), flow.get('user'), flow.get('role')),
-                        (w.get('path'), w.get('command'), w.get('rule_id'), flow.get('transport'), flow.get('name')),
-                        (w.get('locator'), records[0] if records else None)):
-            v = next((x for x in options if _scalar(x)), None)
-            if v is not None:
-                parts.append(_clip(v))
+    parts = [part for part in _witness_fields(env, row) if part is not None]
+    if isinstance(w, dict):
         # issue #365: the M7 witness keys a bare name would not explain; each is named with its key
         for key in ('application', 'capability'):
             if _scalar(w.get(key)):
                 parts.append('%s %s' % (key, _clip(w.get(key))))
     elif _scalar(w):
         parts.append(_clip(w))
-    if parts:
-        return ', '.join(parts)
-    return _clip(row.get('reason') or row.get('status_text') or row.get('status'))
+    return ', '.join(parts) if parts else None
 
 
 def _declared_actual_words(w):
@@ -1016,8 +1055,8 @@ def _red_words(env, finding):
         return 'not proven: %s — input not observed' % _clip(ob_id)
     if entry is None and isinstance(row, dict):      # a verdict that is not holds (vacuous, deviates): its status
         return '%s%s — reads %s' % (lead, _clip(ob_id), _clip(label(row.get('status'))))
-    if entry is None:                                # no reading at all: a fact that was not collected
-        entry = {'reason_class': 'not_observed', 'action': 'collect the facts %s reads' % _clip(ob_id)}
+    if entry is None:                                # no reading at all: the locator fallback (issue #652: named as such)
+        entry = {'id': _clip(ob_id), 'reason_class': 'not_observed', 'action': 'collect the facts %s reads' % _clip(ob_id)}
     return '%s%s — %s; %s' % (lead, _clip(ob_id), _clip(reason_words(entry, env)), _clip(entry.get('action')))
 
 
@@ -1034,7 +1073,9 @@ def _could_not_look_words(env):
         loc = re.search(r'raw/[A-Za-z0-9_./#\[\]=-]{1,200}', reasons[0])
         what = loc.group(0) if loc else 'the facts the machines read'
         return '%s: %s; collect %s' % (REASON_WORDS['not_observed'], what, what)
-    return '%s; %s' % (REASON_WORDS['representation'], representation_action(env.get('profile')))
+    # issue #794: a no-collector profile's line carries the first representation row's own reason (its locator)
+    reason = next((r.get('reason') for r in _rows(env) if r.get('status') == 'representation' and r.get('reason')), None)
+    return '%s; %s' % (REASON_WORDS['representation'], representation_action(env.get('profile'), reason))
 
 
 def _yellow_action(env):
@@ -1238,6 +1279,24 @@ def top_entry(entries):
     pool = [k for k in first if k != 'representation'] or first
     top = max(pool, key=lambda k: (counts[k], -first.index(k)))
     return next(e for e in entries if e.get('reason_class') == top)
+
+
+TOP_ACTION_RULE = ('the action of the first entry of the most frequent reason class (the first seen on a tie), leaving '
+                   'out representation when any other class is present')
+
+
+def top_action(entries):
+    """Issue #652: the first line's top action as a checkable object, {text, reason_class, action_source,
+    from_entries, rule}: `from_entries` lists the ids of the action-bearing entries of the chosen class, the ones the
+    rule counted; `text` is `top_entry`'s action, unclipped (the line clips it to CAP). None when there is no
+    action-bearing entry. The caller emits it only where the line prints one (a green verdict; verdict_line)."""
+    top = top_entry(entries)
+    if top is None:
+        return None
+    counted = [e for e in entries if isinstance(e, dict) and isinstance(e.get('action'), str) and e.get('action')
+               and e.get('reason_class') == top.get('reason_class')]
+    return {'text': top['action'], 'reason_class': top.get('reason_class'), 'action_source': action_source(top),
+            'from_entries': [e.get('id') for e in counted], 'rule': TOP_ACTION_RULE}
 
 
 # ---------- serve-019: the requirements rows (serve/requirements_adapter.py; DD-071's three states) ----------
@@ -1451,8 +1510,9 @@ def _meaning_line(envelope):
 
 def _witness_fields(env, row):
     """(object, access path, locator) of the row's first witness in `readings`, each bounded or None; all None when
-    the reading carries no witness object."""
-    w = None
+    the reading carries no witness object. On the declared profile's M5 a verified declared_actionability projection
+    gives all three; otherwise the witness's own keys, descending into a nested `transition` and the obligation's
+    sibling `locator` {access_path, catalog_field, input_pointer} (the M5 explorer's shape, issue #833)."""
     try:
         rd = (env.get('readings') or {}).get(row.get('machine'))
         profile = env.get('profile')
@@ -1465,27 +1525,31 @@ def _witness_fields(env, row):
                     fields = (projected.get('object'), projected.get('access_path'), projected.get('evidence_locator'))
                     if all(_scalar(value) for value in fields):
                         return tuple(_clip(value) for value in fields)
-        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
-        obs = rd.get('obligations') if isinstance(rd, dict) else None
-        ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
-            (o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None) if isinstance(obs, list) \
-            else None
-        if isinstance(ob, dict):
-            ws = ob.get('witnesses')
-            w = ws[0] if isinstance(ws, list) and ws else ob.get('witness')
     except (AttributeError, TypeError):
-        w = None
+        pass
+    w, sibling = _first_witness(env, row)
     if not isinstance(w, dict):
         return None, None, None
     flow = w.get('flow') if isinstance(w.get('flow'), dict) else {}
     records = w.get('records') if isinstance(w.get('records'), list) else []
+    transition = w.get('transition') if isinstance(w.get('transition'), dict) else {}
+    locator = sibling if isinstance(sibling, dict) else {}
     out = []
     for options in ((w.get('object'), w.get('role'), w.get('owner'), flow.get('user'), flow.get('role')),
-                    (w.get('path'), w.get('command'), w.get('rule_id'), flow.get('transport'), flow.get('name')),
-                    (w.get('locator'), records[0] if records else None)):
+                    (w.get('path'), transition.get('path'), locator.get('access_path'), w.get('command'),
+                     transition.get('command'), w.get('rule_id'), flow.get('transport'), flow.get('name')),
+                    (w.get('locator'), _locator_words(locator), sibling if not locator else None,
+                     records[0] if records else None)):
         v = next((x for x in options if _scalar(x)), None)
         out.append(_clip(v) if v is not None else None)
     return tuple(out)
+
+
+def _locator_words(locator):
+    """'<catalog_field> <input_pointer>' for the M5 explorer's locator object, whichever of the two it names; None
+    when it names neither (issue #833)."""
+    words = [locator.get(key) for key in ('catalog_field', 'input_pointer') if _scalar(locator.get(key))]
+    return ' '.join(str(word) for word in words) if words else None
 
 
 def why_lines(envelope):
@@ -1892,11 +1956,14 @@ def annotations(envelope):
         where = '%s %s' % (r.get('machine'), r.get('id')) if r.get('id') is not None else str(r.get('machine'))
         title = 'Assure %s %s' % (label(r.get('status')), where)
         msg = str(r.get('status_text') or '')
-        if _extra_reason(r):
+        # issue #492: as in _row_extra, a reason taken from the witness defers to the fuller witness line
+        witness = witness_text(envelope, r) if r.get('status') == 'fails' and (
+            not _extra_reason(r) or r.get('reason') == witness_words(envelope, r)) else None
+        if witness:
+            msg += ' (%s)' % witness
+        elif _extra_reason(r):
             gloss = bound_gloss(r.get('reason'))
             msg += ' (%s%s)' % (r.get('reason'), '; %s' % gloss if gloss else '')
-        elif r.get('status') == 'fails' and witness_text(envelope, r):
-            msg += ' (%s)' % witness_text(envelope, r)
         lines.append('::%s title=%s::%s' % (level, _cmd_prop(title), _cmd_data(msg)))
     if first is not None:                         # serve-019: each requirement that does not hold, in the same words
         for r in [r for r in requirement_rows(envelope) or () if r.get('state') != 'holds'][:MAX_ANNOTATIONS]:

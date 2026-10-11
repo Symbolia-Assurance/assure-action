@@ -17,7 +17,8 @@ NOT_FOUND_REASON = 'no check with that id exists for this account'
 _TABLE = {
     'bad_input': (400, 2, 'Fix the request so every file is allow-listed for the profile and well formed, then send it again.'),
     'oversize_input': (413, 2, 'Send fewer or smaller files, within the published size and count limits.'),
-    'unknown_profile': (404, 2, 'Choose a profile from the list of served profiles.'),
+    # issue #601: the refusal names the route and, through `detail.profiles` (serve/profiles.py served_ids), the ids
+    'unknown_profile': (404, 2, 'Choose a profile id from GET /v1/profiles.'),
     # serve-016 (REFUTATION-028 F5; DD-073's table: bad input, auth, key read red, exit 2)
     'unauthenticated': (401, 2, 'Send a valid, unrevoked API key in the Authorization header.'),
     'rate_limited': (429, None, 'Wait for the time given in Retry-After, then send the request again.'),
@@ -84,6 +85,7 @@ MALFORMATIONS = MappingProxyType({
     'body_not_json': 'a body that is one JSON document without duplicate keys or non-finite numbers',
     'body_shape': 'a JSON object with exactly the keys profile and files, profile a string and files an object',
     'file_value': 'each file as a strict base64 string',
+    'oversize_input': 'each file within the published per-file size limit',
     'file_name': 'a relative name under raw/ that the profile accepts, without control characters, backslashes or '
                  'empty, "." or ".." segments',
     'file_missing': 'every file the profile requires',
@@ -157,6 +159,14 @@ DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_obs
 # (serve.render.CLASS_NEEDS): the checker binding, or the report writer's qualification for the profile.
 NOT_SERVABLE_NEEDS = frozenset({'checker_binding', 'writer_qualification'})
 NAME_RE = re.compile(r'raw/(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
+# issue #497: a derive_refused malformation's `expected` is the derive kind's own next step where one is written here;
+# a kind without a row keeps the generic derive_refused text. Closed: the text is chosen by the closed `field` only.
+DERIVE_EXPECTED = MappingProxyType({
+    'raw_unreadable': 'a JSON object; re-copy the file from the collector\'s out/raw/ or collect again',
+    'major_disagreement': 'one major across COLLECTION-SIDECAR.json server_version_num, command_line.json argv[0] and '
+                          'the catalog roles; send the files of one collection run',
+    'major_not_observed': 'server_version_num in COLLECTION-SIDECAR.json; send the sidecar from the same run',
+})
 MALFORMATION_KEYS = ('kind', 'file', 'line', 'field', 'expected')
 
 
@@ -174,7 +184,9 @@ def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None
         line = None
     if field is not None and field not in FIELDS and field not in DERIVE_KINDS and field not in _row_kinds(kinds):
         field = None
-    if not _row_expected(kind, expected):
+    if kind == 'derive_refused' and field in DERIVE_EXPECTED:
+        expected = DERIVE_EXPECTED[field]
+    elif not _row_expected(kind, expected):
         expected = MALFORMATIONS[kind]
     return {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': expected}
 
@@ -249,8 +261,13 @@ def is_closed(value, kinds=()):
     if not isinstance(value, dict) or tuple(sorted(value)) != tuple(sorted(MALFORMATION_KEYS)):
         return False
     kind = value['kind']
+    if kind == 'derive_refused':
+        field = value['field'] if isinstance(value['field'], str) else None
+        generic = value['expected'] == DERIVE_EXPECTED.get(field, MALFORMATIONS[kind])
+    else:
+        generic = kind in MALFORMATIONS and value['expected'] == MALFORMATIONS[kind]
     return (kind in MALFORMATIONS
-            and (value['expected'] == MALFORMATIONS[kind] or _row_expected(kind, value['expected']))
+            and (generic or _row_expected(kind, value['expected']))
             and (value['file'] is None or value['file'] == 'other'
                  or (isinstance(value['file'], str) and NAME_RE.fullmatch(value['file']) is not None))
             and (value['line'] is None or (type(value['line']) is int and value['line'] > 0))
@@ -274,7 +291,19 @@ RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
                 # (another profile, a retry, allow_overage, a top-up) would succeed, so the action names none
                 ('profile_not_servable', 'runner_unbound'):
                 'Nothing to change on your side; the paid formalisation runner is not bound on this server yet, and '
-                'the free quote beside each requirement row stands until Symbolia binds it.'}
+                'the free quote beside each requirement row stands until Symbolia binds it.',
+                # issues #595 and #697: GET /v1/checks/{id}/report before any POST, on a check the account holds: the
+                # check exists, so "check the check id" contradicts the reason; the next step is the POST the reason
+                # names, and the action says the check exists so the agent does not re-check a fine id
+                ('not_found', 'report_not_requested'):
+                'POST /v1/checks/{id}/report to ask for the report, then read it here; the check exists.',
+                # issue #841: the key is bound to the raw body bytes and the query (serve/api.py _known), so a body
+                # re-serialised with other whitespace is "a different request" though every file is allow-listed and
+                # well formed; the file action sent an agent to re-validate file names
+                ('bad_input', 'idempotency_body_mismatch'):
+                'This Idempotency-Key is bound to the exact bytes of an earlier request body and its query (whitespace '
+                'counts). Resend those exact bytes to read the stored verdict, or send a new Idempotency-Key for a new '
+                'check.'}
 
 
 # serve-072 (3797, dogfood fb-20261009-ac2d8e303fa3089d): a bad_input whose malformation is a request field or body,
@@ -282,10 +311,87 @@ RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
 REQUEST_KINDS = frozenset({'allow_partial', 'body_encoding', 'body_not_json', 'body_not_utf8', 'body_shape',
                            'email_address', 'fail_on', 'feedback_body', 'idempotency_key', 'query', 'quote_body',
                            'report_body', 'requirements', 'scope_binding', 'scope_missing', 'scope_ref'})
+# issue #589: the next step per closed cause code of the HTTP observed derive's customer refusal (profile_refused with
+# detail.cause_code). `{file}` takes the malformation's file (a raw/ name that passed NAME_RE) or 'the bundle' when
+# the fault is located in no one file (RAW-INVALID, a SCHEMA-INVALID raised past the readers, or the scope a standalone
+# caller sent; the API validates the sent scope before the derive runs, so the scope codes it serves are the sidecar's).
+# Refutation of PR #949, F2/F3: every code `binding` in checker.py can raise against the uploaded files has a row
+# (tests/serving/test_issue_589_accept.py reads the set from the checker), in the groups QUICKSTART-API.md tables.
+_CODE_GROUPS = (
+    (('JSON-INVALID', 'JSON-NONFINITE', 'DUPLICATE-KEY'),
+     '{file} is not JSON the checker reads (UTF-8, unique keys, finite numbers); re-run collect_http.py rather than '
+     'editing it, then run again.'),
+    (('FLAGS-INVALID',),
+     '{file} must be a JSON object carrying the seven flags at their fixed values, as collect_http.py writes it; '
+     're-run the collector rather than editing it, then run again.'),
+    (('EXPECTED-IDENTITY-BINDING-MISMATCH',),
+     'the scope_binding you sent was produced for a different manifest than the one collected into {file}; run the '
+     'identity producer and the collector again with one key, then send both from that run.'),
+    (('IDENTITY-BINDING-INVALID',),
+     'the identity_binding record of the selected scope in {file} has the wrong shape (schema, algorithm, key id or '
+     'one digest per token); re-run the collector and send the identity producer\'s record unchanged with the facts '
+     'and sidecar of that run.'),
+    (('EXPECTED-SCOPE-REQUIRED', 'SCOPE-INVALID', 'SCOPE-TOKEN-DUPLICATE'),
+     'the selected scope recorded in {file} is missing or malformed (one to sixteen endpoint ids, each with its own '
+     'token); re-run the shipped collector rather than editing it, and send its facts and sidecar together.'),
+    (('SCOPE-SELECTION-MISMATCH', 'EXPECTED-SCOPE-DIGEST-MISMATCH'),
+     'the scope you sent is not the endpoint set collected into {file}; send the tokens of the collection run, or '
+     'collect again for the scope you want.'),
+    (('REQUEST-SCOPE-MISMATCH', 'SCOPE-DIGEST-KEYS', 'SCOPE-DIGEST-MISMATCH', 'SCOPE-IDENTITY-DIGEST-MISMATCH',
+      'FACTS-SCOPE-MISMATCH'),
+     'the collected scope\'s own fields in {file} disagree with each other or between the facts and the sidecar; '
+     're-run the shipped collector and send the facts and sidecar of one run.'),
+    (('ENDPOINT-COVERAGE-MISMATCH', 'ENDPOINT-TOKEN-MISMATCH'),
+     'the endpoints in {file} are not exactly the selected tokens, one each, with the binding\'s tokens; collect '
+     'again for the scope you send.'),
+    (('SCHEMA-INVALID', 'REQUEST-QUALIFIER-MISMATCH', 'TRANSPORT-MODE-INVALID', 'TRANSPORT-BUDGET-INVALID',
+      'TRANSPORT-STATUS-INVALID', 'FIELD-DUPLICATE', 'UNKNOWN-HAS-VALUE', 'FACT-NESTING-BOUND', 'FACT-KEY-UNSUPPORTED',
+      'FACT-LIST-BOUND', 'FACT-NUMBER-INVALID', 'FACT-CODE-UNSUPPORTED', 'FACT-LOCATOR-INVALID', 'FACT-ID-INVALID',
+      'FACT-DIGEST-INVALID', 'FACT-CIPHER-INVALID', 'FACT-LIBRARY-INVALID', 'FACT-TIME-INVALID', 'FACT-MODE-INVALID',
+      'FACT-IDENTITY-INVALID', 'FACT-ENUM-UNSUPPORTED', 'FACT-TYPE-INVALID', 'CSP-PRESENCE-INVALID',
+      'SAMPLING-LIMIT-INVALID', 'TRUST-POLICY-INVALID', 'TLS-VERIFICATION-CONTEXT-INVALID',
+      'TRUST-ANCHOR-RETENTION-INVALID', 'REFERRER-POLICY-ENUM-INVALID', 'CONTENT-LENGTH-RELATION-INVALID',
+      'CONTENT-LENGTH-PREMISE-MISSING', 'TRANSFER-ENCODING-PREMISE-MISSING', 'HSTS-PREMISE-MISSING',
+      'COOKIE-CAPTURE-PREMISE-MISSING', 'COOKIE-SYNTAX-PREMISE-MISSING', 'COOKIE-VIOLATION-PREMISE-MISSING',
+      'COOKIE-SYNTAX-INVALID', 'COOKIE-SYNTAX-DISAGREEMENT', 'FRAMING-PRESENCE-PREMISE-MISSING',
+      'ACTUAL-OFFER-STATUS-INVALID'),
+     'a record in {file} is not in the shape the shipped collector writes (its schema, mode, endpoint and fact fields '
+     'are closed); re-run collect_http.py rather than editing it, then run again.'),
+    (('FACTS-DIGEST-MISMATCH', 'ARTEFACT-DIGEST-MISMATCH', 'ARTEFACT-DIGESTS-MISSING', 'ARTEFACT-PATH-INVALID',
+      'UNEXPECTED-ARTEFACT'),
+     '{file} differs from the digest the sidecar recorded, or the sidecar\'s digest map and the files under raw/ do '
+     'not list each other; send exactly the files the collector wrote, unedited, or collect again.'),
+    (('ARTEFACT-SYMLINK', 'RAW-INVALID', 'SOURCE-NOFOLLOW-READ-FAULT', 'SOURCE-NONREGULAR-OR-OVER-BOUND',
+      'SOURCE-OVER-BOUND'),
+     '{file} is a symbolic link, not a regular file or directory, or over its size bound; send regular files within '
+     'the bound.'),
+    (('SANITIZED-CONTROL', 'SANITIZED-TEXT-INVALID', 'MARKER-INVALID'),
+     '{file} is not the sanitized ASCII head text the collector writes (its withheld-line markers included); re-run '
+     'the collector rather than editing a head.'),
+    (('MARKER-ROWS-INVALID', 'MARKER-ROW-INVALID', 'MARKER-ROW-DUPLICATE', 'MARKER-UNIT-INVALID',
+      'MARKER-IDENTITY-INVALID', 'STATUS-MARKER-INVALID', 'MARKER-FACT-IDENTITY', 'MARKER-FACT-LOCATOR',
+      'MARKER-BIJECTION'),
+     'the redaction markers and fact locators recorded in {file} do not match the facts, the sidecar and the heads '
+     'one for one; re-run the collector and send its facts, sidecar and heads together.'),
+)
+CODE_ACTIONS = {code: text for codes, text in _CODE_GROUPS for code in codes}
 REQUEST_ACTION = ('Fix what the reason names so it has the shape detail.malformation.expected gives, then send the '
                   'request again.')
 KIND_ACTIONS = {'feedback_body': 'Fix the field the reason names so it has the shape detail.malformation.expected '
                                  'gives, then send the note again; nothing was stored.'}
+
+
+# issue #601: an `unknown_profile` refusal's action lists the served ids it carries in `detail.profiles`, so an agent
+# needs no second round trip to GET /v1/profiles. The list is the row names serve/profiles.py found (each of ID_RE).
+UNKNOWN_PROFILE_ACTION = 'Choose a profile id from GET /v1/profiles: %s.'
+
+
+def served_profiles(detail):
+    """The `detail.profiles` list of an `unknown_profile` refusal when it is one (a list of id strings), else None."""
+    ids = detail.get('profiles') if isinstance(detail, dict) else None
+    if isinstance(ids, list) and ids and all(isinstance(i, str) and i for i in ids):
+        return ids
+    return None
 
 
 class Refusal(Exception):
@@ -314,8 +420,15 @@ class Refusal(Exception):
             return rule
         m = self.detail.get('malformation')
         kind = m.get('kind') if isinstance(m, dict) else None
+        code = self.detail.get('cause_code')
+        if self.outcome == 'profile_refused' and kind == 'derive_refused' and code in CODE_ACTIONS:
+            file = m.get('file')
+            file = file if isinstance(file, str) and NAME_RE.fullmatch(file) else 'the bundle'
+            return CODE_ACTIONS[code].replace('{file}', file)
         if self.outcome == 'bad_input' and kind in REQUEST_KINDS:
             return KIND_ACTIONS.get(kind, REQUEST_ACTION)
+        if self.outcome == 'unknown_profile' and served_profiles(self.detail) is not None:
+            return UNKNOWN_PROFILE_ACTION % ', '.join(served_profiles(self.detail))
         return OUTCOMES[self.outcome]['action']
 
     def to_dict(self):
