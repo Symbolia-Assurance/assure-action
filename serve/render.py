@@ -290,14 +290,20 @@ def machines_line(envelope):
     or None when the envelope carries no `machines` block. An inferred set (`source: inferred`) says so in the phrase
     itself: '8 of 8 machines read, none refused (inferred)', 'No machine could be read (8 refused, inferred)'
     (refutation-007 G3). Scope-limited machines read as `verdict_line` reads them: '5 of 5 machines read, 3 out of
-    scope' (serve-077 r3, M1), so the report projection, the stored record and the Action's fallback agree."""
+    scope', 'No machine could be read (5 refused, 3 out of scope)' (serve-077 r3, M1; #158 N7), so the report
+    projection, the stored record and the Action's fallback agree."""
     m = _machines(envelope) if isinstance(envelope, dict) else None
     if m is None:
         return None
     n_read, n_refused, total = len(m['read']), len(m['refused']), int(m['total'])
     inferred = m.get('source') == 'inferred'
     if n_read == 0:
+        # #158 (REFUTATION-PR114-003 N7): the scope rule `_machines_words` applies, so a scope-limited machine is
+        # out of scope here too: 'No machine could be read (5 refused, 3 out of scope)'
+        limited = scope_limited_machines(envelope)
+        n_refused = len([r for r in m['refused'] if not (isinstance(r, dict) and r.get('machine') in limited)])
         inner = ['%d refused' % n_refused] if n_refused else []
+        inner += ['%d out of scope' % len(limited)] if limited else []
         inner += ['inferred'] if inferred else []
         return 'No machine could be read' + (' (%s)' % ', '.join(inner) if inner else '')
     if n_refused == 0:

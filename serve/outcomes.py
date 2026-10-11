@@ -25,7 +25,9 @@ _TABLE = {
     'engine_digest_mismatch': (503, 3, 'Report it to Symbolia (or reinstall the pinned release when you run the engine yourself), because the engine files differ from their pin and no check ran.'),
     'collector_cannot_connect': (None, 3, 'Check the connection settings and that the server accepts the collection role.'),
     'collector_refused': (422, 3, 'Fix what the reason names and run again; for a rule shape not yet checkable, rewrite it as the reason says or send Symbolia the file name and line number it gives.'),
-    'profile_not_servable': (503, 3, 'Use another profile, because this one is not yet qualified to serve readings.'),
+    # issue #171: an agent whose only fitting profile is the unqualified one cannot 'use another profile'; the refusal
+    # says the move is to wait and its `needs` (NOT_SERVABLE_NEEDS) names what is missing.
+    'profile_not_servable': (503, 3, 'Wait for this profile to be qualified; nothing on your side opens it.'),
     'profile_refused': (422, 3, 'Fix the collection or declaration fault the reason names, then run again.'),
     'checker_error': (500, 3, 'Report the check id to Symbolia, because the checker failed in a way it should not.'),
     'checker_timeout': (504, 3, 'Send a smaller input or try again later, because the check ran past its time limit.'),
@@ -151,6 +153,9 @@ FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', '
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',
                           'raw_missing', 'raw_unreadable', 'inputs_unreadable', 'derive_digest', 'internal'})
+# issue #171: what a `profile_not_servable` refusal waits for, the same `needs` shape the not-established rows use
+# (serve.render.CLASS_NEEDS): the checker binding, or the report writer's qualification for the profile.
+NOT_SERVABLE_NEEDS = frozenset({'checker_binding', 'writer_qualification'})
 NAME_RE = re.compile(r'raw/(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
 MALFORMATION_KEYS = ('kind', 'file', 'line', 'field', 'expected')
 

@@ -52,7 +52,9 @@ OUT_CAP = 16 << 20
 # mysql.user: never authentication_string. The secondary password lives under User_attributes; only its presence is read.
 QUERIES = {
     'version': "SELECT VERSION()",
-    'mysql.user': ("SELECT User, Host, account_locked, plugin, password_lifetime, password_lock_time, failed_login_attempts, "
+    'mysql.user': ("SELECT User, Host, account_locked, plugin, password_lifetime, "
+                   "COALESCE(JSON_EXTRACT(User_attributes, '$.Password_locking.password_lock_time_days'), 0), "
+                   "COALESCE(JSON_EXTRACT(User_attributes, '$.Password_locking.failed_login_attempts'), 0), "
                    "IF(JSON_EXTRACT(User_attributes, '$.additional_password') IS NULL, 'N', 'Y'), "
                    "JSON_EXTRACT(User_attributes, '$.Restrictions') FROM mysql.user ORDER BY User, Host"),
     'show_grants': "SHOW GRANTS FOR %s",                      # the one parametrised read: an account the user table named, quoted below

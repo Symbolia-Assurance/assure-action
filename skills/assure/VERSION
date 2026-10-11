@@ -1,2 +1,2 @@
-source: de2893ad1742926d7c4a899831954fcd815c20b9; served profiles: postgresql-observed-baseline, postgresql-declared-model, http-observed-baseline, mysql-declared-model, python-auth-declared-model
+source: 7f8b151e00555a6d9753490ef3caf3d269b7697d; served profiles: postgresql-observed-baseline, postgresql-declared-model, http-observed-baseline, mysql-declared-model, python-auth-declared-model
 pin: install at @beta (Symbolia-Assurance/assure-action@beta), or freeze at a full 40-character commit SHA of that repository (in a clone, git -C assure-action rev-parse HEAD prints it); never put the source commit in a uses: line. If this folder was copied without its checkout, install the Action at `@beta`; never guess a commit.
