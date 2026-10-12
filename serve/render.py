@@ -1181,29 +1181,39 @@ def machine_refusal_rows(env):
     return [r for r in _rows(env) if is_machine_refusal(r)]
 
 
-def machines_refused_block(env):
-    """The envelope's `machines_refused` {count, by_status}, or the same derived from the rows of an older stored
-    envelope (one built before serve-071)."""
-    mr = env.get('machines_refused') if isinstance(env, dict) else None
-    if isinstance(mr, dict) and type(mr.get('count')) is int and isinstance(mr.get('by_status'), dict):
-        return mr
+def refused_machine_entries(env):
+    """The refused machines as {machine, status, ...}: the entries of `machines.refused` when the block names any
+    (issue #793: the observed profile reports refusals through its readings and writes no refusal row), else the
+    machine-refusal rows of an envelope without a machines block (one built before refutation-007)."""
+    m = _machines(env) if isinstance(env, dict) else None
+    refused = [r for r in m['refused'] if isinstance(r, dict)] if m is not None else []
+    return refused or machine_refusal_rows(env if isinstance(env, dict) else {})
+
+
+def _refused_counts(entries):
     by = {}
-    for r in machine_refusal_rows(env if isinstance(env, dict) else {}):
+    for r in entries:
         by[r.get('status')] = by.get(r.get('status'), 0) + 1
     return {'count': sum(by.values()), 'by_status': by}
 
 
+def machines_refused_block(env):
+    """The envelope's `machines_refused` {count, by_status}, or the same derived from `refused_machine_entries` for
+    an older stored envelope (one built before serve-071)."""
+    mr = env.get('machines_refused') if isinstance(env, dict) else None
+    if isinstance(mr, dict) and type(mr.get('count')) is int and isinstance(mr.get('by_status'), dict):
+        return mr
+    return _refused_counts(refused_machine_entries(env))
+
+
 def machines_refused_line(envelope):
     """'Machines refused: n (<status> k, ...). A refused machine is not an obligation reading and is not in the table
-    above.', or None when no machine was refused."""
+    above.', or None when no machine was refused. Under a scope limit `n` is net of the limited machines, as the
+    first line's 'n refused' is (serve-077); `machines_refused.count` in the envelope stays gross."""
     mr = machines_refused_block(envelope)
     limited = scope_limited_machines(envelope)
     if limited:                                       # serve-077: an out-of-scope machine is said once, as a scope row
-        by = {}
-        for r in machine_refusal_rows(envelope if isinstance(envelope, dict) else {}):
-            if r.get('machine') not in limited:
-                by[r.get('status')] = by.get(r.get('status'), 0) + 1
-        mr = {'count': sum(by.values()), 'by_status': by}
+        mr = _refused_counts([r for r in refused_machine_entries(envelope) if r.get('machine') not in limited])
     if not mr['count']:
         return None
     by = ', '.join('%s %d' % (esc(label(s)), int(n)) for s, n in sorted(mr['by_status'].items(),
