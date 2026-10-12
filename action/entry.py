@@ -117,7 +117,7 @@ server as the server reported it (`serve.markers.session_lines`). In api mode th
 is rendered: a malformed verdict is `api_error` (exit 3), with the failure file and the step outputs written.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
-`action.withhold`, `serve` (flags), `serve.bundle`, `serve.markers`, `serve.outcomes` and `serve.render`.
+`action.repository_manifest` (python-auth's raw/REPOSITORY.json, serve-099), `action.withhold`, `serve` (flags), `serve.bundle`, `serve.markers`, `serve.outcomes` and `serve.render`.
 """
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from action import http_identity, withhold  # noqa: E402
+from action import http_identity, repository_manifest, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, is_development, markers, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
@@ -962,6 +962,11 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
                 collected = withhold.apply(bundle.from_directory(art, allow, lim), allow)
             except Refusal as e:
                 raise _with_layout(e, allow, art) from None
+            # serve-099: python-auth's raw/REPOSITORY.json, from the checkout over the files sent, when none was given
+            written = repository_manifest.complete(collected, inputs['profile'], art, env)
+            if written is not None:
+                say('Assure: %s written in the runner: %d repository file(s), commit %s, tree %s' % (
+                    repository_manifest.NAME, len(written['files']), written['commit'], written['tree']))
         elif is_mysql:
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'

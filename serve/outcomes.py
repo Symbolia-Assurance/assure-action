@@ -76,8 +76,10 @@ OUTCOMES = MappingProxyType({name: MappingProxyType({'http': http, 'exit': code,
 # ---------- what was malformed (DIRECTOR-DECISIONS-SERVE-002 Addendum 1, decision 10) ----------
 # A typed failure whose cause is in the customer's input carries `detail.malformation`: {kind, file, line, field,
 # expected}. Every value is closed: `kind` and `expected` come from this table, `field` from FIELDS (or a derive kind
-# from DERIVE_KINDS), `file` is a raw/ name that passes NAME_RE (the allow-list grammar of the profile rows; anything
-# else reads `other`), `line` is a positive integer or None. No value is ever text taken from the input's bytes.
+# from DERIVE_KINDS), `file` is a raw/ name that passes NAME_RE (the allow-list grammar of the profile rows), or, for
+# `file_name` only (issue #940), a name of the same grammar outside raw/ (FILE_RE), so a bundle keyed from its root
+# reads the name the caller sent; anything else reads `other`; `line` is a positive integer or None. No value is ever
+# free text taken from the input's bytes.
 MALFORMATIONS = MappingProxyType({
     # the request
     'body_encoding': 'a body sent with one Content-Length header and no Transfer-Encoding',
@@ -158,7 +160,26 @@ DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_obs
 # issue #171: what a `profile_not_servable` refusal waits for, the same `needs` shape the not-established rows use
 # (serve.render.CLASS_NEEDS): the checker binding, or the report writer's qualification for the profile.
 NOT_SERVABLE_NEEDS = frozenset({'checker_binding', 'writer_qualification'})
-NAME_RE = re.compile(r'raw/(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
+_SEGMENTS = r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}'
+NAME_RE = re.compile(r'raw/' + _SEGMENTS)
+# issue #940: what a `file_name` malformation's `file` may name besides a raw/ name: a name of the same grammar outside
+# raw/ (the bundle root zipped instead of raw/, the mistake the reason then tells the caller to fix). Same alphabet,
+# bounds and no `.`/`..` segment as NAME_RE; other kinds and the profiles' own locator checks keep NAME_RE.
+# REQUIREMENTS_LABEL stays `other` (REFUTATION-r1 F1): it is the lint's fixed label for the body's `requirements` text
+# (serve.lint.REQUIREMENTS_FILE, issue #170), never the name of a file sent.
+FILE_RE = re.compile(r'(?:raw/)?' + _SEGMENTS)
+REQUIREMENTS_LABEL = 'requirements.md'
+
+
+def _closed_file(kind, file):
+    """Whether `file` may stand as a `kind` malformation's `file`."""
+    if not isinstance(file, str):
+        return False
+    if kind == 'file_name' and file != REQUIREMENTS_LABEL:
+        return FILE_RE.fullmatch(file) is not None
+    return NAME_RE.fullmatch(file) is not None
+
+
 # issue #497: a derive_refused malformation's `expected` is the derive kind's own next step where one is written here;
 # a kind without a row keeps the generic derive_refused text. Closed: the text is chosen by the closed `field`, or
 # (issue #1032) for a field without a row of its own by the record's closed `cause_code`, and by nothing else.
@@ -190,7 +211,7 @@ def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None
     if kind not in MALFORMATIONS:
         raise ValueError('unknown malformation kind: %r' % (kind,))
     if file is not None:
-        file = file if isinstance(file, str) and NAME_RE.fullmatch(file) else 'other'
+        file = file if _closed_file(kind, file) else 'other'
     if not (type(line) is int and line > 0):
         line = None
     if field is not None and field not in FIELDS and field not in DERIVE_KINDS and field not in _row_kinds(kinds):
@@ -286,7 +307,7 @@ def is_closed(value, kinds=()):
     return (kind in MALFORMATIONS
             and (generic or _row_expected(kind, value['expected']))
             and (value['file'] is None or value['file'] == 'other'
-                 or (isinstance(value['file'], str) and NAME_RE.fullmatch(value['file']) is not None))
+                 or _closed_file(kind, value['file']))
             and (value['line'] is None or (type(value['line']) is int and value['line'] > 0))
             and (value['field'] is None or value['field'] in FIELDS or value['field'] in DERIVE_KINDS
                  or value['field'] in _row_kinds(kinds)))

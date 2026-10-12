@@ -44,7 +44,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .outcomes import Refusal, malformation
+from .outcomes import REQUIREMENTS_LABEL, Refusal, malformation
 
 MAX_NAME = 200
 # Files the frozen collector writes beside raw/ (its own layout) that the checker contract names under raw/.
@@ -206,7 +206,12 @@ def check_name(name, profile):
         accepted = accepted_inputs(profile)
         shown_inputs = ' and '.join(', '.join(accepted[k]) + ' (%s)' % k
                                     for k in ('required', 'optional') if accepted[k]) or 'no file'
-        raise Refusal('bad_input', '%s is not an input of %s; it accepts %s' % (shown, profile.id, shown_inputs),
+        # issue #940: a name outside raw/ is the bundle root zipped instead of raw/, and the reason says the step;
+        # requirements.md is the body's `requirements` text sent as a file (REFUTATION-r1 F1), and says that field
+        step = ('' if name.startswith('raw/') else
+                '; send the requirements text as the body\'s `requirements` field, not as a file'
+                if name == REQUIREMENTS_LABEL else '; names must start with raw/ (see GET /v1/profiles inputs)')
+        raise Refusal('bad_input', '%s is not an input of %s; it accepts %s%s' % (shown, profile.id, shown_inputs, step),
                       malformation=malformation('file_name', file=name, field='files'), accepted=accepted)
     return name
 
