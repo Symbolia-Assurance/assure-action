@@ -160,22 +160,33 @@ DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_obs
 NOT_SERVABLE_NEEDS = frozenset({'checker_binding', 'writer_qualification'})
 NAME_RE = re.compile(r'raw/(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
 # issue #497: a derive_refused malformation's `expected` is the derive kind's own next step where one is written here;
-# a kind without a row keeps the generic derive_refused text. Closed: the text is chosen by the closed `field` only.
+# a kind without a row keeps the generic derive_refused text. Closed: the text is chosen by the closed `field`, or
+# (issue #1032) for a field without a row of its own by the record's closed `cause_code`, and by nothing else.
 DERIVE_EXPECTED = MappingProxyType({
     'raw_unreadable': 'a JSON object; re-copy the file from the collector\'s out/raw/ or collect again',
     'major_disagreement': 'one major across COLLECTION-SIDECAR.json server_version_num, command_line.json argv[0] and '
                           'the catalog roles; send the files of one collection run',
     'major_not_observed': 'server_version_num in COLLECTION-SIDECAR.json; send the sidecar from the same run',
+    # issue #1032: the HTTP derive's one customer kind is input_fault; its closed cause code chooses the next step
+    'ARTEFACT-DIGEST-MISMATCH': 'the file as collected: re-run the producer and collector with a new key and send the '
+                                'bundle as collected, without editing any file',
+    'UNEXPECTED-ARTEFACT': 'exactly the files raw/COLLECTION-SIDECAR.json lists under sanitized_sha256, plus the '
+                           'sidecar: send every raw/response-heads/<id>.txt the sidecar lists and no other file',
+    'JSON-INVALID': 'a JSON object; re-copy raw/HTTP-FACTS.json and raw/COLLECTION-SIDECAR.json from the collector\'s '
+                    'bundle',
+    'FLAGS-INVALID': 'the seven standing flags as the collector wrote them; re-copy raw/HTTP-FACTS.json and '
+                     'raw/COLLECTION-SIDECAR.json from the collector\'s bundle',
 })
 MALFORMATION_KEYS = ('kind', 'file', 'line', 'field', 'expected')
 
 
-def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None):
+def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None, code=None):
     """The closed description of what was malformed (module comment above). An unknown kind is a ValueError: the
     vocabulary is closed in code, never at run time. `kinds` adds a profile row's own closed derive kinds (its
     `derive_result.kinds`, checked against KIND_RE when the row is loaded) to the fields a malformation may name.
     `expected` (issue #414) replaces the kind's generic text with one built from a profile row by `scope_expected`;
-    any other text falls back to the generic one."""
+    any other text falls back to the generic one. `code` (issue #1032) is a derive's closed cause code: when the field
+    has no DERIVE_EXPECTED row of its own and the code has one, the code's row is the next step."""
     if kind not in MALFORMATIONS:
         raise ValueError('unknown malformation kind: %r' % (kind,))
     if file is not None:
@@ -186,6 +197,8 @@ def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None
         field = None
     if kind == 'derive_refused' and field in DERIVE_EXPECTED:
         expected = DERIVE_EXPECTED[field]
+    elif kind == 'derive_refused' and isinstance(code, str) and code in _CODE_EXPECTED:
+        expected = _CODE_EXPECTED[code]
     elif not _row_expected(kind, expected):
         expected = MALFORMATIONS[kind]
     return {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': expected}
@@ -249,6 +262,9 @@ def scope_expected(kind, profile_id, *, label=None, field=None, max_ids=256, id_
 
 # A derive kind a profile row may declare (serve/profiles.py checks every row kind against it when loading the row).
 KIND_RE = re.compile(r'[a-z][a-z0-9_]{0,63}')
+# issue #1032: the DERIVE_EXPECTED rows keyed on a derive's closed cause code rather than on a kind: the next steps a
+# derive_refused whose field has no row of its own may carry
+_CODE_EXPECTED = MappingProxyType({k: v for k, v in DERIVE_EXPECTED.items() if not KIND_RE.fullmatch(k)})
 
 
 def _row_kinds(kinds):
@@ -263,7 +279,8 @@ def is_closed(value, kinds=()):
     kind = value['kind']
     if kind == 'derive_refused':
         field = value['field'] if isinstance(value['field'], str) else None
-        generic = value['expected'] == DERIVE_EXPECTED.get(field, MALFORMATIONS[kind])
+        generic = (value['expected'] == DERIVE_EXPECTED.get(field, MALFORMATIONS[kind])
+                   or (field not in DERIVE_EXPECTED and value['expected'] in _CODE_EXPECTED.values()))
     else:
         generic = kind in MALFORMATIONS and value['expected'] == MALFORMATIONS[kind]
     return (kind in MALFORMATIONS
@@ -381,6 +398,58 @@ KIND_ACTIONS = {'feedback_body': 'Fix the field the reason names so it has the s
                                  'gives, then send the note again; nothing was stored.'}
 
 
+# issue #1045: what to correct for a free run's profile_refused, per (detail.kind, detail.rule) (QUICKSTART-API.md
+# section 15: "its `action` says what to correct"). Keyed on detail, not attached to the Refusal, because the API
+# rebuilds a child's refusal from its failure envelope's (outcome, reason, detail) (serve/worker.py `_refusal_from`;
+# refutation of PR #1087, F1). `%(path)s` is the checker's repository-relative path; `%(pointer)s` a JSON pointer into
+# the file the reason names. A manifest fault at one of the seven flags is answered with the flags themselves.
+MANIFEST_RECIPE = 'rebuild raw/REPOSITORY.json with the recipe in QUICKSTART-API.md section 15'
+REGENERATE_ACTION = 'Regenerate raw/REPOSITORY.json from the files you send (%s), then send again.' % MANIFEST_RECIPE
+FREE_ACTIONS = {
+    ('input_pin_differs', 'file_sha256'): REGENERATE_ACTION,
+    ('input_pin_differs', 'file_bytes'): REGENERATE_ACTION,
+    ('input_pin_differs', 'tree'): REGENERATE_ACTION,
+    ('input_pin_differs', 'file_absent'): 'Send raw/repository/%(path)s or remove its row from raw/REPOSITORY.json, '
+                                          'then send again.',
+    ('input_pin_differs', 'file_unlisted'): 'Add a row for raw/repository/%(path)s to raw/REPOSITORY.json (' +
+                                            MANIFEST_RECIPE + ') or do not send the file, then send again.',
+    ('representation', 'bundle'): 'Rewrite %(path)s as the reason says (' + MANIFEST_RECIPE + '), then send again.',
+    ('representation', 'manifest'): 'Fix raw/REPOSITORY.json at %(pointer)s as the reason says (' + MANIFEST_RECIPE +
+                                    '), then send again.',
+    ('representation', 'path'): 'Rename raw/repository/%(path)s to a relative path with no `..`, leading `/` or NUL '
+                                'and regenerate raw/REPOSITORY.json (' + MANIFEST_RECIPE + '), then send again.',
+    ('representation', 'unsupported_entry'): 'Remove raw/repository/%(path)s from what you send (the checker reads '
+                                             'regular files only), ' + MANIFEST_RECIPE + ', then send again.',
+    ('representation', 'size'): 'Shrink or leave out raw/repository/%(path)s so the .py files fit the bound the reason '
+                                'gives, regenerate raw/REPOSITORY.json (' + MANIFEST_RECIPE + '), then send again.',
+    ('representation', 'parse'): 'Fix raw/repository/%(path)s so it is UTF-8 Python that parses (the reason gives the '
+                                 'position), regenerate raw/REPOSITORY.json (' + MANIFEST_RECIPE + '), then send again.',
+    ('declaration_invalid', None): 'Fix raw/declaration.json at %(pointer)s so it meets its schema there (the reason '
+                                   'gives the keyword; QUICKSTART-API.md section 15 gives the shape), then send again.',
+    ('declaration_invalid', 'parse'): 'Rewrite raw/declaration.json as UTF-8 JSON (the reason gives the position), '
+                                      'then send again.',
+}
+FLAGS_ACTION = ('Add the seven flags at their standing values to raw/REPOSITORY.json (execution_authorized, '
+                'hardware_authorized, industrial_release_authorized, release_allowed and physical_validation false; '
+                'simulation true; self_approved false), then send again.')
+FLAG_POINTERS = frozenset('/' + k for k in ('execution_authorized', 'hardware_authorized',
+                                            'industrial_release_authorized', 'release_allowed',
+                                            'physical_validation', 'simulation', 'self_approved'))
+
+
+def free_action(detail):
+    """The free run's own action for a profile_refused `detail` (kind, rule, path, pointer), or None."""
+    kind, rule = detail.get('kind'), detail.get('rule')
+    fields = {k: detail.get(k) if isinstance(detail.get(k), str) and detail.get(k) else None
+              for k in ('path', 'pointer')}
+    if (kind, rule) == ('representation', 'manifest') and fields['pointer'] in FLAG_POINTERS:
+        return FLAGS_ACTION
+    template = FREE_ACTIONS.get((kind, rule))
+    if template is None or any('%%(%s)s' % k in template and fields[k] is None for k in fields):
+        return None
+    return template % fields
+
+
 # issue #601: an `unknown_profile` refusal's action lists the served ids it carries in `detail.profiles`, so an agent
 # needs no second round trip to GET /v1/profiles. The list is the row names serve/profiles.py found (each of ID_RE).
 UNKNOWN_PROFILE_ACTION = 'Choose a profile id from GET /v1/profiles: %s.'
@@ -427,6 +496,10 @@ class Refusal(Exception):
             return CODE_ACTIONS[code].replace('{file}', file)
         if self.outcome == 'bad_input' and kind in REQUEST_KINDS:
             return KIND_ACTIONS.get(kind, REQUEST_ACTION)
+        if self.outcome == 'profile_refused' and isinstance(self.detail.get('kind'), str):
+            own = free_action(self.detail)
+            if own is not None:
+                return own
         if self.outcome == 'unknown_profile' and served_profiles(self.detail) is not None:
             return UNKNOWN_PROFILE_ACTION % ', '.join(served_profiles(self.detail))
         return OUTCOMES[self.outcome]['action']

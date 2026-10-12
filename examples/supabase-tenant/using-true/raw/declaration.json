@@ -1,8 +1,6 @@
 {
   "access_paths_complete": true,
-  "administrators": [
-    "db_owner"
-  ],
+  "administrators": [],
   "applications": [
     "user_a",
     "user_b"

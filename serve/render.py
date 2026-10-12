@@ -557,16 +557,50 @@ NO_COLLECTOR_REPRESENTATION = {
     'python-auth-declared-model': 'rewrite the registration the reason names as a static route registration, or move '
                                   'it outside app_roots, and resubmit the repository and declaration'}
 REASON_CLIP = 200
+_STRUCTURAL_REASON_CLIP = 1024
+_PYTHON_INPUT_ACTION = 'review the repository or declaration input the reason names and resubmit'
+_PYTHON_BOUND_ACTION = 'reduce the input to the bound the reason names and resubmit the repository and declaration'
+_STRUCTURAL_REFUSAL = re.compile(r'([a-z][a-z0-9_]+) \(([^,()\r\n]{1,200}), ([1-9][0-9]*),')
 
 
-def representation_action(profile_id=None, reason=None):
+def representation_action(profile_id=None, reason=None, files=()):
     """The next step of a `representation` row for the profile `profile_id` (None or unlisted: the engine-wide text).
     For a profile of NO_COLLECTOR_REPRESENTATION, `reason` (the row's own reason, clipped to REASON_CLIP) follows the
     pointer after ': ' when given; the pointer alone otherwise."""
     pointer = NO_COLLECTOR_REPRESENTATION.get(profile_id)
     if pointer is None:
         return CLASS_ACTIONS['representation']
-    words = str(reason).strip()[:REASON_CLIP] if reason is not None else ''
+    if profile_id == 'python-auth-declared-model' and isinstance(reason, dict):
+        reason = (str(reason.get('reason') or '').strip() or str(reason.get('status_text') or '').strip()
+                  or 'see the reason')
+    original = str(reason).strip() if reason is not None else ''
+    words = original[:REASON_CLIP]
+    if profile_id == 'python-auth-declared-model' and words:
+        if words.startswith('bound:'):
+            return '%s: %s' % (_PYTHON_BOUND_ACTION, words)
+        # A long source locator may finish after the displayed suffix's limit.
+        match = _STRUCTURAL_REFUSAL.search(original[:_STRUCTURAL_REASON_CLIP])
+        if match is None:
+            return '%s: %s' % (_PYTHON_INPUT_ACTION, words)
+        cls, source, line = match.groups()
+        if cls != 'dynamic_registration':
+            pointer = _PYTHON_INPUT_ACTION
+        if files:
+            if '/' not in source:
+                stem = source.replace('.', '/')
+                literal = source.endswith(('.py', '.html'))
+                names = {'raw/repository/' + stem + '.py', 'raw/repository/' + stem + '/__init__.py'}
+                if literal:
+                    names.add('raw/repository/' + source)
+                candidates = {n[len('raw/repository/'):] for f in files if isinstance(f, dict)
+                              and isinstance(n := f.get('path'), str) and n in names}
+                if len(candidates) == 1:
+                    source = next(iter(candidates))
+                elif len(candidates) > 1:
+                    source = ('source ' if literal else 'module ') + source
+                elif not literal:
+                    source = 'module ' + source
+            return '%s at %s:%s; %s: %s' % (cls, source, line, pointer, words)
     return '%s: %s' % (pointer, words) if words else pointer
 
 
@@ -1074,6 +1108,11 @@ def _could_not_look_words(env):
         what = loc.group(0) if loc else 'the facts the machines read'
         return '%s: %s; collect %s' % (REASON_WORDS['not_observed'], what, what)
     # issue #794: a no-collector profile's line carries the first representation row's own reason (its locator)
+    if env.get('profile') == 'python-auth-declared-model':
+        refusal = next((r for r in _rows(env) if r.get('status') in ('representation', 'not_evaluated')),
+                       {'reason': env.get('a0') or next(iter(reasons), '')})
+        action = representation_action(env['profile'], refusal, (env.get('input') or {}).get('files', ()))
+        return '%s; %s' % (REASON_WORDS['representation'], action)
     reason = next((r.get('reason') for r in _rows(env) if r.get('status') == 'representation' and r.get('reason')), None)
     return '%s; %s' % (REASON_WORDS['representation'], representation_action(env.get('profile'), reason))
 
@@ -1466,15 +1505,17 @@ def _meaning_line(envelope):
     - red: the first finding's consequence, then for a disproof "The finding is at <locator> (<object>, <access
       path>)." when its witness names a locator, else "The reading <id> fails; the record carries no witness to point
       at.", and for the other kinds what was chosen or not proven;
-    - yellow: "We could not read the collected files, so nothing below is a finding about your <subject>. <Action>."."""
+    - yellow: "We could not read the collected files (the submitted input for Python), so nothing below is a finding
+      about your <subject>. <Action>."."""
     env = envelope if isinstance(envelope, dict) else {}
     c = env.get('colour')
     if c not in COLOURS:
         return None
     subject, family = _profile_words(env)
     if c == 'yellow':
-        return ('We could not read the collected files, so nothing below is a finding about your %s. %s'
-                % (subject, _sentence(_yellow_action(env))))
+        what = 'submitted input' if env.get('profile') == 'python-auth-declared-model' else 'collected files'
+        return ('We could not read the %s, so nothing below is a finding about your %s. %s'
+                % (what, subject, _sentence(_yellow_action(env))))
     if c == 'green':
         entries = [e for e in env.get('not_established') or () if isinstance(e, dict)]
         n_all = len(_obligation_rows(env))
