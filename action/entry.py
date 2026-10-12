@@ -97,7 +97,8 @@ carry the rows (`serve.render`).
 Exit codes: 0 nothing disproven (or fail-on never), 1 something disproven, 2 bad input, 3 could not look (the
 input-integrity gate stopped the check, or nothing could be read), a typed refusal or a delivery failure
 (`api_unreachable`, `api_error`); an outcome with no exit code of its own (for example `rate_limited`) exits 3.
-`unauthenticated` exits 2, red, as DD-073's table puts auth and key failures (serve-016, REFUTATION-028 F5).
+`unauthenticated` exits 2, red, as DD-073's table puts auth and key failures (serve-016, REFUTATION-028 F5); so does
+`key_expired` (issue #1262).
 `allow-partial` is still accepted and changes no exit (serve-016). Every failure writes the failure envelope at the output path, its
 summary and one `::error` line. The summary names a check only when the check reached the server: the server's check id
 is kept in `detail.check_id` (from its failure envelope, or from a verdict that came back and then could not be used);
@@ -115,6 +116,17 @@ collector's REDACTION-MANIFEST.json (read beside raw/, never uploaded) binds its
 does), the job summary states them in two plain lines: whether the collection session was read-only, and TLS to the
 server as the server reported it (`serve.markers.session_lines`). In api mode the verdict's shape is checked before it
 is rendered: a malformed verdict is `api_error` (exit 3), with the failure file and the step outputs written.
+
+Issue #1186 part 2: on a `postgresql-observed-baseline` verdict (api and local mode alike), after the verdict file is
+written, the Action drafts a declaration from the bundle it already collected and withheld in the runner
+(`draft_proposal`: raw/catalog_snapshot.json and the server major in raw/COLLECTION-SIDECAR.json) and writes two files
+beside the verdict file: assure-declaration-proposal.json (the proposal record, `assure.declare_proposal.propose`) and
+assure-requirements-draft.md (`requirements_draft`). The job summary adds one short section naming the leaves proposed,
+the keys to confirm and the rows that need intent (`proposal_markdown`). Nothing new is sent to the API: the drafter
+reads only the withheld bytes, so the proposal holds no literal the withholding pass replaced. With no snapshot, no
+readable server major, or a major outside 14..18, nothing is drafted and nothing is said; a write fault is one
+`::warning`. The verdict file, the outputs and the exit never change. The drafter is imported only there
+(`_proposal_module`): action/declare_proposal.py in the public tree, assure/declare_proposal.py in this checkout.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
 `action.repository_manifest` (python-auth's raw/REPOSITORY.json, serve-099), `action.withhold`, `serve` (flags), `serve.bundle`, `serve.markers`, `serve.outcomes` and `serve.render`.
@@ -135,7 +147,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from action import http_identity, repository_manifest, withhold  # noqa: E402
+from action import client as client_mod, http_identity, repository_manifest, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, is_development, markers, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
@@ -156,7 +168,26 @@ MAX_NOTICE_NAMES = 20
 NOTICE_LINE = '::notice title=Assure::%(count)d name(s) not read by profile %(profile)s: %(names)s'
 LINT_LINE = 'Assure: lint: %(reading)s; %(findings)d finding(s); nothing was charged; policy exit %(exit)d; %(output)s'
 WITHHELD_LINE = 'Assure: %(withheld)s'
+# issue #1263 (GitHub OIDC sign-in): with no api-key the Action signs in with the job's GitHub OIDC token; with neither,
+# it stops before anything is collected or sent and names the one workflow line to add
+NO_CREDENTIAL_REASON = ('Assure needs this workflow\'s GitHub identity or an api-key. Add `permissions: id-token: write` '
+                        'to the job that runs Assure (keep `contents: read` beside it), or pass api-key from a secret.')
+OIDC_LINE = 'Assure: signed in with this workflow\'s GitHub identity as account %s; the key for this run expires at %s'
 MAX_LINT_LINES = 50
+# Issue #1186 part 2: on the observed PostgreSQL profile the Action drafts a declaration beside the verdict file,
+# from the catalog snapshot it already collected and withheld (`draft_proposal`). serve/envelope.py PROPOSAL_FILE
+# names the same file.
+PROPOSAL_PROFILE = 'postgresql-observed-baseline'
+PROPOSAL_FILE = 'assure-declaration-proposal.json'
+REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
+PROPOSAL_SNAPSHOT = 'raw/catalog_snapshot.json'
+PROPOSAL_SIDECAR = 'raw/COLLECTION-SIDECAR.json'
+PROPOSAL_MAJOR_SOURCE = 'COLLECTION-SIDECAR.json#/server/server_version_num'
+PROPOSAL_LINE = ('Assure drafted a declaration from your database: %(leaves)d leaves proposed, '
+                 '%(confirm)d to confirm — commit it as raw/declaration.json and run postgresql-declared-model '
+                 'to decide %(rows)d rows that need intent.')
+PROPOSAL_FILES_LINE = ('The draft is %(proposal)s (commit its `declaration` object after you confirm each key its '
+                       '`confirm` list names), with %(draft)s beside it. A proposal changes no reading.')
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 _FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, -]{0,100}')     # serve-016: '-' for unresolved-security
 _OUTCOME_SHAPE = re.compile(r'[a-z_]{1,40}')
@@ -661,6 +692,86 @@ def _lint_markdown(found):
     return '\n'.join(lines) + '\n'
 
 
+def _proposal_module():
+    """assure/declare_proposal.py: shipped byte for byte as action/declare_proposal.py in the public tree (build_dist
+    PUBLIC_DECLARATION_ASSETS); in this checkout it is the private package's own module (build_dist LOCAL_ONLY_MODULES:
+    the closure never follows it). Standard library only either way."""
+    try:
+        from action import declare_proposal
+    except ImportError:
+        import assure.declare_proposal as declare_proposal
+    return declare_proposal
+
+
+def _declaration_leaves(node):
+    """How many leaves `node` holds: a scalar, an empty list or an empty object is one."""
+    if isinstance(node, dict):
+        return sum(_declaration_leaves(v) for v in node.values()) if node else 1
+    if isinstance(node, list):
+        return sum(_declaration_leaves(v) for v in node) if node else 1
+    return 1
+
+
+def draft_proposal(files):
+    """Issue #1186 part 2: (proposal record, draft requirements.md text) drafted from `files`, the bundle as collected
+    and withheld in the runner (`action.withhold.apply` has already replaced every SQL literal in the snapshot's policy
+    expressions, so the proposal holds only what the upload holds); None when there is no catalog snapshot or the
+    collector's sidecar names no server major the drafter reads. Nothing here is sent anywhere."""
+    snap, side = files.get(PROPOSAL_SNAPSHOT), files.get(PROPOSAL_SIDECAR)
+    if snap is None or side is None:
+        return None
+    try:
+        snapshot = json.loads(bytes(snap).decode('utf-8'))
+        major = int(str(json.loads(bytes(side).decode('utf-8'))['server']['server_version_num'])) // 10000
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        return None
+    dp = _proposal_module()
+    try:
+        record, notes = dp.propose_with_notes(snapshot, major=major, major_source=PROPOSAL_MAJOR_SOURCE)
+    except ValueError:                       # a major outside 14..18, or a snapshot that is not an object
+        return None
+    return record, dp.requirements_draft(record, notes)
+
+
+def proposal_counts(record, verdict):
+    """{leaves, confirm, rows}: the proposed declaration's leaves (schema and the seven flags aside), the keys its
+    `confirm` list names, and the verdict's rows with an id whose status is needs_intent."""
+    decl = record.get('declaration') or {}
+    leaves = sum(_declaration_leaves(v) for k, v in decl.items() if k != 'schema' and k not in FLAGS)
+    rows = sum(1 for r in verdict.get('rows') or () if isinstance(r, dict) and r.get('id') is not None
+               and r.get('status') == 'needs_intent')
+    return {'leaves': leaves, 'confirm': len(record.get('confirm') or ()), 'rows': rows}
+
+
+def proposal_markdown(counts):
+    """The job summary's short section for a written proposal: fixed words and three counts, no customer text."""
+    return '\n### Declaration proposal\n\n%s %s\n' % (
+        PROPOSAL_LINE % counts, PROPOSAL_FILES_LINE % {'proposal': PROPOSAL_FILE, 'draft': REQUIREMENTS_DRAFT_FILE})
+
+
+def write_proposal(verdict, files, directory, say):
+    """On a postgresql-observed-baseline verdict: PROPOSAL_FILE and REQUIREMENTS_DRAFT_FILE written in `directory`
+    (beside the verdict file) from `files`, and the summary section (`proposal_markdown`) returned; '' on any other
+    profile, when nothing could be drafted, or when a file could not be written (one `::warning`, class name only).
+    The verdict file, the outputs and the exit never change."""
+    if not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE or not isinstance(files, dict):
+        return ''
+    try:
+        drafted = draft_proposal(files)
+        if drafted is None:
+            return ''
+        record, text = drafted
+        counts = proposal_counts(record, verdict)
+        _write_file(directory / PROPOSAL_FILE,
+                    (json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
+        _write_file(directory / REQUIREMENTS_DRAFT_FILE, text.encode('utf-8'))
+    except Exception as w:  # the class name only, never a value
+        say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
+                                                     % type(w).__name__))
+        return ''
+    return proposal_markdown(counts)
+
+
 def _scratch(env):
     temp_root = env.get('RUNNER_TEMP') or None
     if temp_root and not os.path.isdir(temp_root):
@@ -769,9 +880,34 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if on_runner:
             say(_mask(v))
     scrub = _Scrub(first)
+
+    def protect(value):
+        """Issue #1263: a secret learnt during the run is masked (on a runner) and scrubbed before any use."""
+        if on_runner:
+            say(_mask(value))
+        scrub.add((value,))
+        feedback_known_secrets.append(value)
+
+    def oidc_sign_in(url):
+        """Issue #1263: no api-key. With ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN set (the job has `id-token: write`),
+        ask GitHub for this job's OIDC token with audience "assure" and exchange it at POST /v1/auth/oidc for a key
+        that lives for this run; the key is masked before any use. Without them, `bad_input` naming the line to add."""
+        req_url = str(env.get('ACTIONS_ID_TOKEN_REQUEST_URL') or '').strip()
+        req_token = str(env.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN') or '').strip()
+        if not req_url or not req_token:
+            raise Refusal('bad_input', NO_CREDENTIAL_REASON)
+        protect(req_token)
+        proof = client_mod.request_oidc_token(req_url, req_token, audience=client_mod.OIDC_AUDIENCE)
+        protect(proof)
+        got = Client(url, None, sign_in=True).exchange_oidc(proof)
+        protect(got['key'])
+        state['oidc'] = {'account_id': got['account_id'], 'expires_at': got['expires_at']}
+        say(OIDC_LINE % (_cmd_data(got['account_id']), _cmd_data(got['expires_at'])))
+        return got['key']
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
-             'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False}
+             'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
+             'files': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -868,6 +1004,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
 
     def session(files):
         """The session facts the collector's sidecar records, as plain lines for the log and the job summary."""
+        state['files'] = files                    # issue #1186 part 2: the bundle as collected and withheld
         state['session'] = markers.session_lines(files)
         for line in state['session']:
             say('Assure: ' + _cmd_data(line))
@@ -922,7 +1059,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if state['requirements_notice']:
             say('::notice title=Assure requirements::%s' % _cmd_data(state['requirements_notice'], cap=None))
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
-        client = (client_factory or Client)(url, raw_key.strip())
+        key = raw_key.strip() or oidc_sign_in(url)            # issue #1263: no api-key, the GitHub OIDC sign-in
+        client = (client_factory or Client)(url, key)
         state['client'] = client
         allow = allow_list(client.profiles(), inputs['profile'])
         if inputs['scope'] is not None and allow.scope is None:     # serve-007 F2: refused before collection
@@ -1079,13 +1217,18 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         summary += markers.session_markdown(state['session'])
         if state['requirements_notice']:                  # REFUTATION-034 F1/F2: the same words in the summary
             summary += '\n' + render.esc(state['requirements_notice']) + '\n'
+        key_line = render.key_expiry_line(getattr(state.get('client'), 'key_expires', None))    # issue #1262
+        if key_line is not None:
+            summary += '\n' + render.esc(key_line) + '\n'
         notes = render.annotations(verdict)
+        summary = render.upgrade_markdown(verdict) + summary   # launch 2026-10-12: the server's upgrade line, first
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
     try:
         _write_file(out_path, bundle.dumps(verdict))
     except (OSError, ValueError) as w:
         return failed(Refusal('checker_error', 'the verdict file could not be written (%s)' % type(w).__name__))
+    summary += write_proposal(verdict, state['files'], out_path.parent, say)      # issue #1186 part 2
     try:
         _append(env.get('GITHUB_STEP_SUMMARY'), summary)
     except OSError as w:

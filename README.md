@@ -37,12 +37,36 @@ The Action sends catalog facts (roles, memberships, object ACLs, policies, funct
 
 You need:
 
+- the permission `id-token: write` on the job that runs Assure, so the Action signs in with your workflow's GitHub identity and you store no key; or, instead,
 - an Assure API key from Symbolia (it starts with `asr_`), stored as the repository secret `ASSURE_API_KEY`;
 - outbound HTTPS from the runner to `api.symbolia.ai` (port 443);
 - Python 3.14 on the runner and, to collect over a connection, the PostgreSQL client (`psql`);
 - a collection role with read access to settings and statistics only, if you collect over a connection.
 
-The declared profile reads collected files. Put the collector's output in a directory that holds `raw/`, add your declaration as `raw/declaration.json`, commit the directory, then add these steps. The checkout step puts the directory on the runner; for a directory made by an earlier job, fetch it with `actions/download-artifact` instead.
+The smallest job, for files you collected and committed in `collected/`; put it under `jobs:` in your workflow:
+
+```yaml
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          artefacts: collected
+```
+
+Keep `contents: read` beside `id-token: write`: naming one permission sets the others to none. Your Assure account is your GitHub owner, on the free plan the first time it signs in, and each run gets a key that lives for that run only.
+
+With an API key instead, pass it from a secret. The declared profile reads collected files. Put the collector's output in a directory that holds `raw/`, add your declaration as `raw/declaration.json`, commit the directory, then add these steps. The checkout step puts the directory on the runner; for a directory made by an earlier job, fetch it with `actions/download-artifact` instead.
 
 ```yaml
       - name: Check out the repository
@@ -70,7 +94,7 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 
 | Input | Default | Meaning |
 |---|---|---|
-| `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
+| `api-key` | none | Your Assure API key. Pass it from a secret. Leave it out when the job has `id-token: write` under `permissions:`: the Action then signs in with the workflow's GitHub identity. |
 | `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
 | `mode` | `api` | `api`: the check runs on the Assure API. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
@@ -92,12 +116,16 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 |---|---|
 | 0 | Green: nothing disproven within the bounds the first line states; or red with exit 0 because your `fail-on` leaves the disproven status out (or is `never`, which still exits 1 on a prove-class obligation that is not proven), and the first line says so. |
 | 1 | Red: something is disproven and your `fail-on` stops on it, a prove-class obligation is not proven, a status you chose to stop on was read, or under strict (`fail-on: unresolved-security`) an obligation marked `security: true` is unresolved. |
-| 2 | Red: bad input, or an API key that is missing, unknown or revoked. Fix the inputs, the files or the key. |
+| 2 | Red: bad input, or an API key that is missing, unknown or revoked. Fix the inputs, the files or the key. With no key, the job needs `id-token: write` under `permissions:`. |
 | 3 | Yellow: nothing could be read at all, or a typed outcome stopped the check. The failure file holds the reason and what to do. |
 
 The colour is green, red or yellow. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `fail-on: unresolved-security` is the strict preset; it is never the default, and while a profile marks no obligation it changes nothing ("strict: no obligations marked").
 
 The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with the report on also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`.
+
+## What is never charged
+
+Two modes of the Action charge nothing. `mode: lint` collects and checks your files in the runner, then sends them to `POST /v1/lint`, which lists the problems it finds; nothing is charged, but it counts against your rate limits. `mode: local` runs the checker in the runner and sends nothing; it runs only from the Assure source tree, and this published Action refuses it with `bad_input`. Deliberate feedback (the `feedback` input) is free on every plan. A check in `mode: api` and its report can be charged: what a check costs is in [section 7 of the full quickstart](docs/QUICKSTART-ACTION.md#7-the-fail-on-policy-and-exit-codes), and what a report costs in [The report](docs/QUICKSTART-ACTION.md#the-report).
 
 ## Where the verdict goes
 

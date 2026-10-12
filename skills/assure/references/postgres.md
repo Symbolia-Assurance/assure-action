@@ -14,7 +14,36 @@ If the database is on Supabase, tell the operator so before any grant; do not gr
 
 ## 1. Get an API key
 
-Ask Symbolia for a key. It starts with `asr_`, and you receive it once.
+The Action can get one for each run itself, and you store nothing. Give the job that runs Assure the permission `id-token: write`. The Action then asks GitHub for this workflow's identity token, made for Assure, and exchanges it at `POST /v1/auth/oidc` for a key that lives for this run only (at most one hour). Your Assure account is your GitHub owner (the user or organisation that owns the repository), on the free plan the first time it signs in. The key is masked in the job log before it is used.
+
+Naming one permission sets every other permission to none, so keep `contents: read` beside it, or `actions/checkout` fails on a private repository. The permission lets the job ask GitHub for an identity token for this repository; it gives no write access to the repository.
+
+The smallest job, for files you collected and committed in `collected/` (section 9); put it under `jobs:` in a workflow that runs on `pull_request` and on `push` to your default branch:
+
+```yaml
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          artefacts: collected
+```
+
+With no `api-key` and no `id-token: write`, the Action stops before it collects or sends anything, with `bad_input` (exit 2) and a reason that names the line to add. A sign-in the API refuses is `unauthenticated` (exit 2), and `detail.identity` in the failure file names the check that failed; run the job again.
+
+### Or store a key from Symbolia
+
+Ask Symbolia for a key. It starts with `asr_`, and you receive it once. A key you pass is used, and the Action does not ask GitHub for an identity token.
 
 In your repository, open **Settings → Secrets and variables → Actions → New repository secret**:
 
@@ -136,7 +165,7 @@ Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new
 
 To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
-This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
+This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line.
 
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (section 9).
 

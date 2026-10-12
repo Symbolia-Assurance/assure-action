@@ -77,7 +77,7 @@ The coverage is "[E of F <units> <verb>; ]N of M machines read[, K refused]" (wi
 set, refutation-007 G3); the bounds "declared premises: n; version pins: <pins or none>", where an observed profile that
 declares nothing reads "declared premises: none (observed profile)". Heading 2073's build notes, as REFUTATION-028
 corrected them: every green line ends "not established: n — top action: <action>[ — quote USD a–b]", the action of the
-most frequent reason class leaving out the representation fallback when any other class is present (N1; 2129 W2, W3); deviates readings on read machines are their own count,
+most frequent reason class leaving out the representation fallback when any other class is present (N1; 2129 W2, W3) unless no machine's collection was read (issue #1208, `collection_unread`); deviates readings on read machines are their own count,
 "deviations: d", never folded into not-established (N2); a prove-class obligation whose inputs could not be read reads
 "not proven: <id> — input not observed" (N5); the strict preset with no obligation marked adds "strict: no obligations
 marked" after the bounds (N6). The reason words and actions
@@ -103,6 +103,7 @@ bold span and its paragraphs and nothing else; `report_page_line(url)` names the
 """
 from __future__ import annotations
 
+import datetime
 import html
 import re
 import unicodedata
@@ -485,6 +486,25 @@ def report_page_line(url):
     return 'The report page: `%s` (send your API key in the Authorization header to open it).' % str(url).replace('`', '')
 
 
+# issue #1262 (key expiry 1/5): from KEY_WARNING_DAYS before a key's `expires`, the API response (header
+# Assure-Key-Warning) and the Action's summary carry this one line naming the date and the rotation path.
+KEY_WARNING_DAYS = 14
+KEY_EXPIRY_LINE = ('Your API key expires on %s (UTC). Rotate it before then: ask Symbolia to issue a new key for this '
+                   'account and put it in the Authorization header (the Action input api-key).')
+
+
+def key_expiry_line(expires, now=None):
+    """The one warning line for a key whose `expires` (ISO `...Z`) is within KEY_WARNING_DAYS of `now`, else None."""
+    try:
+        at = datetime.datetime.strptime(expires, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if at - now > datetime.timedelta(days=KEY_WARNING_DAYS):
+        return None
+    return KEY_EXPIRY_LINE % expires
+
+
 def first_line(envelope):
     """The first line's coverage phrase: the scope phrase then the machines phrase for a profile scoped by another
     unit, `machines_line` otherwise (None when the envelope carries neither)."""
@@ -524,7 +544,8 @@ def warning_texts(envelope):
         if isinstance(w, list) else []
 
 
-WARNING_TITLES = {'endpoint_non_success': 'Assure endpoint', 'known_limit': 'Assure known limit'}
+WARNING_TITLES = {'endpoint_non_success': 'Assure endpoint', 'known_limit': 'Assure known limit',
+                  'declared_ignored': 'Assure declaration key ignored'}
 
 
 def warning_items(envelope):
@@ -1294,8 +1315,10 @@ def verdict_line(envelope):
     if deviations:
         parts.append('deviations: %d' % deviations)
     parts += ['%s: %d' % (word, n) for word, n in sorted(others.items())]
+    top = top_entry(entries, env)
+    if top is not None and collection_unread(env):   # issue #1208: the gaps below come from the absent collection
+        parts.append(NO_COLLECTION_WORDS)
     tail = 'not established: %d' % len(entries)
-    top = top_entry(entries)
     if top is not None:                               # 2129 W2, W3: the count becomes a path
         tail += ' — top action: %s%s' % (_clip(top.get('action')), _quote_words(top.get('quote')))
     parts.append(tail)
@@ -1313,12 +1336,48 @@ def lead_finding(envelope):
     return found[0] if found else None
 
 
-def top_entry(entries):
+NO_COLLECTION_WORDS = "no machine's collection was read"
+
+
+def _refused_for_representation(r):
+    """Issue #1208 (REFUTATION-r2 F1): a refused entry's stored `status` decides (serve/envelope.py refusal_status
+    gives a `malformed_output:` reason the status representation, and a profile's own refusal row sets it whatever
+    its reason says); only an entry stored without `status` (before serve-071) falls back to its reason prefix."""
+    if not isinstance(r, dict):
+        return False
+    if 'status' in r:
+        return r.get('status') == 'representation'
+    return str(r.get('reason') or '').startswith('representation')
+
+
+def collection_unread(envelope):
+    """Issue #1208: True when no reading was usable (`completion.usable_readings.count` 0) and every refused machine
+    (a scope-limited one aside) was refused for representation, so the other gaps exist only because the collection
+    is absent; False when no machine was refused or any refusal is of another status."""
+    env = envelope if isinstance(envelope, dict) else {}
+    c = env.get('completion') if isinstance(env.get('completion'), dict) else {}
+    u = c.get('usable_readings') if isinstance(c.get('usable_readings'), dict) else {}
+    m = _machines(env)
+    if type(u.get('count')) is not int or u.get('count') != 0 or m is None:
+        return False
+    limited = scope_limited_machines(env)
+    refused = [r for r in m['refused'] if not (isinstance(r, dict) and r.get('machine') in limited)]
+    return bool(refused) and all(_refused_for_representation(r) for r in refused)
+
+
+def top_entry(entries, envelope=None):
     """2129 W2/W3: the not-established entry whose action stands for the most frequent reason class (the first seen on
-    a tie), leaving out the representation fallback when any other class is present; None when there is none."""
+    a tie), leaving out the representation fallback when any other class is present; None when there is none.
+    Issue #1208: when `envelope` says no machine's collection was read (`collection_unread`), the first representation
+    entry is the top action whatever the other classes count, since they exist only because the collection is absent;
+    when no entry is of that class (the refused machines wrote no rows), an entry without an id carrying the profile's
+    representation action (REFUTATION-r2 F2)."""
     entries = [e for e in entries if isinstance(e, dict) and isinstance(e.get('action'), str) and e.get('action')]
     if not entries:
         return None
+    if collection_unread(envelope):
+        return next((e for e in entries if e.get('reason_class') == 'representation'),
+                    {'reason_class': 'representation', 'action': representation_action(envelope.get('profile'))})
     counts, first = {}, []
     for e in entries:
         cls = e.get('reason_class')
@@ -1331,15 +1390,17 @@ def top_entry(entries):
 
 
 TOP_ACTION_RULE = ('the action of the first entry of the most frequent reason class (the first seen on a tie), leaving '
-                   'out representation when any other class is present')
+                   'out representation when any other class is present, unless no usable reading was made and every '
+                   'refused machine was refused for representation')
 
 
-def top_action(entries):
+def top_action(entries, envelope=None):
     """Issue #652: the first line's top action as a checkable object, {text, reason_class, action_source,
     from_entries, rule}: `from_entries` lists the ids of the action-bearing entries of the chosen class, the ones the
     rule counted; `text` is `top_entry`'s action, unclipped (the line clips it to CAP). None when there is no
-    action-bearing entry. The caller emits it only where the line prints one (a green verdict; verdict_line)."""
-    top = top_entry(entries)
+    action-bearing entry. The caller emits it only where the line prints one (a green verdict; verdict_line); pass the
+    `envelope` so the choice is the line's (issue #1208, `collection_unread`)."""
+    top = top_entry(entries, envelope)
     if top is None:
         return None
     counted = [e for e in entries if isinstance(e, dict) and isinstance(e.get('action'), str) and e.get('action')
@@ -1530,7 +1591,7 @@ def _meaning_line(envelope):
         entries = [e for e in env.get('not_established') or () if isinstance(e, dict)]
         n_all = len(_obligation_rows(env))
         head = 'Nothing in your %s contradicts what is known about safe %s setups.' % (subject, family)
-        top = top_entry(entries)
+        top = top_entry(entries, env)
         if not entries or top is None:
             return '%s All %d checks could be completed.' % (head, n_all)
         because = CLASS_BECAUSE.get(top.get('reason_class'), CLASS_BECAUSE['representation'])
@@ -1753,6 +1814,29 @@ def _headline(env):
     line = first_line(env)
     words = _outcome_words(env)
     return words if line is None else '%s. %s' % (line, words)
+
+
+# Launch 2026-10-12: the only link a summary prints, the server's Premium upgrade line (serve/api.py `upgrade_for`):
+# a Stripe Payment Link on buy.stripe.com, with a query of plain characters, as a Markdown autolink. Anything else in
+# `upgrade` is not printed (ACTION-07 holds for every other link-shaped text).
+_UPGRADE_URL = re.compile(r'https://buy\.stripe\.com/[A-Za-z0-9_./-]+(\?[A-Za-z0-9_.~%=&-]*)?')
+
+
+def upgrade_markdown(envelope):
+    """The job summary's first line and a blank line when the answer carries `upgrade` {"url", "line"} (a free account
+    on a server with a Premium payment link): the line's words escaped, then its url as `<url>`. '' when `upgrade` is
+    absent or malformed: a url that is not a buy.stripe.com link, or a line that does not end in its url."""
+    up = envelope.get('upgrade') if isinstance(envelope, dict) else None
+    if not isinstance(up, dict):
+        return ''
+    url, line = up.get('url'), up.get('line')
+    if not (isinstance(url, str) and isinstance(line, str) and _UPGRADE_URL.fullmatch(url)
+            and line.endswith(' ' + url)):
+        return ''
+    words = line[:-len(url)].rstrip()
+    if not words or _CONTROL.search(words) or len(words) > CAP:
+        return ''
+    return '%s <%s>\n\n' % (_esc_line(words), url)
 
 
 def summary_markdown(envelope, now=None):
@@ -2056,11 +2140,15 @@ API_REFUSED = 'The API refused the request before a check started; the collected
 PROFILES_REFUSED = ('The API refused the request for the profile list before anything was collected; nothing from '
                     'your system was sent.')
 POLL_REFUSED = 'The check was sent; the API refused the poll for its result.'
-ANSWERED = ('profiles', 'check', 'poll')          # the request the API answered, as the client records it
+# issue #1263: the GitHub OIDC sign-in (`POST /v1/auth/oidc`) comes before the profile list and any collection
+SIGN_IN_REFUSED = ('The API refused the GitHub sign-in before anything was collected; nothing from your system was '
+                   'sent.')
+ANSWERED = ('sign_in', 'profiles', 'check', 'poll')          # the request the API answered, as the client records it
 
 
 def check_line(failure_envelope):
     """The last line of a failure page, from the request the API answered (`detail.answered`, set by the client):
+    - 'sign_in' (`POST /v1/auth/oidc`, before anything was collected; issue #1263): SIGN_IN_REFUSED;
     - 'profiles' (`GET /v1/profiles`, before anything was collected): PROFILES_REFUSED;
     - the server's check id came back (`detail.check_id` equals `check_id`): 'Check <id>.';
     - 'poll' (`GET /v1/checks/{id}` refused without the id): 'Check <id>. ' + POLL_REFUSED, the id from the 202
@@ -2074,6 +2162,8 @@ def check_line(failure_envelope):
     detail = f.get('detail') if isinstance(f.get('detail'), dict) else {}
     answered = detail.get('answered')
     typed = f.get('outcome') not in ('api_unreachable', 'api_error')
+    if answered == 'sign_in' and typed:
+        return SIGN_IN_REFUSED
     if answered == 'profiles' and typed:
         return PROFILES_REFUSED
     if isinstance(cid, str) and cid and detail.get('check_id') == cid:

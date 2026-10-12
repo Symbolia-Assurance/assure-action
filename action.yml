@@ -12,7 +12,7 @@ inputs:
     required: false
     default: api
   api-key:
-    description: Your Assure API key. Pass it from a secret, for example secrets.ASSURE_API_KEY. Required in api mode.
+    description: Your Assure API key, from a secret such as secrets.ASSURE_API_KEY. Leave it empty when the job has id-token write permission; the Action then signs in with the workflow's GitHub identity.
     required: false
     default: ''
   api-url:

@@ -23,7 +23,7 @@ Rules:
   retried the same way. `rate_limited` waits for `Retry-After` once when it is at most 60 s. A typed failure envelope
   is raised as a Refusal with the server's outcome, reason and check id (an outcome name this client does not know is
   `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
-  poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
+  poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `key_expired`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
 - `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025's, carried by serve-035: lower case, no
@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 
 from serve import bundle, is_development
 from serve.outcomes import OUTCOMES, Refusal
+from serve.secrets import KEY_RE
 
 VERDICT_SCHEMA = 'assure.serve.verdict/v1'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
@@ -87,6 +88,17 @@ CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')
 _TEXT_CAP = 300
 _CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id'})    # set by the client only, never by a server
+# issue #1263 (GitHub OIDC sign-in): with no api-key, the Action asks GitHub for this job's OIDC token with this
+# audience and exchanges it at OIDC_PATH for a key that lives for the run (at most an hour)
+OIDC_AUDIENCE = 'assure'
+OIDC_PATH = '/v1/auth/oidc'
+MAX_OIDC_TOKEN = 8192
+MAX_OIDC_ANSWER = 65536
+OIDC_TIMEOUT_S = 10
+_JWT_RE = re.compile(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
+_ASSURE_KEY_RE = KEY_RE  # issue #1819: serve/secrets.py holds the one key pattern
+_ISO_Z_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+_GH_ACCOUNT_RE = re.compile(r'gh-[a-z0-9][a-z0-9-]{0,59}')
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -170,15 +182,72 @@ def check_base_url(text):
     return parts.scheme, host, text.rstrip('/')
 
 
+def request_oidc_token(request_url, request_token, *, audience=OIDC_AUDIENCE, timeout_s=OIDC_TIMEOUT_S, opener=None,
+                       attempts=2, sleep=time.sleep):
+    """Issue #1263: this job's GitHub Actions OIDC token, from `ACTIONS_ID_TOKEN_REQUEST_URL` (with `audience` added
+    to its query) and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` as the bearer. The URL is https (http only for a loopback host);
+    a redirect is never followed; one retry on a delivery failure. The answer is bounded JSON with a string `value` of
+    three base64url segments, at most MAX_OIDC_TOKEN bytes. Failures are `api_unreachable` / `api_error`; no error text
+    holds the request token or the answer."""
+    reason = 'GitHub did not return a workflow OIDC token'
+    try:
+        parts = urllib.parse.urlsplit(request_url)
+        host = parts.hostname
+    except (ValueError, TypeError, AttributeError):
+        raise Refusal('api_error', reason + ' (the request URL is malformed)') from None
+    if not host or parts.scheme not in ('https', 'http') or (parts.scheme == 'http' and host not in LOOPBACK) \
+            or '@' in parts.netloc or not isinstance(request_token, str) or not request_token \
+            or not _KEY_OK.fullmatch(request_token):
+        raise Refusal('api_error', reason + ' (the request URL or token is malformed)')
+    query = (parts.query + '&' if parts.query else '') + urllib.parse.urlencode({'audience': audience})
+    url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, ''))
+    if opener is None:
+        handlers = [_NoRedirect()]
+        if host in LOOPBACK:
+            handlers.append(urllib.request.ProxyHandler({}))
+        if parts.scheme == 'https':
+            handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + request_token,
+                                               'Accept': 'application/json', 'User-Agent': 'assure-action'})
+    outcome, why = 'api_unreachable', 'connection'
+    for attempt in range(max(1, int(attempts))):
+        if attempt:
+            sleep(1)
+        try:
+            with opener.open(req, timeout=timeout_s) as resp:
+                status, data = resp.status, resp.read(MAX_OIDC_ANSWER + 1)
+        except urllib.error.HTTPError as e:
+            e.close()
+            raise Refusal('api_error', '%s (GitHub answered %d)' % (reason, e.code)) from None
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
+            outcome, why = 'api_unreachable', type(e).__name__
+            continue
+        if status != 200 or len(data) > MAX_OIDC_ANSWER:
+            raise Refusal('api_error', '%s (GitHub answered %d)' % (reason, status))
+        try:
+            value = json.loads(data.decode('utf-8')).get('value')
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            value = None
+        if not isinstance(value, str) or len(value) > MAX_OIDC_TOKEN or not _JWT_RE.fullmatch(value):
+            raise Refusal('api_error', reason + ' (the answer holds no token)')
+        return value
+    raise Refusal(outcome, '%s (it could not be reached: %s)' % (reason, why))
+
+
 class Client:
     def __init__(self, base_url, api_key, *, timeout_s=30, total_wait_s=300, attempts=3, opener=None,
                  sleep=time.sleep, clock=time.monotonic, backoff_s=(1, 2, 4), poll_s=(1, 2, 4, 8, 15),
-                 max_response=MAX_RESPONSE):
+                 max_response=MAX_RESPONSE, sign_in=False):
         self.scheme, self.host, self.base = check_base_url(base_url)
-        if not isinstance(api_key, str) or not api_key or len(api_key) > MAX_KEY or not _KEY_OK.fullmatch(api_key):
+        if sign_in:                              # issue #1263: the one keyless exchange, POST /v1/auth/oidc
+            self._auth = None
+        elif not isinstance(api_key, str) or not api_key or len(api_key) > MAX_KEY or not _KEY_OK.fullmatch(api_key):
             raise Refusal('bad_input', 'api-key is required in api mode, as one line of printable text; pass it '
                                        'from a secret')
-        self._auth = 'Bearer ' + api_key
+        else:
+            self._auth = 'Bearer ' + api_key
+        self.key_expires = None                     # issue #1262: the last answer's Assure-Key-Expires, when it had one
         self.timeout_s = float(timeout_s)
         self.total_wait_s = float(total_wait_s)
         self.attempts = max(1, int(attempts))
@@ -198,6 +267,11 @@ class Client:
         return 'Client(%r)' % self.base
 
     # ---------- one HTTP exchange ----------
+    def _note_key_expires(self, headers):
+        value = headers.get('Assure-Key-Expires') if headers is not None else None
+        if isinstance(value, str) and value:
+            self.key_expires = value
+
     def _read(self, fp, max_response=None):
         cap = self.max_response if max_response is None else max_response
         try:
@@ -211,7 +285,9 @@ class Client:
 
     def _exchange(self, method, path, body=None, headers=None, *, timeout_s=None, max_response=None):
         """(status, Retry-After text or None, body bytes); _Delivery on a connection or read failure."""
-        h = {'Authorization': self._auth, 'Accept': 'application/json', 'User-Agent': 'assure-action'}
+        h = {'Accept': 'application/json', 'User-Agent': 'assure-action'}
+        if self._auth is not None:
+            h['Authorization'] = self._auth
         if body is not None:
             h['Content-Type'] = 'application/json'
         h.update(headers or {})
@@ -220,6 +296,7 @@ class Client:
             resp = self.opener.open(req, timeout=self.timeout_s if timeout_s is None else timeout_s)
         except urllib.error.HTTPError as e:
             try:
+                self._note_key_expires(e.headers)
                 return e.code, e.headers.get('Retry-After') if e.headers is not None else None, self._read(e, max_response)
             finally:
                 e.close()
@@ -233,6 +310,7 @@ class Client:
         except http.client.HTTPException as e:
             raise _Delivery('error', 'the API answer is malformed (%s)' % type(e).__name__) from None
         try:
+            self._note_key_expires(resp.headers)
             return resp.status, resp.headers.get('Retry-After'), self._read(resp, max_response)
         finally:
             resp.close()
@@ -320,6 +398,19 @@ class Client:
         return self.backoff_s[min(attempt - 1, len(self.backoff_s) - 1)]
 
     # ---------- the routes ----------
+    def exchange_oidc(self, token):
+        """Issue #1263: `POST /v1/auth/oidc` {"token": token}; {key, expires_at, account_id} from the answer, each
+        checked for shape (else `api_error`, never quoting the answer). A refused proof is the server's typed
+        refusal (`unauthenticated` with `detail.identity`, or `server_busy`)."""
+        body = json.dumps({'token': token}, separators=(',', ':')).encode('ascii')
+        status, doc = self._call('POST', OIDC_PATH, body, route='sign_in')
+        got = {k: doc.get(k) for k in ('key', 'expires_at', 'account_id')}
+        if status != 200 or not isinstance(got['key'], str) or not _ASSURE_KEY_RE.fullmatch(got['key']) \
+                or not isinstance(got['expires_at'], str) or not _ISO_Z_RE.fullmatch(got['expires_at']) \
+                or not isinstance(got['account_id'], str) or not _GH_ACCOUNT_RE.fullmatch(got['account_id']):
+            raise Refusal('api_error', 'the sign-in answer is not {key, expires_at, account_id}')
+        return got
+
     def profiles(self):
         """The `GET /v1/profiles` answer (the served profiles' input allow-lists and the global limits)."""
         status, doc = self._call('GET', '/v1/profiles', route='profiles')

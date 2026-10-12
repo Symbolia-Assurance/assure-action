@@ -44,7 +44,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .outcomes import REQUIREMENTS_LABEL, Refusal, malformation
+from .outcomes import REQUIREMENTS_LABEL, Refusal, file_pointer, json_pointer, malformation
 
 MAX_NAME = 200
 # Files the frozen collector writes beside raw/ (its own layout) that the checker contract names under raw/.
@@ -183,25 +183,26 @@ def accepted_inputs(profile):
 
 def check_name(name, profile):
     """Return `name` when it is a safe relative POSIX path on the profile's allow-list; else `bad_input`."""
+    at = file_pointer(name)                         # issue #644: /files/<name>, or /files for a name outside the grammar
     if not isinstance(name, str):
-        raise Refusal('bad_input', 'a file name is not a string', malformation=malformation('file_name', field='files'))
+        raise Refusal('bad_input', 'a file name is not a string', malformation=malformation('file_name', field='files', pointer=at))
     shown = name[:80].encode('unicode_escape').decode('ascii')
     if not name or len(name) > MAX_NAME:
         raise Refusal('bad_input', 'file name empty or longer than %d characters' % MAX_NAME,
-                      malformation=malformation('file_name', field='files'))
+                      malformation=malformation('file_name', field='files', pointer=at))
     if any(ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xa0 for c in name):
         raise Refusal('bad_input', 'file name holds a control character: %s' % shown,
-                      malformation=malformation('file_name', field='files'))
+                      malformation=malformation('file_name', field='files', pointer=at))
     if '\\' in name or name.startswith('/'):
         raise Refusal('bad_input', 'file name is absolute or holds a backslash: %s' % shown,
-                      malformation=malformation('file_name', field='files'))
+                      malformation=malformation('file_name', field='files', pointer=at))
     if any(seg in ('', '.', '..') for seg in name.split('/')):
         raise Refusal('bad_input', 'file name has an empty, "." or ".." segment: %s' % shown,
-                      malformation=malformation('file_name', field='files'))
+                      malformation=malformation('file_name', field='files', pointer=at))
     first = name.split('/', 1)[0]                   # serve-006 gap 2: the server writes context/, never a customer;
     if first.casefold() == SERVING_DIR or unicodedata.normalize('NFKC', first).casefold() == SERVING_DIR:   # 007 B2
         raise Refusal('bad_input', 'file name is under %s/, which the server writes: %s' % (SERVING_DIR, shown),
-                      malformation=malformation('file_name', field='files'))
+                      malformation=malformation('file_name', field='files', pointer=at))
     if _rule_for(name, profile) is None:
         accepted = accepted_inputs(profile)
         shown_inputs = ' and '.join(', '.join(accepted[k]) + ' (%s)' % k
@@ -212,7 +213,7 @@ def check_name(name, profile):
                 '; send the requirements text as the body\'s `requirements` field, not as a file'
                 if name == REQUIREMENTS_LABEL else '; names must start with raw/ (see GET /v1/profiles inputs)')
         raise Refusal('bad_input', '%s is not an input of %s; it accepts %s%s' % (shown, profile.id, shown_inputs, step),
-                      malformation=malformation('file_name', file=name, field='files'), accepted=accepted)
+                      malformation=malformation('file_name', file=name, field='files', pointer=at), accepted=accepted)
     return name
 
 
@@ -224,34 +225,47 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
     doc = parse_json(body, limits)
     optional = ({k for k, _ in SCOPE_FIELDS} | set(REQUIREMENT_FIELDS)) if with_scope else set()
     if not isinstance(doc, dict) or not {'profile', 'files'} <= set(doc) <= {'profile', 'files'} | optional:
-        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s'
+        # issue #644: the pointer and the reason name the first key the body lacks or holds beyond the rule, when the
+        # key is of the closed pointer alphabet (else the reason keeps the rule alone)
+        missing = sorted({'profile', 'files'} - set(doc)) if isinstance(doc, dict) else []
+        extra = sorted(set(doc) - {'profile', 'files'} - optional) if isinstance(doc, dict) else []
+        at = json_pointer(missing[0]) if missing else json_pointer(extra[0]) if extra else None
+        why = ('' if at is None else '; it lacks the key %s' % missing[0] if missing
+               else '; it holds the key %s' % extra[0])
+        raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s%s'
                       % (' (and optionally scope, scope_binding, accepted_scope_ref, requirements, repository, commit '
-                         'and provenance)' if with_scope else ''),
-                      malformation=malformation('body_shape'))
+                         'and provenance)' if with_scope else '', why),
+                      malformation=malformation('body_shape', pointer=at))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
-        raise Refusal('bad_input', 'profile must be a string and files an object', malformation=malformation('body_shape'))
+        bad = 'profile' if not isinstance(profile_id, str) else 'files'
+        raise Refusal('bad_input', 'profile must be a string and files an object; %s is not' % bad,
+                      malformation=malformation('body_shape', pointer=json_pointer(bad)))
     if len(enc) > limits.files:
         raise Refusal('oversize_input', '%d files; the limit is %d' % (len(enc), limits.files))
     files = {}
     for name, value in enc.items():
-        if not isinstance(value, str):
-            raise Refusal('bad_input', 'a file value is not a base64 string',
-                          malformation=malformation('file_value', file=name, field='files'))
-        # issue #939: name the file (not yet checked, so quoted as check_name does) and its size, as the files stage does
+        # issues #939, #644: name the file (not yet checked, so quoted as check_name does), as the files stage does
         shown = name[:80].encode('unicode_escape').decode('ascii')
+        if not isinstance(value, str):
+            raise Refusal('bad_input', 'the value of %s is not a base64 string' % shown,
+                          malformation=malformation('file_value', file=name, field='files',
+                                                  pointer=file_pointer(name, 'file_value')))
         if len(value) // 4 * 3 > limits.file_bytes + 2:
             raise Refusal('oversize_input', '%s is about %d bytes; the limit is %d'
                           % (shown, len(value) // 4 * 3, limits.file_bytes),
-                          malformation=malformation('oversize_input', file=name, field='files'))
+                          malformation=malformation('oversize_input', file=name, field='files',
+                                                  pointer=file_pointer(name, 'oversize_input')))
         try:
             data = base64.b64decode(value.encode('ascii'), validate=True)
         except (binascii.Error, ValueError, UnicodeEncodeError):
-            raise Refusal('bad_input', 'a file value is not strict base64',
-                          malformation=malformation('file_value', file=name, field='files')) from None
+            raise Refusal('bad_input', 'the value of %s is not strict base64' % shown,
+                          malformation=malformation('file_value', file=name, field='files',
+                                                  pointer=file_pointer(name, 'file_value'))) from None
         if len(data) > limits.file_bytes:
             raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (shown, len(data), limits.file_bytes),
-                          malformation=malformation('oversize_input', file=name, field='files'))
+                          malformation=malformation('oversize_input', file=name, field='files',
+                                                  pointer=file_pointer(name, 'oversize_input')))
         files[name] = data
     if not with_scope:
         return profile_id, files
@@ -261,7 +275,8 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
             continue
         if doc[key] is None:
             raise Refusal('bad_input', '%s is null; leave it out when it is not sent' % key,
-                          malformation=malformation(kind, field=None if key == 'scope' else key))
+                          malformation=malformation(kind, field=None if key == 'scope' else key,
+                                                    pointer=json_pointer(key)))
         asked[key] = doc[key]
     asked.update(upload_fields({k: doc[k] for k in REQUIREMENT_FIELDS if k in doc}))
     return profile_id, files, asked
@@ -281,7 +296,8 @@ def check_requirements(text):
     bound). Its content is never quoted."""
     def bad(why, line=None):
         return Refusal('bad_input', 'requirements %s' % why,
-                       malformation=malformation('requirements', line=line, field='requirements'))
+                       malformation=malformation('requirements', line=line, field='requirements',
+                                                 pointer=json_pointer('requirements')))
     if not isinstance(text, str):
         raise bad('must be text')
     try:
@@ -309,7 +325,8 @@ def upload_fields(fields):
         out['requirements'] = check_requirements(fields['requirements'])
 
     def bad(why, field):
-        return Refusal('bad_input', why, malformation=malformation('provenance', field=field))
+        return Refusal('bad_input', why, malformation=malformation('provenance', field=field,
+                                                                   pointer=json_pointer(field)))
     repo, commit = fields.get('repository'), fields.get('commit')
     if ('repository' in fields) != ('commit' in fields):
         raise bad('repository and commit travel together: send both or neither', 'repository')

@@ -5,7 +5,7 @@
 > - [ ] The collection role exists, with `CONNECT` on your database (section 2).
 > - [ ] The runner can read the server's configuration files, or has copies it can read (section 6). Managed PostgreSQL: skip this line.
 > - [ ] The connection string works from the runner: `psql '<the connection string>' -c 'SELECT current_user'` prints `assure_collector` (section 3).
-> - [ ] The API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
+> - [ ] The job that runs Assure has `id-token: write` under `permissions:`, or an API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
 > - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
 
 **Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository with your declaration, checked free in process (the API quick start, section 15).
@@ -14,7 +14,7 @@ Known-vulnerability scanners check your code against a list of what has broken b
 
 Assure is the check that reads green only when nothing it examined is disproven. It tells you the bounds of what it has established, and why it matters. In an age where machines generate code at a volume nobody can read, Assure shows that each change maintains its baseline security and reliability, and stays true to any formalised requirements.
 
-The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with your API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
+The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with a key: one it gets for this run from your workflow's GitHub identity, or your own API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence: 17 and 18.
 
@@ -50,7 +50,36 @@ The requirements text comes from the checked-out workspace, not fetched from the
 
 ## 1. Get an API key
 
-Ask Symbolia for a key. It starts with `asr_`, and you receive it once.
+The Action can get one for each run itself, and you store nothing. Give the job that runs Assure the permission `id-token: write`. The Action then asks GitHub for this workflow's identity token, made for Assure, and exchanges it at `POST /v1/auth/oidc` for a key that lives for this run only (at most one hour). Your Assure account is your GitHub owner (the user or organisation that owns the repository), on the free plan the first time it signs in. The key is masked in the job log before it is used.
+
+Naming one permission sets every other permission to none, so keep `contents: read` beside it, or `actions/checkout` fails on a private repository. The permission lets the job ask GitHub for an identity token for this repository; it gives no write access to the repository.
+
+The smallest job, for files you collected and committed in `collected/` (section 9); put it under `jobs:` in a workflow that runs on `pull_request` and on `push` to your default branch:
+
+```yaml
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          artefacts: collected
+```
+
+With no `api-key` and no `id-token: write`, the Action stops before it collects or sends anything, with `bad_input` (exit 2) and a reason that names the line to add. A sign-in the API refuses is `unauthenticated` (exit 2), and `detail.identity` in the failure file names the check that failed; run the job again.
+
+### Or store a key from Symbolia
+
+Ask Symbolia for a key. It starts with `asr_`, and you receive it once. A key you pass is used, and the Action does not ask GitHub for an identity token.
 
 In your repository, open **Settings → Secrets and variables → Actions → New repository secret**:
 
@@ -172,7 +201,7 @@ Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new
 
 To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
-This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
+This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line.
 
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (section 9).
 
@@ -187,6 +216,8 @@ The first line of the job summary, and the Action's last log line, starts with a
 - **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 3 of 40; deviations: 1; vacuous: 13; not established: 23 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: \<action>". One line follows for each obligation that could not be established, "\<id>: \<reason> — \<owner>: \<what it needs>". Green never means more than this.
 - **red**: something is disproven, for example "red: ...; disproven: \<obligation> — \<object>, \<access path>, \<locator>". It exits 1 when your `fail-on` names the status (`fails` by default) and the disproof is yours to fix. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — \<obligation>", never "disproven".
 - **yellow** (exit 3): nothing could be read at all, "yellow: could not look: \<reason>; \<action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
+
+On the free plan, one upgrade line sits above that first line, at the very top of the summary: it names Premium and links to a checkout page already filled in with your account.
 
 Under the first line, one sentence says what it means in plain words. For a green PostgreSQL run: "Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 40 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it." For red, the consequence of what was disproven and where; for yellow, that nothing below is a finding and what to do. Each disproven or deviating obligation is listed under "Why it matters" with its statement and its consequence ("Consequence not yet stated for \<obligation>." until the profile states one).
 
@@ -204,7 +235,7 @@ If a reading looks wrong, send a `wrong_reading` note through the [feedback rout
 
 | Input | Default | Meaning |
 |---|---|---|
-| `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
+| `api-key` | none | Your Assure API key. Pass it from a secret. Leave it out when the job has `id-token: write` under `permissions:`: the Action then signs in with the workflow's GitHub identity (section 1). |
 | `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
 | `mode` | `api` | `api`: the check runs on the Assure API. `lint`: a pre-flight that sends the same files to `POST /v1/lint` and runs no check; nothing is charged. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
@@ -356,7 +387,7 @@ A vacuous reading only says that a domain was empty. A run whose only verdicts a
 
 The first line counts the machines read out of every machine the profile checks, "5 of 8 machines read, 3 refused" (", K refused" only when a machine was refused): a machine that gave no reading at all is listed as refused with the reason "no readings for this machine". When Assure worked the list out from the readings because the checker did not report it, the count ends "(inferred)". The bounds follow: "declared premises: n" (premises you declared; "none (observed profile)" for an observed profile that has none) and "version pins: major 18" (the server's observed major; "none" when the readings name none). Under the meaning sentence, the summary answers three questions in three short sentences, "Usable readings: u of n. Coverage complete: yes or no. Job stops: no (exit 0 by your fail-on), or yes (exit 1).", followed by the collection time and the loaded state when the collector records them, and lists the obligations the profile version cannot yet check (representation, missing method) under their own heading, "Unsupported by this profile version: n".
 
-If the checker itself fails, the result is the typed outcome `checker_error` (exit 3) under every policy, `never` included. A check is charged once the checker has started, whatever its result, `checker_error` and `checker_timeout` included. One failure is not charged: the checker's own internal error, a `checker_error` whose `detail.rule` is `internal_error`. A request refused before the checker starts is never charged, and neither is a check cut short by a server restart; it still counts against your rate limits. A result is returned whenever one can be produced: when the checker's output for one machine is malformed, that machine is listed under "Machines not read" with its reason (`malformed_output: ...`, or `server_fault: ...` when the server could not write it) and the other machines keep their readings. When no result can be produced, the failure's `detail.malformation` says what was malformed: a fixed kind, the file, the line, the field and the expected form, never your text.
+If the checker itself fails, the result is the typed outcome `checker_error` (exit 3) under every policy, `never` included. A check is charged once the checker has started, whatever its result, `checker_error`, `checker_timeout`, `checker_cpu_limit` and `checker_memory_limit` included. One failure is not charged: the checker's own internal error, a `checker_error` whose `detail.rule` is `internal_error`. A request refused before the checker starts is never charged, and neither is a check cut short by a server restart; it still counts against your rate limits. A result is returned whenever one can be produced: when the checker's output for one machine is malformed, that machine is listed under "Machines not read" with its reason (`malformed_output: ...`, or `server_fault: ...` when the server could not write it) and the other machines keep their readings. When no result can be produced, the failure's `detail.malformation` says what was malformed: a fixed kind, the file, the line, the field and the expected form, never your text.
 
 The Action sets five outputs: `verdict-path`, `outcome`, `exit-code`, `colour` (`green`, `red` or `yellow`; a failure is `red` for bad input or a bad key, exit 2, and `yellow` otherwise) and `not-established` (how many obligations could not be established; empty for a failure). When a requirements file was sent, it adds `requirements-not-established` and `requirements-disproven`.
 
@@ -368,6 +399,8 @@ The Action sets five outputs: `verdict-path`, `outcome`, `exit-code`, `colour` (
   - `TLS to the server: yes (<protocol>, <cipher>, <bits> bits)`, `no` or `not recorded`.
 
   Behind a connection pooler they describe the pooler's session to the server, not your runner's connection to the pooler. The job log carries the same two lines.
+- **The declaration proposal.** On the observed profile (`postgresql-observed-baseline`), the Action writes `assure-declaration-proposal.json` beside the verdict file. It is a declaration drafted from your own catalog snapshot, in the runner, from the files already collected and withheld; nothing more is sent. Its `declaration` object validates as `raw/declaration.json` for `postgresql-declared-model`. Each value names where it came from in `sources`, and a key the snapshot gives no basis for is marked `unread` and left out. The keys in `confirm` are judgements: check each one, then commit the `declaration` object as `raw/declaration.json` and run `postgresql-declared-model` to decide the rows that need intent. The job summary adds one section, "Assure drafted a declaration from your database: N leaves proposed, M to confirm — commit it as raw/declaration.json and run postgresql-declared-model to decide K rows that need intent.", and each `needs_intent` row's next step names the file. The proposal changes no reading, exit or output until you commit it. No file is written when the collector's sidecar names no server major from 14 to 18.
+- **The requirements draft.** Beside it, `assure-requirements-draft.md` states each proposed key as one plain sentence marked "(proposed — confirm before committing)", then lists the keys the snapshot gives no basis for. Use it to review the proposal in words, or as the start of your `requirements.md`.
 - **Annotations.** The first line is the first notice annotation. Each `fails` reading is an error annotation. Each `deviates` reading is a warning annotation. Under strict, each obligation that could not be established is a notice annotation. At most 50 of each appear.
 
 When no obligation reaches a verdict, the summary says "No verdicts" and the first line says "nothing could be established". It never means "no issues".
@@ -612,6 +645,7 @@ The last line of the summary says what left your runner:
 | `oversize_input` | 2 | A file, the file count or the total size is over the limit. | Remove files the profile does not read. Limits: 4 MiB per file, 64 files, 8 MiB in total. |
 | `unknown_profile` | 2 | The API serves no profile with that name. | Use a profile the API lists. |
 | `unauthenticated` | 2 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
+| `key_expired` | 2 | The API key is past its expiry date. | Ask Symbolia for a new key and put it in the `ASSURE_API_KEY` secret. |
 | `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits once for a wait of up to 60 seconds. | Run again later. |
 | `credit_exhausted` | 3 | The account's free credit is spent. | Contact Symbolia. |
 | `server_busy` | 3 | The API's queue stayed full after three attempts. | Run again in a minute. |
@@ -622,10 +656,12 @@ The last line of the summary says what left your runner:
 | `server_fault` | 3 | A record the API keeps for this account no longer reads as it was written. No check ran and nothing was charged. | Report the check id to Symbolia. |
 | `collector_cannot_connect` | 3 | The first query could not reach the database, or `psql` is missing. | Check the secret, the network path from the runner and `pg_hba.conf`. Install `postgresql-client`. |
 | `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad (a superuser, or a member of `pg_monitor` or `pg_stat_scan_tables`; the reason says what to grant), the major is outside 14 to 18, or the role name does not match (behind a connection pooler, the reason says which name to set as `collection-role`; section 6). Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when a collection mixes this collector's output with the earlier collector's; when files from the earlier collector hold a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line that collector withheld; and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file, or its `REDACTION-MANIFEST.json` is missing, records a different digest for that file, or disagrees with the sidecar. The reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. | Read the reason. For a role refusal, recreate the collection role as in section 2. For a missing or mismatched `COLLECTION-SIDECAR.json` or `REDACTION-MANIFEST.json`, give `raw/`, the sidecar and the manifest from one collector run as it wrote them (section 9). For a withheld `pg_hba.conf` rule in the earlier collector's files: collect again with this Action. If you cannot: remove quotes a name does not need, write an `@file` list's names inline, use a `+group` role in place of a list, or list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted. |
-| `profile_not_servable` | 3 | The server holds no qualified checker for this profile. | Use a served profile. |
+| `profile_not_servable` | 3 | The server holds no qualified checker for this profile, or the checker it holds cannot import a module the server tree lacks (`detail.rule: pipeline_import`; not charged). | Use a served profile. For `pipeline_import`, nothing on your side opens it; Symbolia redeploys. |
 | `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. | Read the reason. Check that collection completed. |
 | `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. | Report the check id to Symbolia, or submit the check again when the reason says so. |
 | `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting. | Run again. If it repeats, report the check id to Symbolia. |
+| `checker_cpu_limit` | 3 | The check used more than its CPU time limit. | Run again. If it repeats, report the check id to Symbolia. |
+| `checker_memory_limit` | 3 | The check used more than its memory limit. | Run again. If it repeats, report the check id to Symbolia. |
 
 A collection with gaps is still a verdict. Each gap reads **not observed** with the place it was looked for.
 
@@ -826,7 +862,7 @@ Choose one kind:
 
 - `friction`: setup, input shape, documentation or a next action that got in your way. Say what cost the step and what would have helped.
 - `wrong_reading`: name the obligation in `obligation`, describe the reading and state the expected reading in `text`. This reports a disagreement; it does not change the verdict.
-- `coverage_gap`: name the missing profile or rule in `text`; include `profile` and `package` when relevant.
+- `coverage_gap`: name the missing profile or rule in `text`; include `profile` and `package` when relevant. `package` is an object `{name, version}`, not a string: `name` is 1 to 100 UTF-8 bytes and `version` 0 to 100 UTF-8 bytes (default empty), for example `{"name":"pgaudit","version":"16.1"}`.
 - `model_proposal_intent`: describe a model you would like to contribute. This submits intent only. Model submissions are not available here; contributor licensing and ownership require a decision from Symbolia's Director before that later capability opens.
 
 ### Feedback input
@@ -857,15 +893,22 @@ A feedback error adds a typed outcome to the job summary; it never changes the c
 | `text` | yes | 1 to 4,096 UTF-8 bytes; valid Unicode, no control characters except newline and tab. |
 | `check_id` | no | 32 lower-case hexadecimal characters, or null. The direct API accepts an unknown id. |
 | `profile` | no | 1 to 64 characters: first a letter or digit, then letters, digits, underscores, dots or hyphens; or null. |
+| `profile_wanted` | no | 1 to 64 characters: first a letter or digit, then letters, digits, underscores, dots or hyphens; or null. The profile a `coverage_gap` note wishes existed; the digest counts notes by it. |
 | `obligation` | no | 1 to 64 letters, digits, underscores, dots or hyphens; or null. |
 | `package` | no | An object with required `name` (1 to 100 UTF-8 bytes), optional `version` (0 to 100 UTF-8 bytes, default empty), and no other keys; or null. No control characters. |
 | `agent` | no | An object with optional `model_id` and `client` (each 0 to 100 UTF-8 bytes, default empty), and no other keys; or null. No control characters. |
 | `consent_follow_up` | no | Boolean; false by default. Null also means false. True permits follow-up about this note. |
 
-A refusal of the body's fields (an unknown key, a missing `kind` or `text`, a wrong type or form) is `bad_input` (400) whose `detail.accepted_fields` lists the eight keys above, sorted, and whose `detail.kinds` lists the four kinds, so one refusal names the whole accepted shape. The reason for an unknown key names that key; no value is ever echoed. A body that is not UTF-8, is not JSON or repeats a key is refused before its fields are read: `bad_input` (400) with `detail.malformation.kind` `body_not_utf8` or `body_not_json`, and without `accepted_fields` or `kinds`.
+Every field in one body, as the route accepts it:
+
+```text
+{"kind":"coverage_gap","text":"No rule reads the pgaudit settings. I expected a reading of pgaudit.log.","check_id":"0123456789abcdef0123456789abcdef","profile":"postgresql-declared-model","profile_wanted":"postgresql-pgaudit","obligation":null,"package":{"name":"pgaudit","version":"16.1"},"agent":{"model_id":"example-model-1","client":"example-agent/1.0"},"consent_follow_up":false}
+```
+
+A refusal of the body's fields (an unknown key, a missing `kind` or `text`, a wrong type or form) is `bad_input` (400) whose `detail.accepted_fields` lists the nine keys above, sorted, and whose `detail.kinds` lists the four kinds, so one refusal names the whole accepted shape. The reason for an unknown key names that key; no value is ever echoed. A refusal of one named field also carries `detail.malformation.pointer`, that field's JSON pointer (such as `/check_id`); a body that is not one JSON object carries none. A body that is not UTF-8, is not JSON or repeats a key is refused before its fields are read: `bad_input` (400) with `detail.malformation.kind` `body_not_utf8` or `body_not_json`, and without `accepted_fields` or `kinds`.
 
 The request body limit is 16,384 bytes. Feedback is free on every plan, with no charge or usage ledger row. Each POST uses the same per-account minute rate window as checks; a repeat still uses that window. Up to 100 new notes per account per UTC day are accepted. Within one account and UTC day, the same kind, check id and exact text returns the first note with `duplicate` set to `true`, without a new row or another daily slot. Changing other metadata alone does not change that identity. A rate refusal is `rate_limited` (429) with `Retry-After`; a daily refusal names `window` set to `day` and the wait until midnight UTC.
 
-POST returns 200 with `schema`, `id`, `received_at`, `kind`, `check_id`, `profile`, `obligation`, `package`, `sha256`, `duplicate` and the response flags; it does not echo the text. `check_id`, `profile` and `obligation` are the stored row's values (null when not sent) and `sha256` is the stored row's deduplication SHA-256, the hash of `kind|check_id|text` rather than of the text alone, so a record can cite the note without trusting its own request body; on a duplicate they are the first row's. `GET /v1/feedback/{id}` returns 200 with the stored row, including text, the account and key ids, timestamp, metadata, the deduplication SHA-256, `check_known`, `rows_unreadable` and response flags. `check_known` records whether that account held a verdict for the supplied check id at submission time; it is not a live lookup. `rows_unreadable` counts unreadable lines in that note's UTC-day file, including zero. `status` is the note's state as Symbolia acts on it: `received` until then, `in_pr` with the pull request number `pr`, `merged` with `release`, the engine commit that ships the change, or `declined` with a `reason`; `updated_at` is when it was set. When the state cannot be read just now it reads `unavailable` with a `reason`, and the note still answers. A malformed, absent or another account's id returns the same `not_found` (404). Neither route accepts query parameters.
+POST returns 200 with `schema`, `id`, `received_at`, `kind`, `check_id`, `profile`, `obligation`, `package`, `sha256`, `duplicate`, `related` and the response flags; it does not echo the text. `check_id`, `profile` and `obligation` are the stored row's values (null when not sent) and `sha256` is the stored row's deduplication SHA-256, the hash of `kind|check_id|text` rather than of the text alone, so a record can cite the note without trusting its own request body; on a duplicate they are the first row's. `related` lists this account's other notes of the same kind and profile whose `status` is not `merged` or `declined`, among its notes of the newest 7 UTC-day files, newest first and at most 10, each as `id`, `kind`, `profile` and `status`, so a second note on one gap can see the first; it is empty when the note has no profile. `GET /v1/feedback/{id}` returns 200 with the stored row, including text, the account and key ids, timestamp, metadata, the deduplication SHA-256, `check_known`, `rows_unreadable` and response flags. `check_known` records whether that account held a verdict for the supplied check id at submission time; it is not a live lookup. `rows_unreadable` counts unreadable lines in that note's UTC-day file, including zero. `status` is the note's state as Symbolia acts on it: `received` until then, `in_pr` with the pull request number `pr`, `merged` with `release`, the engine commit that ships the change, or `declined` with a `reason`; `updated_at` is when it was set. When the state cannot be read just now it reads `unavailable` with a `reason`, and the note still answers. A malformed, absent or another account's id returns the same `not_found` (404). Neither route accepts query parameters.
 
-Notes are kept for 12 months, with retention and removal on request handled by the operator. The daily digest reads notes without changing them: counts by kind, packages by kind with distinct account counts, bounded text from every kind for triage regardless of consent, notes consenting to follow-up, and friction notes by check id. Consent controls follow-up only; it does not hide a submitted note from triage. Account ids appear as stable short hashes. Customer text appears only in fenced data blocks marked `DATA>`, with control and format characters removed and display length bounded. The digest reports skipped or unreadable files and unreadable rows, including zero. When the feedback collection cannot be accessed, the digest stops with an error instead of reporting an empty day. Feedback is not read by the checker or report writer. No automatic demand-ledger entry or model proposal is created.
+Notes are kept for 12 months, with retention and removal on request handled by the operator. The daily digest reads notes without changing them: counts by kind, counts by profile wanted with distinct account counts, packages by kind with distinct account counts, bounded text from every kind for triage regardless of consent, notes consenting to follow-up, and friction notes by check id. Consent controls follow-up only; it does not hide a submitted note from triage. Account ids appear as stable short hashes. Customer text appears only in fenced data blocks marked `DATA>`, with control and format characters removed and display length bounded. The digest reports skipped or unreadable files and unreadable rows, including zero. When the feedback collection cannot be accessed, the digest stops with an error instead of reporting an empty day. Feedback is not read by the checker or report writer. No automatic demand-ledger entry or model proposal is created.

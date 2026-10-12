@@ -4,7 +4,8 @@ what to do next.
 
 The database's outcome list (db/migrations/0001_foundation.sql) holds every name here. `lease_lost` and the other
 job-internal names (lease_expired, attempts_exhausted, ...) stay in the database and hosted/jobs.py: a customer never
-receives them."""
+receives them. `python3 -B tools/ci/envelope_places.py outcome <name>` (and `key <name>` for a top-level envelope key)
+prints every place an outcome must change in the same patch (issue #1384)."""
 from __future__ import annotations
 
 import re
@@ -21,6 +22,9 @@ _TABLE = {
     'unknown_profile': (404, 2, 'Choose a profile id from GET /v1/profiles.'),
     # serve-016 (REFUTATION-028 F5; DD-073's table: bad input, auth, key read red, exit 2)
     'unauthenticated': (401, 2, 'Send a valid, unrevoked API key in the Authorization header.'),
+    # issue #1262 (key expiry 1/5): a known key past its `expires` (serve/keys.py); the next step is the rotation
+    'key_expired': (401, 2, 'Rotate the key: ask Symbolia to issue a new key for this account, then send the request '
+                            'with it in the Authorization header.'),
     'rate_limited': (429, None, 'Wait for the time given in Retry-After, then send the request again.'),
     'credit_exhausted': (402, None, 'Your free credit is spent; contact Symbolia to continue.'),
     'engine_digest_mismatch': (503, 3, 'Report it to Symbolia (or reinstall the pinned release when you run the engine yourself), because the engine files differ from their pin and no check ran.'),
@@ -32,6 +36,11 @@ _TABLE = {
     'profile_refused': (422, 3, 'Fix the collection or declaration fault the reason names, then run again.'),
     'checker_error': (500, 3, 'Report the check id to Symbolia, because the checker failed in a way it should not.'),
     'checker_timeout': (504, 3, 'Send a smaller input or try again later, because the check ran past its time limit.'),
+    # issue #1420: the refusal names the bound that bound, the check worker's RLIMIT_CPU or RLIMIT_AS (serve/worker.py)
+    'checker_cpu_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its CPU time '
+                                  'limit.'),
+    'checker_memory_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its memory '
+                                     'limit.'),
     'server_busy': (503, None, 'Try again in a minute, because the queue is full.'),
     'not_found': (404, None, 'Check the check id, because no check with that id exists for this account.'),
     # serve-062 parts 3-4: a record the server keeps for this account (an accepted scope) no longer reads as it was
@@ -144,7 +153,8 @@ MALFORMATIONS = MappingProxyType({
     # DD-105 Addendum 2: the agent feedback note
     'feedback_body': 'a JSON object with kind (friction, wrong_reading, coverage_gap or model_proposal_intent) and text '
                      '(1 to 4096 bytes of UTF-8 without control characters but LF and TAB), and optionally check_id, '
-                     'profile, obligation, package {name, version}, agent {model_id, client} and consent_follow_up',
+                     'profile, profile_wanted, obligation, package {name, version}, agent {model_id, client} and '
+                     'consent_follow_up',
 })
 # A field path the malformation may name: request fields, JSON fields the checks read, and derive locators.
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
@@ -152,7 +162,7 @@ FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', '
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
                     'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
                     'provenance', 'sentence', 'kind', 'text', 'check_id', 'obligation', 'package', 'agent',
-                    'consent_follow_up'})
+                    'consent_follow_up', 'profile_wanted'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',
@@ -199,15 +209,41 @@ DERIVE_EXPECTED = MappingProxyType({
                      'raw/COLLECTION-SIDECAR.json from the collector\'s bundle',
 })
 MALFORMATION_KEYS = ('kind', 'file', 'line', 'field', 'expected')
+# issue #644: the optional closed key `pointer`, the RFC 6901 JSON pointer of the key the validator stopped on (such as
+# /files/raw~1submission.json or /scope_binding/endpoint_tokens/endpoint-003), present only where it holds the path.
+# Every segment is a key of the closed alphabet A-Z, a-z, 0-9, _, ., - and / ('/' escaped as ~1); `json_pointer` stops
+# at the first key outside it, so the pointer then names the nearest closed parent and never other text of the input.
+POINTER_KEY = 'pointer'
+_POINTER_KEY_RE = re.compile(r'[A-Za-z0-9_./-]{1,255}')
+POINTER_RE = re.compile(r'(?:/(?:[A-Za-z0-9_.-]|~1){1,510}){1,8}')
 
 
-def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None, code=None):
+def json_pointer(*keys):
+    """The closed RFC 6901 pointer of `keys` from the document root (module comment above), or None when the first key
+    is outside the closed alphabet."""
+    segments = []
+    for key in keys[:8]:
+        if not (isinstance(key, str) and _POINTER_KEY_RE.fullmatch(key)):
+            break
+        segments.append(key.replace('~', '~0').replace('/', '~1'))
+    return ''.join('/' + s for s in segments) or None
+
+
+def file_pointer(name, kind='file_name'):
+    """/files/<name> when `name` may stand as a `kind` malformation's `file`, else /files: a pointer never quotes a
+    sent name that the malformation itself would not (issue #644; such as raw/../x or a control character, and for
+    file_value and oversize_input a name outside raw/, REFUTATION-r4 F1)."""
+    return json_pointer('files', name) if _closed_file(kind, name) else json_pointer('files')
+
+
+def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None, code=None, pointer=None):
     """The closed description of what was malformed (module comment above). An unknown kind is a ValueError: the
     vocabulary is closed in code, never at run time. `kinds` adds a profile row's own closed derive kinds (its
     `derive_result.kinds`, checked against KIND_RE when the row is loaded) to the fields a malformation may name.
     `expected` (issue #414) replaces the kind's generic text with one built from a profile row by `scope_expected`;
     any other text falls back to the generic one. `code` (issue #1032) is a derive's closed cause code: when the field
-    has no DERIVE_EXPECTED row of its own and the code has one, the code's row is the next step."""
+    has no DERIVE_EXPECTED row of its own and the code has one, the code's row is the next step. `pointer` (issue #644)
+    is added as the key `pointer` when it is a closed JSON pointer (`json_pointer`), and left out otherwise."""
     if kind not in MALFORMATIONS:
         raise ValueError('unknown malformation kind: %r' % (kind,))
     if file is not None:
@@ -222,7 +258,10 @@ def malformation(kind, file=None, line=None, field=None, kinds=(), expected=None
         expected = _CODE_EXPECTED[code]
     elif not _row_expected(kind, expected):
         expected = MALFORMATIONS[kind]
-    return {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': expected}
+    out = {'kind': kind, 'file': file, 'line': line, 'field': field, 'expected': expected}
+    if isinstance(pointer, str) and POINTER_RE.fullmatch(pointer):
+        out[POINTER_KEY] = pointer
+    return out
 
 
 # issue #414: a scope refusal's `expected` built from the profile row the reason was raised against, so an agent that
@@ -292,32 +331,64 @@ def _row_kinds(kinds):
     return frozenset(k for k in kinds if isinstance(k, str) and KIND_RE.fullmatch(k))
 
 
-def is_closed(value, kinds=()):
-    """True when `value` is a malformation built by `malformation` (every value from the closed vocabulary); `kinds`
-    as for `malformation`."""
-    if not isinstance(value, dict) or tuple(sorted(value)) != tuple(sorted(MALFORMATION_KEYS)):
-        return False
+def closure_failure(value, kinds=()):
+    """None when `value` is a malformation built by `malformation` (every value from the closed vocabulary), else the
+    name of the first clause that rejected it: `keys` (not a dict with exactly MALFORMATION_KEYS, plus at most the
+    optional POINTER_KEY), `pointer` (issue #644: not a POINTER_RE pointer), `kind`, `expected`, `file`, `line` or
+    `field`; `kinds` as for `malformation`. `is_closed` is this test as a bool; a test that reads the clause tells a
+    wrong `field` from a wrong `expected`, which the bool could not (issue #1120)."""
+    if not isinstance(value, dict) or tuple(sorted(set(value) - {POINTER_KEY})) != tuple(sorted(MALFORMATION_KEYS)):
+        return 'keys'
+    if POINTER_KEY in value and not (isinstance(value[POINTER_KEY], str) and POINTER_RE.fullmatch(value[POINTER_KEY])):
+        return 'pointer'
     kind = value['kind']
+    if kind not in MALFORMATIONS:
+        return 'kind'
     if kind == 'derive_refused':
         field = value['field'] if isinstance(value['field'], str) else None
         generic = (value['expected'] == DERIVE_EXPECTED.get(field, MALFORMATIONS[kind])
                    or (field not in DERIVE_EXPECTED and value['expected'] in _CODE_EXPECTED.values()))
     else:
-        generic = kind in MALFORMATIONS and value['expected'] == MALFORMATIONS[kind]
-    return (kind in MALFORMATIONS
-            and (generic or _row_expected(kind, value['expected']))
-            and (value['file'] is None or value['file'] == 'other'
-                 or _closed_file(kind, value['file']))
-            and (value['line'] is None or (type(value['line']) is int and value['line'] > 0))
-            and (value['field'] is None or value['field'] in FIELDS or value['field'] in DERIVE_KINDS
-                 or value['field'] in _row_kinds(kinds)))
+        generic = value['expected'] == MALFORMATIONS[kind]
+    if not (generic or _row_expected(kind, value['expected'])):
+        return 'expected'
+    if not (value['file'] is None or value['file'] == 'other' or _closed_file(kind, value['file'])):
+        return 'file'
+    if not (value['line'] is None or (type(value['line']) is int and value['line'] > 0)):
+        return 'line'
+    if not (value['field'] is None or value['field'] in FIELDS or value['field'] in DERIVE_KINDS
+            or value['field'] in _row_kinds(kinds)):
+        return 'field'
+    return None
+
+
+def is_closed(value, kinds=()):
+    """True when `value` is a malformation built by `malformation` (every value from the closed vocabulary); `kinds`
+    as for `malformation`. `closure_failure` names the clause when it is not."""
+    return closure_failure(value, kinds) is None
 
 
 # An action that differs for one closed rule of an outcome, so the action agrees with the reason (REFUTATION-034-R2 N6;
 # serve-030, REFUTATION-042 F2: the once-only free report balance, which neither allow_overage nor a top-up admits)
-RULE_ACTIONS = {('profile_not_servable', 'checker_metadata'):
+RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.identity` names the step that refused it)
+                ('unauthenticated', 'oidc'):
+                'Request a fresh GitHub Actions OIDC token with audience "assure" (the job needs the line '
+                '`id-token: write` under `permissions:`) and sign in again, or send an API key in the Authorization '
+                'header.',
+                ('profile_not_servable', 'checker_metadata'):
                 'Nothing to change on your side; try again after Symbolia repairs the profile, or use another profile '
                 'meanwhile.',
+                # issue #943: the derive could not read the raw/ file the reason names as a UTF-8 JSON object, and
+                # the reason says which fault and where (serve/profiles.py _json_fault, _located)
+                ('profile_refused', 'raw_unreadable'):
+                'Re-run the collector or fix the file the reason names so it parses as a JSON object (or leave it out '
+                'where the reason says it is optional), then send it again.',
+                # issue #431: the served checker's pipeline cannot import a module the server tree lacks (a release
+                # built without a shared core): the profile is qualified and the server is broken, so the action
+                # names neither a qualification wait nor a check id to report
+                ('profile_not_servable', 'pipeline_import'):
+                'Nothing to change on your side; the server tree lacks a module this checker imports, which only a '
+                'redeploy by Symbolia opens. Nothing ran and nothing was charged.',
                 ('allowance_exhausted', 'once_balance'):
                 'A paid plan gives more reports; the free report balance does not renew; nothing ran and nothing was '
                 'charged.',
@@ -485,7 +556,12 @@ def served_profiles(detail):
 
 
 class Refusal(Exception):
-    """A typed outcome: `Refusal(outcome, reason, **detail)`. An unknown outcome name is a ValueError at construction."""
+    """A typed outcome: `Refusal(outcome, reason, **detail)`. An unknown outcome name is a ValueError at construction.
+
+    `detail` is an open object (issue #984): keys are additive. A key once served under an outcome keeps its name and
+    meaning, and a later change may add keys beside it; a reader holds the keys it knows and ignores the rest. A test
+    of a served Failure therefore asserts the keys it names as a subset (`assertGreaterEqual(detail.items(), ...)`),
+    never the whole object; `tests/serving/test_issue_984_accept.py` states the rule."""
 
     def __init__(self, outcome, reason='', **detail):
         if not isinstance(outcome, str) or outcome not in OUTCOMES:

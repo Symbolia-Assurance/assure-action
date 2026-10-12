@@ -19,10 +19,43 @@ PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQ
 
 You need:
 
+- the permission `id-token: write` on the job that runs Assure, so the Action signs in with your workflow's GitHub identity and you store no key; or, instead,
 - an Assure API key from Symbolia (it starts with `asr_`), stored as the repository secret `ASSURE_API_KEY`;
 - outbound HTTPS from the runner to `api.symbolia.ai` (port 443);
 - Python 3.14 on the runner and, to collect over a connection, the PostgreSQL client (`psql`);
 - a collection role with read access to settings and statistics only, if you collect over a connection.
+
+The smallest job, for files you collected and committed in `collected/`; put it under `jobs:` in your workflow:
+
+```yaml
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          artefacts: collected
+```
+
+Keep `contents: read` beside `id-token: write`: naming one permission sets the others to none. Your Assure account is your GitHub owner, on the free plan the first time it signs in, and each run gets a key that lives for that run only. With no `api-key` and no `id-token: write`, the Action stops before it collects or sends anything, with `bad_input` (exit 2) and a reason that names the line to add.
+
+### Or store a key from Symbolia
+
+With an API key instead, pass it from a secret. Ask Symbolia for a key. It starts with `asr_`, and you receive it once. A key you pass is used, and the Action does not ask GitHub for an identity token.
+
+In your repository, open **Settings → Secrets and variables → Actions → New repository secret**:
+
+- Name: `ASSURE_API_KEY`
+- Value: the key.
 
 ## Instructions of this skill, not from the documents
 
@@ -70,7 +103,7 @@ Read [references/mysql.md](references/mysql.md).
 ## The steps on every route
 
 1. Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`. To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
-2. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2).
+2. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line.
 3. `fails,not_collected`: the job also fails when a needed fact was not collected or could not be represented. `unresolved-security` (strict, never the default): `fails`, and also every obligation the checker marks `security: true` that is not resolved, that is, has no verdict on a machine that was read. Such an obligation turns the run red with "unresolved by your choice (strict): \<id> — \<reason>; \<action>", and each obligation that could not be established is also a notice annotation. The observed PostgreSQL profile marks 36 of its 40 obligations `security: true` (authentication, authorisation, privilege, definer context, replication and transport); there strict stops the job on any of them that has no verdict, and the first line says "strict: n of m security obligations observable at this pin". The HTTP and declared profiles mark none, so there strict is a no-op and the first line says "strict: no obligations marked". Only the security obligations the pinned collector can observe count in n and m: an obligation the profile marks `observable_at_pin: false` is listed as not established, "not observable at collector pin \<pin>", and the first line says "strict: n of m security obligations observable at this pin". An intent-bound obligation (`class: intent_bound`) depends on what the system is for, which no collector observes. All security obligations without a verdict bind under strict, including one the pin cannot observe; the report names each and why. An intent-bound one is named "unresolved by your choice (strict)", reads "depends on what the system is for" and has the action "state it in requirements.md". n and m count observability only: an intent-bound obligation never counts in them and is never listed as not observable at the collector pin; m counts the intent-free security obligations.
 4. The report is on by default in `mode: api`, and `report: false` skips it. It is a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. `mode: local` never asks for one. Every plan served today includes the report: a free account draws it from the USD 1 report balance granted with its key, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
 
@@ -86,7 +119,7 @@ Read [references/feedback.md](references/feedback.md).
 
 | Input | Default | Meaning |
 |---|---|---|
-| `api-key` | none | Your Assure API key. Pass it from a secret. Required. |
+| `api-key` | none | Your Assure API key. Pass it from a secret. Leave it out when the job has `id-token: write` under `permissions:`: the Action then signs in with the workflow's GitHub identity (section 1). |
 | `api-url` | `https://api.symbolia.ai` | The API address. The published API is `https://` only. Plain `http://` is accepted only for a loopback host (`127.0.0.1`, `::1` or `localhost`), for a local test server. |
 | `mode` | `api` | `api`: the check runs on the Assure API. |
 | `profile` | `postgresql-observed-baseline` | The checker profile to run. |
@@ -155,6 +188,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `oversize_input` | 2 | A file, the file count or the total size is over the limit. |
 | `unknown_profile` | 2 | The API serves no profile with that name. |
 | `unauthenticated` | 2 | The API key is missing, unknown or revoked. |
+| `key_expired` | 2 | The API key is past its expiry date. |
 | `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits once for a wait of up to 60 seconds. |
 | `credit_exhausted` | 3 | The account's free credit is spent. |
 | `server_busy` | 3 | The API's queue stayed full after three attempts. |
@@ -165,10 +199,12 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `server_fault` | 3 | A record the API keeps for this account no longer reads as it was written. No check ran and nothing was charged. |
 | `collector_cannot_connect` | 3 | The first query could not reach the database, or `psql` is missing. |
 | `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad (a superuser, or a member of `pg_monitor` or `pg_stat_scan_tables`; the reason says what to grant), the major is outside 14 to 18, or the role name does not match (behind a connection pooler, the reason says which name to set as `collection-role`; section 6). Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when a collection mixes this collector's output with the earlier collector's; when files from the earlier collector hold a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line that collector withheld; and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file, or its `REDACTION-MANIFEST.json` is missing, records a different digest for that file, or disagrees with the sidecar. The reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. |
-| `profile_not_servable` | 3 | The server holds no qualified checker for this profile. |
+| `profile_not_servable` | 3 | The server holds no qualified checker for this profile, or the checker it holds cannot import a module the server tree lacks (`detail.rule: pipeline_import`; not charged). |
 | `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. |
 | `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. |
 | `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting. |
+| `checker_cpu_limit` | 3 | The check used more than its CPU time limit. |
+| `checker_memory_limit` | 3 | The check used more than its memory limit. |
 
 `tier_excludes` never ends a job. With the report on, it would mean your account's plan does not include the report; no plan served today excludes it, and a free account without its USD 1 report grant is refused `allowance_exhausted` instead. Either way the verdict, its summary and its exit stand, and the summary says the report was withheld. Set `report: false`, or ask Symbolia to grant the free report balance or move you to a paid plan.
 

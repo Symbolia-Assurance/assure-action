@@ -10,6 +10,8 @@ The observed profile on the official PostgreSQL 18 image (the successor build's 
 green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; vacuous: 13; not established: 21 — top action: state it in requirements.md
 ```
 
+The top action stays "state it in requirements.md". In the summary under the line, each row that depends on what the system is for gives a second way: "operator: commit the proposed declaration (assure-declaration-proposal.json) as raw/declaration.json and run postgresql-declared-model, or state it in requirements.md". On this profile the Action writes `assure-declaration-proposal.json` beside the verdict file, a declaration drafted from the same catalog snapshot, with `assure-requirements-draft.md`, the same proposal as plain sentences to confirm. The summary's section "Declaration proposal" counts the leaves it proposes, the keys to confirm and the rows a committed declaration would decide.
+
 ## Red: something disproven
 
 The same readings with `fail-on: fails,deviates`. A deviation is now a status you fail on, so the first one in reading order is the witness: its object, its access path and its locator.
