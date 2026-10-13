@@ -24,7 +24,7 @@ inputs:
     required: false
     default: postgresql-observed-baseline
   artefacts:
-    description: A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it.
+    description: "A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it. For python-auth-declared-model leave both empty: the Action reads the checked-out repository (its Python files and requirements.md) and the declaration at .assure/declaration.json, and when there is none it drafts one and opens one pull request of its own proposing it (it never commits to your branches; the workflow needs contents: write and pull-requests: write)."
     required: false
     default: ''
   connection:
@@ -126,6 +126,9 @@ outputs:
   requirements-disproven:
     description: With a requirements file sent, how many of its requirements are disproven. Empty otherwise.
     value: ${{ steps.assure.outputs.requirements-disproven }}
+  declaration:
+    description: "python-auth-declared-model: unaccepted-draft when the check ran on a declaration drafted from the repository, or on a pull request whose declaration is not yet on the base branch (the result is bounded by that draft until it is merged). Empty otherwise."
+    value: ${{ steps.assure.outputs.declaration }}
   lint-findings:
     description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a paid run). Empty otherwise."
     value: ${{ steps.assure.outputs.lint-findings }}
@@ -175,4 +178,5 @@ runs:
         INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'

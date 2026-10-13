@@ -5,6 +5,7 @@ that opens a network connection.
     listing = c.profiles()                                  # GET /v1/profiles
     envelope = c.submit(profile_id, files, fail_on)          # POST /v1/checks, then GET /v1/checks/{id} while 202
     record = c.report(check_id)                               # serve-014: POST, then GET /v1/checks/{id}/report while 202
+    status, doc = GitHub(api_url, token).call('POST', path, doc)  # serve-102 r2: the declaration proposal's pull request
 
 Rules:
 - `base_url` is `https://<host>[:port][/prefix]` with no userinfo, query or fragment; `http://` only for a loopback host
@@ -418,6 +419,17 @@ class Client:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
 
+    def declaration_proposal(self, files):
+        """Draft with the server's identity proposer; never run a second reader in the Action."""
+        body = bundle.request_body('python-auth-declared-model',
+                                   {'raw/repository/' + n: d for n, d in files.items()})
+        status, doc = self._call('POST', '/v1/declaration-proposal', body, route='declaration_proposal')
+        if (status != 200 or doc.get('schema') != 'assure.identity.declaration-proposal/v1'
+                or doc.get('stack') != 'python/flask' or not isinstance(doc.get('declaration'), dict)
+                or not isinstance(doc.get('sources'), dict) or not isinstance(doc.get('confirm'), list)):
+            raise Refusal('api_error', 'the API answered without a declaration proposal record')
+        return doc
+
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
                scope_binding=None, accepted_scope_ref=None, limits=None, requirements=None, repository=None,
                commit=None, provenance=None, key_from_bundle=False):
@@ -686,5 +698,67 @@ def _retry_after(text):
         return None
     t = str(text).strip()
     return int(t) if re.fullmatch(r'[0-9]{1,6}', t) else None
+
+
+# ------------------------------------------------------------------------------------------------ the GitHub REST API
+GITHUB_API_URL = 'https://api.github.com'
+GITHUB_MAX_RESPONSE = 2 ** 20
+
+
+class GitHub:
+    """serve-102 r2 (the Director's rule of 11 Oct 2026: Assure never writes into the repository, it opens a pull
+    request): the Action's one use of the GitHub REST API, with the workflow's own token (`github.token`, which
+    action.yml passes as GITHUB_TOKEN). `call(method, path, doc)` sends one request and returns (status, parsed JSON
+    or None); it never raises on an HTTP status, so the caller reads a 403 as a missing permission. The same rules as
+    `Client`: https only (http only for a loopback host), no redirect followed, the token only in `Authorization`,
+    no error text holding the token or a body; a connection failure is `api_unreachable`. Answers over 1 MiB are
+    `api_error`."""
+
+    def __init__(self, api_url, token, *, timeout_s=30, opener=None):
+        self.scheme, self.host, self.base = check_base_url(api_url or GITHUB_API_URL)
+        if not isinstance(token, str) or not token or len(token) > MAX_KEY or not _KEY_OK.fullmatch(token):
+            raise Refusal('bad_input', 'no workflow token reached the Action')
+        self._auth = 'Bearer ' + token
+        self.timeout_s = float(timeout_s)
+        if opener is None:
+            handlers = [_NoRedirect()]
+            if self.host in LOOPBACK:
+                handlers.append(urllib.request.ProxyHandler({}))
+            if self.scheme == 'https':
+                handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+            opener = urllib.request.build_opener(*handlers)
+        self.opener = opener
+
+    def __repr__(self):                       # never the token
+        return 'GitHub(%r)' % self.base
+
+    def call(self, method, path, doc=None):
+        body = None if doc is None else json.dumps(doc).encode('utf-8')
+        h = {'Authorization': self._auth, 'Accept': 'application/vnd.github+json', 'User-Agent': 'assure-action',
+             'X-GitHub-Api-Version': '2022-11-28'}
+        if body is not None:
+            h['Content-Type'] = 'application/json'
+        req = urllib.request.Request(self.base + path, data=body, headers=h, method=method)
+        try:
+            resp = self.opener.open(req, timeout=self.timeout_s)
+        except urllib.error.HTTPError as e:
+            resp = e
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise Refusal('api_unreachable', 'the GitHub API could not be reached (%s)' % type(e).__name__) from None
+        except http.client.HTTPException as e:
+            raise Refusal('api_error', 'the GitHub API answer is malformed (%s)' % type(e).__name__) from None
+        try:
+            status = resp.code if isinstance(resp, urllib.error.HTTPError) else resp.status
+            data = resp.read(GITHUB_MAX_RESPONSE + 1)
+        except (OSError, http.client.HTTPException) as e:
+            raise Refusal('api_error', 'the GitHub API answer could not be read (%s)' % type(e).__name__) from None
+        finally:
+            resp.close()
+        if len(data) > GITHUB_MAX_RESPONSE:
+            raise Refusal('api_error', 'the GitHub API answer is larger than %d bytes' % GITHUB_MAX_RESPONSE)
+        try:
+            return status, (json.loads(data.decode('utf-8')) if data else None)
+        except (UnicodeDecodeError, ValueError):
+            return status, None
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

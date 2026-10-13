@@ -8,19 +8,19 @@
 > - [ ] The job that runs Assure has `id-token: write` under `permissions:`, or an API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
 > - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository with your declaration, checked free in process (the API quick start, section 15).
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
 Assure is the check that reads green only when nothing it examined is disproven. It tells you the bounds of what it has established, and why it matters. In an age where machines generate code at a volume nobody can read, Assure shows that each change maintains its baseline security and reliability, and stays true to any formalised requirements.
-
-The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with a key: one it gets for this run from your workflow's GitHub identity, or your own API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
 Supported PostgreSQL majors: 14 to 18. Real-run evidence: 17 and 18.
 
 **Rules the collector keeps, and rules it withholds.** The collector this Action ships keeps a `pg_hba.conf` rule with a quoted name, an `@file` list or a regular-expression user (`/^...`) as written, and the check reads it. A rule or setting it still has to withhold, such as a rule with an unclosed quote, becomes a marker line that names its own line number and reason. The check reads that rule or setting as not observed, and the summary lists it as `not observed: <file> line N (<the reason in plain words>)`.
 
 Files collected earlier with the earlier collector, given as `artefacts`, still stop at such a rule with exit 3 (`collector_refused`): that collector withheld it whole, and Assure cannot read it. The message names the file and the line. Collect again with this Action. If you cannot: remove quotes a name does not need; write an `@file` list's names inline; use a `+group` role in place of a list; list a regular-expression user's roles by name. Otherwise, send Symbolia the file name and the line number through your Symbolia contact, so the shape is counted.
+
+The Action collects facts in your GitHub Actions runner and sends them to `api.symbolia.ai` over TLS with a key: one it gets for this run from your workflow's GitHub identity, or your own API key. The check runs on Symbolia's server; the Action writes the verdict, job summary and annotations in your runner.
 
 ## What is sent, and what is never read
 
@@ -214,7 +214,7 @@ Before the first paid run, run the Action once with `mode: lint`: it reads the s
 The first line of the job summary, and the Action's last log line, starts with a colour, then says how much was read, "N of 8 machines read, M refused", and the bounds of the result. A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason. When a scope limit names machines the checker could not reach, they are out of scope, not refused, and the count ends ", n out of scope", for example "5 of 5 machines read, 3 out of scope": an out-of-scope machine leaves both counts, and the summary names the limit.
 
 - **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 3 of 40; deviations: 1; vacuous: 13; not established: 23 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: \<action>". One line follows for each obligation that could not be established, "\<id>: \<reason> — \<owner>: \<what it needs>". Green never means more than this.
-- **red**: something is disproven, for example "red: ...; disproven: \<obligation> — \<object>, \<access path>, \<locator>". It exits 1 when your `fail-on` names the status (`fails` by default) and the disproof is yours to fix. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — \<obligation>", never "disproven".
+- **red**: something is disproven, for example "red: ...; disproven: \<obligation> — \<object>, \<access path>, \<locator>"; with more than one, "disproven: k, first \<obligation> — …", and the free summary (`GET /v1/checks/{id}/summary`) lists the same k under `disproven`, each with `platform_owned`. It exits 1 when your `fail-on` names the status (`fails` by default) and the disproof is yours to fix. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — \<obligation>", never "disproven".
 - **yellow** (exit 3): nothing could be read at all, "yellow: could not look: \<reason>; \<action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
 
 On the free plan, one upgrade line sits above that first line, at the very top of the summary: it names Premium and links to a checkout page already filled in with your account.
@@ -850,6 +850,63 @@ The check reads the file and contacts no server. Seven machines read it: M1, M2,
 
 A report for this profile is withheld with `profile_unqualified` until the report writer is qualified for MySQL. `/v1/profiles` lists the profile's 50 obligations with the states each can take (`holds`, `not_established`, `disproven`, from what its machine can produce), a `requirements.md` line that quotes an obligation binds to it, and the report page names the MySQL areas. The report stays withheld until the writer qualifies for MySQL. Formalisation is not offered for this profile.
 
+## 14. Checking a Python (Flask) repository
+
+`python-auth-declared-model` checks how a Flask app signs people in and guards its routes. It reads your code as text and never runs it. The check is free and contacts no server of yours.
+
+A whole workflow. It grants `contents: write` and `pull-requests: write` so the Action can open its proposal (below). Set `profile`; leave `artefacts` and `connection` empty:
+
+```yaml
+name: Assure
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Assure check
+        id: assure
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          api-key: ${{ secrets.ASSURE_API_KEY }}
+          profile: python-auth-declared-model
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@<full commit sha of the release you trust>
+        with:
+          name: assure-verdict
+          path: ${{ steps.assure.outputs.verdict-path }}
+```
+
+The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 64 files of 512 KiB each. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
+
+**The declaration arrives as a proposal.** The check reads your app against a declaration at `.assure/declaration.json`: your app objects, the session key that means "signed in", your guard decorators, the views that sign people in, raise privilege and sign out, and the routes that are public on purpose. On the first run there is none, so the Action sends the bounded repository bytes to the free declaration proposal route, whose drafter uses the checker's own readers, and runs the check on the returned draft. A field the bytes do not give remains unread in the proposal for you to review.
+
+Assure never commits to your branches; it opens one pull request proposing .assure/declaration.json; merging it is the acceptance. The pull request, `Assure: proposed declaration for python-auth — review and merge to accept`, comes from Assure's own branch `assure/declaration-proposal` into your base branch (the pull request's base, or your default branch on a push), and changes only that file. Its description and the job summary list each field to confirm with the file and line it was read from. A later run updates the same pull request; it never opens a second one.
+
+Read the draft in that pull request. Edit any field that is wrong on its branch. Merge it to accept.
+
+Until the declaration is on your base branch, the result is bounded by the draft. The log says "bounded by an unaccepted declaration draft", the job summary says where the draft is, and the step output `declaration` is `unaccepted-draft`. After the merge, every run reads the accepted file and the bound goes.
+
+GitHub lets the workflow token open a pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". When the workflow lacks `contents: write` or `pull-requests: write`, that setting is off, or the run is on a pull request from a fork, the check still runs, bounded, and the job summary carries the draft in full with one sentence naming the two permission lines.
+
 ## Rules for an agent
 
 When an agent sets up or runs the Action for you, these rules hold for it, as they do for you. Do not fabricate facts, edit redacted evidence, change database permissions to accommodate the checker, or change the pins to conceal a gap. Report the first line and each reading as the summary states it: a missing fact is reported as missing, with the place it was looked for. It shows you every command that changes your server, its files or its roles, and you run it.
@@ -905,10 +962,10 @@ Every field in one body, as the route accepts it:
 {"kind":"coverage_gap","text":"No rule reads the pgaudit settings. I expected a reading of pgaudit.log.","check_id":"0123456789abcdef0123456789abcdef","profile":"postgresql-declared-model","profile_wanted":"postgresql-pgaudit","obligation":null,"package":{"name":"pgaudit","version":"16.1"},"agent":{"model_id":"example-model-1","client":"example-agent/1.0"},"consent_follow_up":false}
 ```
 
-A refusal of the body's fields (an unknown key, a missing `kind` or `text`, a wrong type or form) is `bad_input` (400) whose `detail.accepted_fields` lists the nine keys above, sorted, and whose `detail.kinds` lists the four kinds, so one refusal names the whole accepted shape. The reason for an unknown key names that key; no value is ever echoed. A refusal of one named field also carries `detail.malformation.pointer`, that field's JSON pointer (such as `/check_id`); a body that is not one JSON object carries none. A body that is not UTF-8, is not JSON or repeats a key is refused before its fields are read: `bad_input` (400) with `detail.malformation.kind` `body_not_utf8` or `body_not_json`, and without `accepted_fields` or `kinds`.
+A refusal of the body's fields (an unknown key, a missing `kind` or `text`, a wrong type or form) is `bad_input` (400) whose `detail.accepted_fields` lists the nine keys above, sorted, and whose `detail.kinds` lists the four kinds, so one refusal names the whole accepted shape. `detail.shapes` gives each key's form: `package` is `{name, version}`, `agent` is `{model_id, client}`, `kind` lists the four kinds, `consent_follow_up` is `boolean` and every other key is `text`; `detail.example` is one minimal valid body, the friction example this section prints. The reason for an unknown key names that key; no value is ever echoed. A refusal of one named field also carries `detail.malformation.pointer`, that field's JSON pointer (such as `/check_id`); a body that is not one JSON object carries none. A value or key that carries an Assure API key (`asr_`, an 8-hex key id, `_` and a 43-character secret) is refused `bad_input` and nothing is stored: a value's refusal names its field, and such a key is never named. A body that is not UTF-8, is not JSON or repeats a key is refused before its fields are read: `bad_input` (400) with `detail.malformation.kind` `body_not_utf8` or `body_not_json`, and without `accepted_fields`, `kinds`, `shapes` or `example`.
 
 The request body limit is 16,384 bytes. Feedback is free on every plan, with no charge or usage ledger row. Each POST uses the same per-account minute rate window as checks; a repeat still uses that window. Up to 100 new notes per account per UTC day are accepted. Within one account and UTC day, the same kind, check id and exact text returns the first note with `duplicate` set to `true`, without a new row or another daily slot. Changing other metadata alone does not change that identity. A rate refusal is `rate_limited` (429) with `Retry-After`; a daily refusal names `window` set to `day` and the wait until midnight UTC.
 
-POST returns 200 with `schema`, `id`, `received_at`, `kind`, `check_id`, `profile`, `obligation`, `package`, `sha256`, `duplicate`, `related` and the response flags; it does not echo the text. `check_id`, `profile` and `obligation` are the stored row's values (null when not sent) and `sha256` is the stored row's deduplication SHA-256, the hash of `kind|check_id|text` rather than of the text alone, so a record can cite the note without trusting its own request body; on a duplicate they are the first row's. `related` lists this account's other notes of the same kind and profile whose `status` is not `merged` or `declined`, among its notes of the newest 7 UTC-day files, newest first and at most 10, each as `id`, `kind`, `profile` and `status`, so a second note on one gap can see the first; it is empty when the note has no profile. `GET /v1/feedback/{id}` returns 200 with the stored row, including text, the account and key ids, timestamp, metadata, the deduplication SHA-256, `check_known`, `rows_unreadable` and response flags. `check_known` records whether that account held a verdict for the supplied check id at submission time; it is not a live lookup. `rows_unreadable` counts unreadable lines in that note's UTC-day file, including zero. `status` is the note's state as Symbolia acts on it: `received` until then, `in_pr` with the pull request number `pr`, `merged` with `release`, the engine commit that ships the change, or `declined` with a `reason`; `updated_at` is when it was set. When the state cannot be read just now it reads `unavailable` with a `reason`, and the note still answers. A malformed, absent or another account's id returns the same `not_found` (404). Neither route accepts query parameters.
+POST returns 200 with `schema`, `id`, `received_at`, `kind`, `check_id`, `profile`, `obligation`, `package`, `sha256`, `duplicate`, `related`, `routed` and the response flags; it does not echo the text. `check_id`, `profile` and `obligation` are the stored row's values (null when not sent) and `sha256` is the stored row's deduplication SHA-256, the hash of `kind|check_id|text` rather than of the text alone, so a record can cite the note without trusting its own request body; on a duplicate they are the first row's. `related` lists this account's other notes of the same kind and profile whose `status` is not `merged` or `declined`, among its notes of the newest 7 UTC-day files, newest first and at most 10, each as `id`, `kind`, `profile`, `status` and `match` (`kind+profile`), so a second note on one gap can see the first; when the note has no profile it lists the open notes of the same kind of any profile, null included, each with `match` `kind`. `routed` says where the note goes next: `digest`, the daily agent feedback digest that reads it (`Agent feedback digest YYYY-MM-DD`, the note's UTC day), `status_route`, the `GET /v1/feedback/{id}` route that answers its state, and `next`, one sentence naming both. `GET /v1/feedback/{id}` returns 200 with the stored row, including text, the account and key ids, timestamp, metadata, the deduplication SHA-256, `check_known`, `rows_unreadable` and response flags. `check_known` records whether that account held a verdict for the supplied check id at submission time; it is not a live lookup. `rows_unreadable` counts unreadable lines in that note's UTC-day file, including zero. `status` is the note's state as Symbolia acts on it: `received` until then, `in_pr` with the pull request number `pr`, `merged` with `release`, the engine commit that ships the change, or `declined` with a `reason`; `updated_at` is when it was set. When the state cannot be read just now it reads `unavailable` with a `reason`, and the note still answers. A malformed, absent or another account's id returns the same `not_found` (404). Neither route accepts query parameters.
 
 Notes are kept for 12 months, with retention and removal on request handled by the operator. The daily digest reads notes without changing them: counts by kind, counts by profile wanted with distinct account counts, packages by kind with distinct account counts, bounded text from every kind for triage regardless of consent, notes consenting to follow-up, and friction notes by check id. Consent controls follow-up only; it does not hide a submitted note from triage. Account ids appear as stable short hashes. Customer text appears only in fenced data blocks marked `DATA>`, with control and format characters removed and display length bounded. The digest reports skipped or unreadable files and unreadable rows, including zero. When the feedback collection cannot be accessed, the digest stops with an error instead of reporting an empty day. Feedback is not read by the checker or report writer. No automatic demand-ledger entry or model proposal is created.

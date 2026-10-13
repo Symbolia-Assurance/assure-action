@@ -17,7 +17,11 @@ A supplied `raw/REPOSITORY.json` is kept byte for byte; the server checks it as 
 - `commit`: the checkout's HEAD (`git rev-parse --verify HEAD` in the artefacts directory, read only, an argument
   list), else GITHUB_SHA when that is 40 hex; neither is `bad_input` naming both ways to go on.
 
-Standard library, `serve` (the seven flags) and serve.outcomes only; the one child process is that read-only git command.
+serve-102: with neither artefacts nor a connection, `from_checkout` reads the repository from the checkout itself (its
+tracked Python files and requirements.md, listed by `git ls-files -s`, read only), with git's index modes.
+
+Standard library, `serve` (the seven flags, serve.bundle's names) and serve.outcomes only; the child processes are
+those two read-only git commands.
 execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false;
 physical_validation false; simulation true; self_approved false."""
 from __future__ import annotations
@@ -88,16 +92,20 @@ def head_commit(root, env):
     return sha if _HEX40.fullmatch(sha) else None
 
 
-def manifest(files, root, commit):
-    """The manifest document for the `raw/repository/` files in `files` ({name: bytes}) read from `root`."""
+def manifest(files, root, commit, modes=None):
+    """The manifest document for the `raw/repository/` files in `files` ({name: bytes}) read from `root`; `modes`
+    ({path: git mode}) when the files were read from git's index (the checkout, serve-102), else from lstat."""
     base = raw_dir(root) / 'repository'
     rows, entries = [], {}
     for name in sorted(n for n in files if n.startswith(PREFIX)):
         rel = name[len(PREFIX):]
         data = bytes(files[name])
         try:
-            st = os.lstat(base / rel)
-            mode = '100755' if stat.S_ISREG(st.st_mode) and st.st_mode & stat.S_IXUSR else '100644'
+            if modes is not None:
+                mode = '100755' if modes.get(rel) == '100755' else '100644'
+            else:
+                st = os.lstat(base / rel)
+                mode = '100755' if stat.S_ISREG(st.st_mode) and st.st_mode & stat.S_IXUSR else '100644'
         except OSError:
             mode = '100644'
         rows.append({'path': rel, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'mode': mode})
@@ -105,7 +113,7 @@ def manifest(files, root, commit):
     return {'schema': SCHEMA, 'commit': commit, 'tree': git_tree_id(entries), 'files': rows, **FLAGS}
 
 
-def complete(collected, profile, root, env):
+def complete(collected, profile, root, env, modes=None):
     """Add `raw/REPOSITORY.json` to `collected.files` when `profile` is python-auth and none was supplied. Returns the
     document written, or None when nothing was added."""
     if profile != PROFILE or NAME in collected.files:
@@ -115,8 +123,57 @@ def complete(collected, profile, root, env):
         raise Refusal('bad_input', '%s is not in the artefacts and the commit could not be read: run actions/checkout '
                       'before this step so the artefacts directory is inside the git checkout, or send %s yourself'
                       % (NAME, NAME), path=NAME)
-    doc = manifest(collected.files, root, commit)
+    doc = manifest(collected.files, root, commit, modes)
     collected.files[NAME] = (json.dumps(doc, indent=1, sort_keys=True) + '\n').encode('utf-8')
     return doc
+
+def from_checkout(top, allow, limits, env):
+    """serve-102 (DD-156 item 3, one step): the repository read from the checkout itself, when profile python-auth is
+    given neither artefacts nor a connection. Every tracked regular file at HEAD's index (`git ls-files -s -z`, read
+    only) that is Python source or requirements.md becomes `raw/repository/<path>`; other tracked files are not read.
+    Returns (bundle.Collected, {path: git mode}). A name the profile does not admit is listed in `ignored`."""
+    from serve import bundle
+    child_env = {k: env[k] for k in ('PATH', 'HOME', 'SYSTEMROOT') if env.get(k)}
+    child_env.setdefault('PATH', '/usr/bin:/bin')
+    try:
+        p = subprocess.run(['git', '-C', str(top), 'ls-files', '-s', '-z'], env=child_env, stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        p = None
+    if p is None or p.returncode != 0:
+        raise Refusal('bad_input', 'profile %s with neither artefacts nor connection reads the checkout: run '
+                      'actions/checkout before this step' % PROFILE)
+    out, modes = bundle.Collected(), {}
+    for row in p.stdout.split(b'\0'):
+        if not row:
+            continue
+        meta, _tab, path = row.partition(b'\t')
+        mode = meta.split(b' ', 1)[0].decode('ascii', 'replace')
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if mode not in ('100644', '100755') or not (rel.endswith('.py') or rel == 'requirements.md'):
+            continue
+        name = PREFIX + rel
+        try:
+            bundle.check_name(name, allow)
+        except Refusal:
+            out.ignored.append(name)
+            continue
+        full = Path(top) / rel
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        cap = limits.file_bytes
+        if st.st_size > cap:
+            raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (name, st.st_size, cap))
+        out.files[name] = full.read_bytes()
+        modes[rel] = mode
+    out.ignored.sort()
+    return out, modes
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

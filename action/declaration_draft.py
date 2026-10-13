@@ -1,0 +1,221 @@
+"""python-auth's declaration, drafted in the runner and proposed for one-step acceptance (serve-102; DD-150, DD-156).
+
+When the files sent for profile python-auth-declared-model hold no `raw/declaration.json`, the Action drafts one from
+the repository bytes it sends and runs the check on the draft. The verdict is then bounded by an unaccepted draft:
+the log, the job summary and the step output `declaration=unaccepted-draft` say so. Under the Director's rule of 11 Oct
+2026 (Assure never writes into the repository; it provides a pull request), the draft is proposed in a pull request
+of Assure's own: one commit on the base branch's tip that writes only the declaration file, pushed only to the branch
+`assure/declaration-proposal`, and a pull request from that branch into the base branch (the pull request's base, or
+the repository's default branch on any other event); an open one is updated, never duplicated. Merging it is the
+acceptance. A run on a pull request whose declaration is not yet on the base branch is bounded the same way.
+
+The Action delegates drafting to POST /v1/declaration-proposal, which calls the identity engine's
+`assure.checkers.identity.proposal.propose`. The five-field record, including per-leaf sources and confirm,
+returns unchanged. A partial draft retains unread fields for review; the checker's admission still decides whether
+it can check that declaration. No checker code is copied into the public Action.
+
+Standard library, serve.outcomes and the caller's action.client.Client only. The child processes are git
+with an argument list: read-only reads of the checkout, and for the proposal `fetch`, `hash-object -w`,
+`read-tree`/`update-index`/`write-tree` on a private index, `commit-tree` and `push` of that one commit to
+`assure/declaration-proposal` (and its deletion when the pull request cannot be opened). The work tree and the index are
+never touched. execution_authorized false; hardware_authorized false; industrial_release_authorized false;
+release_allowed false; physical_validation false; simulation true; self_approved false."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+from urllib.parse import quote
+
+from serve import FLAGS
+from serve.outcomes import Refusal
+
+PROFILE = 'python-auth-declared-model'
+NAME = 'raw/declaration.json'
+CHECKOUT_PATH = '.assure/declaration.json'          # where an accepted declaration lives in a checked-out repository
+PROPOSAL_SCHEMA = 'assure.identity.declaration-proposal/v1'
+STACK = 'python/flask'
+SCHEMA = 'assure.python-auth.declaration/v1'
+PROPOSAL_BRANCH = 'assure/declaration-proposal'   # Assure's own branch; never the base, the head or the default
+TITLE = 'Assure: proposed declaration for python-auth \u2014 review and merge to accept'
+NEVER_COMMITS = ('Assure never commits to your branches; it opens one pull request proposing .assure/declaration.json; '
+                 'merging it is the acceptance.')
+PERMISSIONS_SENTENCE = ('to open the proposal, give the workflow `contents: write` and `pull-requests: write` under '
+                        '`permissions:` (and let GitHub Actions create pull requests in the repository settings)')
+BOT = ('github-actions[bot]', '41898282+github-actions[bot]@users.noreply.github.com')
+OUTPUT_BOUNDED = 'declaration=unaccepted-draft'
+BOUNDED = 'bounded by an unaccepted declaration draft'
+SIGNOUT = re.compile(r'(log|sign)_?(out|off)', re.I)
+GIT_TIMEOUT_S = 60
+SKIP_DIRS = frozenset({'tests', 'test', 'docs', 'migrations'})
+SHORTCUTS = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH', 'delete': 'DELETE'}
+JUDGEMENT = ('/session_identity_key', '/guards', '/identity_writers', '/elevation_writers', '/signout_views',
+             '/public_routes', '/registrations_complete', '/session_elevation_keys', '/second_factor_keys')
+_ID = re.compile(r'[^A-Za-z0-9_.-]+')
+
+
+def draft(files, repository_id=None, *, client):
+    """The engine's proposal record; incomplete fields retain their unread sources for review."""
+    return client.declaration_proposal(files)
+
+
+def dumps(decl):
+    return (json.dumps(decl, indent=2) + '\n').encode('utf-8')
+
+
+def repository_id(env):
+    name = str(env.get('GITHUB_REPOSITORY') or '').rsplit('/', 1)[-1]
+    name = _ID.sub('-', name).strip('-.')[:128]
+    return name if name and name[0].isalnum() else None
+
+
+# ---------------------------------------------------------------------------------------------------------- git
+def _git(top, env, *args, data=None, extra=None):
+    child = {k: env[k] for k in ('PATH', 'HOME', 'SYSTEMROOT') if env.get(k)}
+    child.setdefault('PATH', '/usr/bin:/bin')
+    child['GIT_TERMINAL_PROMPT'] = '0'
+    child.update(extra or {})
+    try:
+        p = subprocess.run(['git', '-C', str(top), *args], env=child, input=data, capture_output=True,
+                           timeout=GIT_TIMEOUT_S, stdin=None if data is not None else subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _fetch(top, env, branch):
+    """Fetch `branch` from origin into FETCH_HEAD; one commit deep when the checkout is already shallow (as
+    actions/checkout leaves it), so a full clone never becomes shallow. True when fetched."""
+    shallow = (_git(top, env, 'rev-parse', '--is-shallow-repository') or b'').strip() == b'true'
+    args = ['fetch', '--quiet', '--no-tags'] + (['--depth=1'] if shallow else []) + ['origin', 'refs/heads/' + branch]
+    return _git(top, env, *args) is not None
+
+
+def toplevel(path, env):
+    out = _git(path, env, 'rev-parse', '--show-toplevel')
+    return Path(out.decode('utf-8').strip()) if out else None
+
+
+def on_base(top, rel, data, env):
+    """On a pull request: does the base branch carry `rel` with exactly `data`? None when it cannot be read."""
+    base = str(env.get('GITHUB_BASE_REF') or '').strip()
+    if not base or not _fetch(top, env, base):
+        return None
+    shown = _git(top, env, 'show', 'FETCH_HEAD:' + rel)
+    return shown == bytes(data)
+
+
+def is_pull_request(env):
+    return env.get('GITHUB_EVENT_NAME') in ('pull_request', 'pull_request_target') and bool(env.get('GITHUB_HEAD_REF'))
+
+
+def _read_at(record, p):
+    return record['sources'].get(p) or next((v for k, v in sorted(record['sources'].items())
+                                             if k.startswith(p + '/')), 'unread')
+
+
+def pull_request_body(record, rel):
+    """The proposal pull request's body: what it is, how to accept it, each field to confirm and where it was read."""
+    lines = ['Assure drafted `%s` from this repository and checked your app against the draft. Until this pull '
+             'request is merged, every Assure result is bounded by the draft.' % rel, '',
+             'Read the draft and edit any field that is wrong, on this branch. %s' % NEVER_COMMITS, '',
+             'Fields to confirm:', '']
+    lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
+                               else 'read at ' + _read_at(record, p)) for p in record['confirm']]
+    return '\n'.join(lines) + '\n'
+
+
+def _missing(why):
+    return Refusal('bad_input', '%s; %s' % (why, PERMISSIONS_SENTENCE))
+
+
+def propose(top, rel, data, record, env, scratch, github):
+    """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
+    PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
+    default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
+    the customer works on is ever written. Returns {branch, commit, number, url, created}; raises Refusal naming the
+    reason (the permission lines when the token, the push or the pull request is refused) and leaves no proposal
+    branch it created behind. `github` is action.client.GitHub, or None when no workflow token reached the Action."""
+    if github is None:
+        raise _missing('no workflow token reached the Action')
+    repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+        raise Refusal('bad_input', 'GITHUB_REPOSITORY is not owner/name')
+    owner = repo.split('/', 1)[0]
+    head_ref = str(env.get('GITHUB_HEAD_REF') or '').strip() if is_pull_request(env) else ''
+    if head_ref:
+        base = str(env.get('GITHUB_BASE_REF') or '').strip()
+    else:
+        status, doc = github.call('GET', '/repos/%s' % repo)
+        base = doc.get('default_branch') if status == 200 and isinstance(doc, dict) else None
+        if not isinstance(base, str) or not base:
+            raise _missing('the repository could not be read (HTTP %d)' % status)
+    branch = PROPOSAL_BRANCH
+    if not base or branch in (base, head_ref):           # never the customer's branch, whatever the event names
+        raise Refusal('bad_input', 'the proposal branch %s is the base or head branch' % branch)
+    status, pulls = github.call('GET', '/repos/%s/pulls?state=open&head=%s' % (repo, quote('%s:%s' % (owner, branch))))
+    if status != 200 or not isinstance(pulls, list):
+        raise _missing('the open pull requests could not be read (HTTP %d)' % status)
+    open_pr = next((p for p in pulls if isinstance(p, dict) and isinstance(p.get('number'), int)), None)
+    if open_pr is not None and (open_pr.get('base') or {}).get('ref') != base:
+        raise Refusal('bad_input', 'the open proposal pull request #%d targets %s, not %s; merge or close it first'
+                      % (open_pr['number'], (open_pr.get('base') or {}).get('ref'), base))
+
+    if not _fetch(top, env, base):
+        raise Refusal('api_error', 'the base branch %s could not be fetched' % base)
+    parent = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip()
+    if not re.fullmatch(r'[0-9a-f]{40,64}', parent):
+        raise Refusal('api_error', 'the base branch tip could not be read')
+    existing = None
+    if _fetch(top, env, branch):
+        existing = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip() or None
+    blob = (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip()
+    index = {'GIT_INDEX_FILE': str(Path(scratch) / 'assure-proposal.index')}
+    tree = None
+    if blob and _git(top, env, 'read-tree', parent, extra=index) is not None and _git(
+            top, env, 'update-index', '--add', '--cacheinfo', '100644,%s,%s' % (blob, rel), extra=index) is not None:
+        tree = (_git(top, env, 'write-tree', extra=index) or b'').decode().strip()
+    if not tree:
+        raise Refusal('api_error', 'the proposal commit could not be built')
+    title = TITLE
+    body = pull_request_body(record, rel)
+    commit = existing
+    same = existing and (_git(top, env, 'rev-parse', existing + '^{tree}', existing + '^') or b'').decode().split() \
+        == [tree, parent]
+    if not same:                                    # a new or changed draft: one commit on the base tip
+        who = {'GIT_AUTHOR_NAME': BOT[0], 'GIT_AUTHOR_EMAIL': BOT[1], 'GIT_COMMITTER_NAME': BOT[0],
+               'GIT_COMMITTER_EMAIL': BOT[1]}
+        commit = (_git(top, env, 'commit-tree', tree, '-p', parent, '-F', '-',
+                       data=('%s\n\n%s' % (title, body)).encode(), extra=who) or b'').decode().strip()
+        # the force is on Assure's own branch only: `branch` is never the base or the head (checked above)
+        if not commit or _git(top, env, 'push', '--quiet', 'origin',
+                              '+%s:refs/heads/%s' % (commit, branch)) is None:
+            raise _missing('the push to %s was refused' % branch)
+    if open_pr is not None:
+        status, doc = github.call('PATCH', '/repos/%s/pulls/%d' % (repo, open_pr['number']),
+                                  {'title': title, 'body': body})
+        doc = doc if status == 200 and isinstance(doc, dict) else open_pr
+        return {'branch': branch, 'commit': commit, 'number': open_pr['number'], 'url': str(doc.get('html_url') or ''),
+                'created': False}
+    status, doc = github.call('POST', '/repos/%s/pulls' % repo,
+                              {'title': title, 'head': branch, 'base': base, 'body': body})
+    if status != 201 or not isinstance(doc, dict) or not isinstance(doc.get('number'), int):
+        if existing is None:                        # leave no branch of ours without its pull request
+            _git(top, env, 'push', '--quiet', 'origin', ':refs/heads/%s' % branch)
+        raise _missing('the pull request could not be opened (HTTP %d)' % status)
+    return {'branch': branch, 'commit': commit, 'number': doc['number'], 'url': str(doc.get('html_url') or ''),
+            'created': True}
+
+
+def summary_markdown(record, rel, proposed):
+    """The job summary's section for an unaccepted draft: what it is, where it was proposed, the fields to confirm."""
+    out = ['', '### Declaration: %s' % BOUNDED, '',
+           'This check ran on a declaration drafted from the repository (`%s`). %s' % (rel, proposed), '',
+           '| Field to confirm | Read at |', '| --- | --- |']
+    for p in record['confirm']:
+        out.append('| `%s` | %s |' % (p, _read_at(record, p)))
+    return '\n'.join(out) + '\n'
+
+# execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

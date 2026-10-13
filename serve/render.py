@@ -55,7 +55,8 @@ serve-016 (DIRECTOR_DECISION-073 and Addendum 1; DESIGN-004 section 2): an envel
 one deterministic line in closed words (`verdict_line`), the job summary's headline, the Action's one first notice and
 the subject of its log line:
 - red: "red: <coverage>; <bounds>[; prove-class obligations: p (unproven: u)]; disproven: <id> — <object>, <access
-  path>, <locator>" from the first of `red_findings` and its first witness; a prove-class obligation with no holds
+  path>, <locator>" from the first of `red_findings` and its first witness ("disproven: k, first <id> — …" when k > 1
+  are disproven, issue #1038); a prove-class obligation with no holds
   reads "not proven: <id> — <reason>; <action>", and a security obligation the strict preset names "unresolved by your
   choice (strict): <id> — <reason>; <action>".
 - green: "green: <coverage>; <bounds>[; prove-class ...]; nothing disproven; established: h of N; not established:
@@ -107,6 +108,8 @@ import datetime
 import html
 import re
 import unicodedata
+
+from .outcomes import REPO_PATH_RE
 
 CAP = 300
 MAX_ANNOTATIONS = 50
@@ -536,23 +539,49 @@ def http_has_needs_intent(envelope):
                    for e in env.get('not_established') or ()))
 
 
+LOCATOR_KEYS = frozenset({'path', 'line'})
+
+
+def warning_locator(entry):
+    """issue #900: (path, line) of a warning entry's optional `locator`, or None. The shape is closed: exactly the keys
+    `path` (a repository path, `outcomes.REPO_PATH_RE` in full) and `line` (a positive int, not a bool); anything else
+    is no locator, and the warning renders its text alone."""
+    loc = entry.get('locator') if isinstance(entry, dict) else None
+    if not isinstance(loc, dict) or set(loc) != LOCATOR_KEYS:
+        return None
+    path, line = loc['path'], loc['line']
+    if not isinstance(path, str) or REPO_PATH_RE.fullmatch(path) is None:
+        return None
+    if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+        return None
+    return path, line
+
+
+def warning_text(entry):
+    """issue #900: one warning's shown text: its `text`, then " (<path>:<line>)" when it carries a locator."""
+    loc = warning_locator(entry)
+    return entry['text'] if loc is None else '%s (%s:%d)' % (entry['text'], loc[0], loc[1])
+
+
 def warning_texts(envelope):
-    """serve-041: the text of each entry of the verdict's `warnings` list (an envelope without one has none)."""
+    """serve-041: the text of each entry of the verdict's `warnings` list (an envelope without one has none); issue #900:
+    an entry with a `locator` shows it after the text as "(<path>:<line>)"."""
     env = envelope if isinstance(envelope, dict) else {}
     w = env.get('warnings')
-    return [w_['text'] for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str) and w_['text']] \
+    return [warning_text(w_) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str) and w_['text']] \
         if isinstance(w, list) else []
 
 
 WARNING_TITLES = {'endpoint_non_success': 'Assure endpoint', 'known_limit': 'Assure known limit',
-                  'declared_ignored': 'Assure declaration key ignored'}
+                  'declared_ignored': 'Assure declaration key ignored',
+                  'dynamic_registration': 'Assure dynamic registration'}
 
 
 def warning_items(envelope):
     """serve-048: (kind, text) of each entry of the verdict's `warnings` list, in order, for the annotation titles."""
     env = envelope if isinstance(envelope, dict) else {}
     w = env.get('warnings')
-    return [(w_.get('kind'), w_['text']) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str)
+    return [(w_.get('kind'), warning_text(w_)) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str)
             and w_['text']] if isinstance(w, list) else []
 
 
@@ -584,6 +613,18 @@ _PYTHON_BOUND_ACTION = 'reduce the input to the bound the reason names and resub
 _STRUCTURAL_REFUSAL = re.compile(r'([a-z][a-z0-9_]+) \(([^,()\r\n]{1,200}), ([1-9][0-9]*),')
 
 
+def source_candidates(source, files):
+    """The repository paths (raw/repository/ stripped) of the manifest `files` that a structural refusal's recorded
+    `source` (a dotted module, or a file name ending .py or .html) can name: <stem>.py, <stem>/__init__.py and the
+    literal name. More than one is ambiguous and is never guessed."""
+    stem = source.replace('.', '/')
+    names = {'raw/repository/' + stem + '.py', 'raw/repository/' + stem + '/__init__.py'}
+    if source.endswith(('.py', '.html')):
+        names.add('raw/repository/' + source)
+    return {n[len('raw/repository/'):] for f in files or () if isinstance(f, dict)
+            and isinstance(n := f.get('path'), str) and n in names}
+
+
 def representation_action(profile_id=None, reason=None, files=()):
     """The next step of a `representation` row for the profile `profile_id` (None or unlisted: the engine-wide text).
     For a profile of NO_COLLECTOR_REPRESENTATION, `reason` (the row's own reason, clipped to REASON_CLIP) follows the
@@ -608,13 +649,8 @@ def representation_action(profile_id=None, reason=None, files=()):
             pointer = _PYTHON_INPUT_ACTION
         if files:
             if '/' not in source:
-                stem = source.replace('.', '/')
                 literal = source.endswith(('.py', '.html'))
-                names = {'raw/repository/' + stem + '.py', 'raw/repository/' + stem + '/__init__.py'}
-                if literal:
-                    names.add('raw/repository/' + source)
-                candidates = {n[len('raw/repository/'):] for f in files if isinstance(f, dict)
-                              and isinstance(n := f.get('path'), str) and n in names}
+                candidates = source_candidates(source, files)
                 if len(candidates) == 1:
                     source = next(iter(candidates))
                 elif len(candidates) > 1:
@@ -993,6 +1029,46 @@ def not_established_lines(entries, envelope=None):
     return out
 
 
+NOT_OBSERVED_GROUP_ACTION = 'collect the facts each row names'
+
+
+def undecided_by_cause(entries, profile_id=None):
+    """Issue #1193: the not-established entries grouped by `reason_class`, one {class, rows, action, owner, ids} per
+    class, ordered by row count (descending, ties by class name). `action` is the action all the group's entries share,
+    for every class (the HTTP profile's needs_intent wording, a single locator, a row's own representation reason);
+    when they differ, the class's fixed action: for representation `representation_action(profile_id)` without a row's
+    reason, except on python-auth-declared-model, whose fallback is _PYTHON_INPUT_ACTION (its pointer is the
+    dynamic-registration wording, which only a row naming that cause carries; REFUTATION-r4 HIGH-1); for every other
+    class its CLASS_ACTIONS text, else NOT_OBSERVED_GROUP_ACTION."""
+    groups = {}
+    for e in entries or ():
+        if isinstance(e, dict):
+            groups.setdefault(str(e.get('reason_class') or 'representation'), []).append(e)
+    out = []
+    for cls, group in groups.items():
+        first = group[0].get('action')
+        if isinstance(first, str) and all(e.get('action') == first for e in group):
+            action = first
+        elif cls == 'representation':
+            action = (_PYTHON_INPUT_ACTION if profile_id == 'python-auth-declared-model'
+                      else representation_action(profile_id))
+        else:
+            action = CLASS_ACTIONS.get(cls, NOT_OBSERVED_GROUP_ACTION)
+        out.append({'class': cls, 'rows': len(group), 'action': action, 'owner': CLASS_OWNERS.get(cls),
+                    'ids': [e.get('id') for e in group]})
+    return sorted(out, key=lambda g: (-g['rows'], g['class']))
+
+
+def undecided_lines(entries, envelope=None):
+    """Issue #1193: the summary's group lines, largest first, before the per-row list: '- <n> row(s) not established
+    — next step: <action> (<class label>: <reason words>)', so the first names the count and the action that decides it."""
+    env = envelope if isinstance(envelope, dict) else {}
+    return ['- %s' % _esc_line('%d %s not established — next step: %s (%s: %s)' % (
+        g['rows'], 'row' if g['rows'] == 1 else 'rows', _clip(g['action']), label(g['class']),
+        REASON_WORDS.get(g['class'], REASON_WORDS['representation'])))
+        for g in undecided_by_cause(entries, env.get('profile'))]
+
+
 def _coverage_words(env):
     parts = []
     sc = _scope(env)
@@ -1093,8 +1169,10 @@ def _declared_actual_words(w):
 def _red_words(env, finding):
     kind, ob_id, row = finding
     if kind == 'disproven' and row is not None:
-        return 'disproven: %s — %s' % (_clip(ob_id if ob_id is not None else row.get('machine')),
-                                       _witness_parts(env, row))
+        k = len(disproven_rows(env))                 # issue #1038: the count, then the first in reading order
+        return 'disproven: %s%s — %s' % ('%d, first ' % k if k > 1 else '',
+                                         _clip(ob_id if ob_id is not None else row.get('machine')),
+                                         _witness_parts(env, row))
     if kind == 'chosen':                             # REFUTATION-028 F2: never "disproven"
         return 'stopped by your choice: %s — %s' % (_clip(label((row or {}).get('status'))),
                                                      _clip(ob_id if ob_id is not None else (row or {}).get('machine')))
@@ -1113,6 +1191,20 @@ def _red_words(env, finding):
     if entry is None:                                # no reading at all: the locator fallback (issue #652: named as such)
         entry = {'id': _clip(ob_id), 'reason_class': 'not_observed', 'action': 'collect the facts %s reads' % _clip(ob_id)}
     return '%s%s — %s; %s' % (lead, _clip(ob_id), _clip(reason_words(entry, env)), _clip(entry.get('action')))
+
+
+def disproven_rows(envelope):
+    """issue #1038: one {id, machine, status, witness, platform_owned, requirement} per 'disproven' finding of `red_findings`, in
+    its order (the customer's own before platform-owned), `witness` the first line's witness words (None when the
+    reading carries none). The summary lists them so one read names every disproof the headline counts;
+    REFUTATION-PR1070-001 F1: `platform_owned` (`platform_owned`) marks the ones that are someone else's to fix; F2:
+    `requirement` names the requirements.md row a disproof comes from when no obligation of it is already listed (its
+    `id` is then the requirement's), else None."""
+    env = envelope if isinstance(envelope, dict) else {}
+    return [{'id': ob_id, 'machine': row.get('machine'), 'status': row.get('status'),
+             'witness': witness_words(env, row), 'platform_owned': platform_owned(env, row),
+             'requirement': row.get('requirement')}
+            for kind, ob_id, row in red_findings(env) if kind == 'disproven' and isinstance(row, dict)]
 
 
 def _could_not_look_words(env):
@@ -1218,9 +1310,24 @@ def _refused_counts(entries):
     return {'count': sum(by.values()), 'by_status': by}
 
 
+def recounted_machines_refused(env):
+    """Issue #411: {count, by_status} over `machines.refused` when it names a machine and each of its entries carries
+    a string `status`, as the envelope writer has derived the block since issue #793 (a verdict stored before #793
+    counted its refusal rows only and says 0 beside a list of three); None otherwise, so an entry stored without a
+    status (before issue #172) never becomes a None key (REFUTATION-r4 HIGH-1)."""
+    m = _machines(env) if isinstance(env, dict) else None
+    refused = [r for r in m['refused'] if isinstance(r, dict)] if m is not None else []
+    if refused and all(isinstance(r.get('status'), str) for r in refused):
+        return _refused_counts(refused)
+    return None
+
+
 def machines_refused_block(env):
     """The envelope's `machines_refused` {count, by_status}, or the same derived from `refused_machine_entries` for
-    an older stored envelope (one built before serve-071)."""
+    an older stored envelope (one built before serve-071); `recounted_machines_refused` when that is not None."""
+    recount = recounted_machines_refused(env)
+    if recount is not None:
+        return recount
     mr = env.get('machines_refused') if isinstance(env, dict) else None
     if isinstance(mr, dict) and type(mr.get('count')) is int and isinstance(mr.get('by_status'), dict):
         return mr
@@ -1868,6 +1975,7 @@ def summary_markdown(envelope, now=None):
     entries = [e for e in env.get('not_established') or () if isinstance(e, dict)] if line is not None else []
     gaps = [e for e in entries if e.get('id') not in unsupported]
     if env.get('colour') == 'green' and gaps:
+        out += undecided_lines(gaps, env)          # issue #1193: by cause, largest first, then row by row
         out += not_established_lines(gaps[:MAX_ANNOTATIONS], env)
         if len(gaps) > MAX_ANNOTATIONS:
             out.append('- and %d more' % (len(gaps) - MAX_ANNOTATIONS))

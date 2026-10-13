@@ -134,6 +134,10 @@ MALFORMATIONS = MappingProxyType({
     'manifest_rows': 'COLLECTION-SIDECAR.json and REDACTION-MANIFEST.json rows that agree for this file',
     # the checker's derive refused the collection (the derive's own typed kind is in `field`)
     'derive_refused': 'a collection the derive step accepts; the field names the derive\'s own refusal kind',
+    # issue #1959: the python-auth reader's own schema fault of raw/declaration.json (the check's detail.kind), at
+    # the malformation's pointer
+    'declaration_invalid': 'a raw/declaration.json that meets its schema at the pointer named (QUICKSTART-API.md '
+                           'section 15 gives the shape)',
     # the selected scope a profile row reads from the request (docs/PROFILES.md), bound before the checker runs
     'scope_missing': 'the selected scope this profile checks, as a list of 1 to 256 distinct ids of A-Z, a-z, 0-9, '
                      '_, . and -; a profile whose scope is fixed takes none',
@@ -172,6 +176,9 @@ DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_obs
 NOT_SERVABLE_NEEDS = frozenset({'checker_binding', 'writer_qualification'})
 _SEGMENTS = r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}/){0,10}[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}'
 NAME_RE = re.compile(r'raw/' + _SEGMENTS)
+# issue #900: a warning locator's `path` is a repository path with NAME_RE's segments and no raw/ prefix: relative, up
+# to 11 segments, none empty, each starting with a letter, digit or underscore (so no `.`, `..` or leading dash).
+REPO_PATH_RE = re.compile(_SEGMENTS)
 # issue #940: what a `file_name` malformation's `file` may name besides a raw/ name: a name of the same grammar outside
 # raw/ (the bundle root zipped instead of raw/, the mistake the reason then tells the caller to fix). Same alphabet,
 # bounds and no `.`/`..` segment as NAME_RE; other kinds and the profiles' own locator checks keep NAME_RE.

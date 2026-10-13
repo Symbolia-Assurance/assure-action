@@ -14,10 +14,10 @@ The top action stays "state it in requirements.md". In the summary under the lin
 
 ## Red: something disproven
 
-The same readings with `fail-on: fails,deviates`. A deviation is now a status you fail on, so the first one in reading order is the witness: its object, its access path and its locator.
+The same readings with `fail-on: fails,deviates`. A deviation is now a status you fail on, so both are disproven: the line counts them and the first one in reading order is the witness: its object, its access path and its locator. With one disproof the count is left out: "disproven: HBA-5-OB — …".
 
 ```text
-red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; deviations: 2; disproven: HBA-5-OB — postgres, hba-128, raw/pg_hba.conf:128 'host all all all scram-sha-256'
+red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; deviations: 2; disproven: 2, first HBA-5-OB — postgres, hba-128, raw/pg_hba.conf:128 'host all all all scram-sha-256'
 ```
 
 ## Yellow: could not look

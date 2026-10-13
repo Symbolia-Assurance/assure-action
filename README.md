@@ -8,7 +8,7 @@ The Action collects facts in your runner. The check runs on Symbolia's server at
 
 Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository with your declaration, checked free in process (the API quick start, section 15).
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
@@ -42,6 +42,8 @@ You need:
 - outbound HTTPS from the runner to `api.symbolia.ai` (port 443);
 - Python 3.14 on the runner and, to collect over a connection, the PostgreSQL client (`psql`);
 - a collection role with read access to settings and statistics only, if you collect over a connection.
+
+There is no route to rotate or revoke a key and no login command: a GitHub sign-in key lasts at most an hour, and your Symbolia contact replaces or revokes a stored key.
 
 The smallest job, for files you collected and committed in `collected/`; put it under `jobs:` in your workflow:
 
@@ -125,7 +127,7 @@ The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`,
 
 ## What is never charged
 
-Two modes of the Action charge nothing. `mode: lint` collects and checks your files in the runner, then sends them to `POST /v1/lint`, which lists the problems it finds; nothing is charged, but it counts against your rate limits. `mode: local` runs the checker in the runner and sends nothing; it runs only from the Assure source tree, and this published Action refuses it with `bad_input`. Deliberate feedback (the `feedback` input) is free on every plan. A check in `mode: api` and its report can be charged: what a check costs is in [section 7 of the full quickstart](docs/QUICKSTART-ACTION.md#7-the-fail-on-policy-and-exit-codes), and what a report costs in [The report](docs/QUICKSTART-ACTION.md#the-report).
+Two modes of the Action charge nothing. `mode: lint` collects and checks your files in the runner, then sends them to `POST /v1/lint`, which lists the problems it finds; nothing is charged, but it counts against your rate limits. `mode: local` runs the checker in the runner and sends nothing; it runs only from the Assure source tree, and this published Action refuses it with `bad_input`. From the source tree it also runs as one command, with no `INPUT_*` variables set: `python3 -m action.entry --mode local --artefacts DIR --profile P [--fail-on ...] [--out FILE]`. Each `--<input> VALUE` (or `--<input>=VALUE`) sets the input of that name (`--out` is `output`); an unknown flag, or one with no value, stops with exit 2 naming its `INPUT_` form, and `api-key`, `connection` and `identity-key` are read from the environment only. Deliberate feedback (the `feedback` input) is free on every plan. A check in `mode: api` and its report can be charged: what a check costs is in [section 7 of the full quickstart](docs/QUICKSTART-ACTION.md#7-the-fail-on-policy-and-exit-codes), and what a report costs in [The report](docs/QUICKSTART-ACTION.md#the-report).
 
 ## Where the verdict goes
 
@@ -144,6 +146,12 @@ Three lines the Action prints to the job log, with their placeholders, so a work
 | Names not read (`NOTICE_LINE`) | `::notice title=Assure::<count> name(s) not read by profile <profile>: <names>` | `<count>` is how many collected names the profile does not read; `<profile>` is your `profile` input; `<names>` is the first 20 of them, comma separated, then ` and N more` when there are more. Printed only when at least one name was not read. |
 | Lint summary (`LINT_LINE`) | `Assure: lint: <reading>; <findings> finding(s); nothing was charged; policy exit <exit>; <output>` | `<reading>` is `ready for a check` or `fix these before a check`; `<findings>` is the number of findings; `<exit>` is 0 or 2; `<output>` is the `output` path the lint record was written to. The last line of a `mode: lint` run. |
 | Withheld (`WITHHELD_LINE`) | `Assure: <withheld>` | `<withheld>` is the sentence of counts starting `Withheld in the runner before anything was sent:`, followed by one more sentence starting ` Also:` when expressions, unparseable lines or not-observed lines were also withheld; the same text as the job summary's "Withheld in the runner" section. Printed before anything is sent. |
+
+The order each mode prints these lines in, as `entry.ORDER` in `action/entry.py` names them (`tests/serving/test_issue_1960_accept.py` pins it against a run in each mode). Each is printed only when its condition above holds; other lines, such as the masks, the annotations and the verdict line, can come before, between and after them.
+
+- `mode: api`: `WITHHELD_LINE`, `NOTICE_LINE`
+- `mode: local`: `WITHHELD_LINE`, `NOTICE_LINE`
+- `mode: lint`: `WITHHELD_LINE`, `NOTICE_LINE`, `LINT_LINE`
 
 The text after `title=Assure::` in the notice and the `<output>` path in the lint summary are printed as workflow-command data: a `%` in them is printed as `%25` and a newline as `%0A`, and the notice's text is cut to 300 characters ending in `…` when a long name list exceeds that.
 

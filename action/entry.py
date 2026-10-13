@@ -8,7 +8,10 @@ INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVI
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
 INPUT_REPORT, INPUT_FEEDBACK, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_FRESH_CHECK, INPUT_OUTPUT, INPUT_DECLARATION), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP, and (serve-019) GITHUB_WORKSPACE, GITHUB_REPOSITORY and GITHUB_SHA
-for `requirements_upload`. Before anything else is printed,
+for `requirements_upload`. Issue #1953: run from the source tree as `python3 -m action.entry --mode local --artefacts DIR
+--profile P [--fail-on ...] [--out FILE]`, each `--<input> VALUE` sets its INPUT_* name (`--out` is INPUT_OUTPUT) before
+any input is read; an unknown flag is `bad_input` naming its INPUT_ form, and the API key, the connection and the
+identity key are never read from a flag. Before anything else is printed,
 the API key and the connection are masked with `::add-mask::`. When run as a script, the process environment is then cut
 to a short list (PATH, locale, temporary directory, proxy and CA settings), so no child process inherits a key, the
 connection or a runner token.
@@ -129,6 +132,8 @@ readable server major, or a major outside 14..18, nothing is drafted and nothing
 (`_proposal_module`): action/declare_proposal.py in the public tree, assure/declare_proposal.py in this checkout.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
+`action.declaration_draft` (python-auth's declaration drafted and proposed in Assure's own pull request through
+`action.client.GitHub` with the workflow token GITHUB_TOKEN, never printed; serve-102 r2),
 `action.repository_manifest` (python-auth's raw/REPOSITORY.json, serve-099), `action.withhold`, `serve` (flags), `serve.bundle`, `serve.markers`, `serve.outcomes` and `serve.render`.
 """
 from __future__ import annotations
@@ -147,8 +152,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from action import client as client_mod, http_identity, repository_manifest, withhold  # noqa: E402
-from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, allow_list, canonical_fail_on  # noqa: E402
+from action import client as client_mod, declaration_draft, http_identity, repository_manifest, withhold  # noqa: E402
+from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, GitHub, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, is_development, markers, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
 
@@ -168,6 +173,11 @@ MAX_NOTICE_NAMES = 20
 NOTICE_LINE = '::notice title=Assure::%(count)d name(s) not read by profile %(profile)s: %(names)s'
 LINT_LINE = 'Assure: lint: %(reading)s; %(findings)d finding(s); nothing was charged; policy exit %(exit)d; %(output)s'
 WITHHELD_LINE = 'Assure: %(withheld)s'
+# Issue #1960: the order each mode prints the lines above in, each only when its condition holds; README-ACTION.md
+# lists the same order under its table and tests/serving/test_issue_1960_accept.py pins it against a run in each mode.
+ORDER = {'api': ('WITHHELD_LINE', 'NOTICE_LINE'),
+         'local': ('WITHHELD_LINE', 'NOTICE_LINE'),
+         'lint': ('WITHHELD_LINE', 'NOTICE_LINE', 'LINT_LINE')}
 # issue #1263 (GitHub OIDC sign-in): with no api-key the Action signs in with the job's GitHub OIDC token; with neither,
 # it stops before anything is collected or sent and names the one workflow line to add
 NO_CREDENTIAL_REASON = ('Assure needs this workflow\'s GitHub identity or an api-key. Add `permissions: id-token: write` '
@@ -227,6 +237,38 @@ def scrub_process_env(environ):
     for k in list(environ):
         if k not in KEEP_ENV:
             del environ[k]
+
+
+# issue #1953: the inputs a command-line flag may set (`--fail-on` is INPUT_FAIL_ON; `--out` is `--output`). A secret
+# on a command line is visible to every process on the host, so the three secret inputs are read from the environment only.
+FLAG_INPUTS = ('MODE', 'API_URL', 'PROFILE', 'ARTEFACTS', 'DECLARATION', 'COLLECTION_ROLE', 'COLLECTION_PRIVILEGES',
+               'DATA_DIR', 'CONFIG_DIRS', 'FAIL_ON', 'ALLOW_PARTIAL', 'SCOPE', 'SCOPE_BINDING', 'ACCEPTED_SCOPE_REF',
+               'REPORT', 'FEEDBACK', 'ALLOW_OVERAGE', 'REQUIREMENTS', 'FRESH_CHECK', 'OUTPUT')
+SECRET_INPUTS = ('API_KEY', 'CONNECTION', 'IDENTITY_KEY')
+
+
+def argv_inputs(argv):
+    """issue #1953: `--<input> VALUE` or `--<input>=VALUE` as {INPUT_<INPUT>: VALUE}, or (inputs read so far,
+    `bad_input` Refusal naming the INPUT_ form) for an unknown flag, a secret flag or a flag with no value."""
+    inputs, args = {}, list(argv)
+    while args:
+        arg = str(args.pop(0))
+        flag, eq, value = arg.partition('=')
+        name = flag[2:].upper().replace('-', '_') if flag.startswith('--') else ''
+        name = 'OUTPUT' if name == 'OUT' else name
+        if name in SECRET_INPUTS:
+            return inputs, Refusal('bad_input', '--%s is not a flag: set INPUT_%s in the environment'
+                                   % (flag[2:].lower(), name))
+        if name not in FLAG_INPUTS:
+            shown = 'INPUT_%s' % name if name and len(name) <= 64 and name.replace('_', '').isalnum() else 'an INPUT_ name'
+            return inputs, Refusal('bad_input', 'unknown flag: %s names no input (%s)'
+                                   % (_cmd_data(flag[:66]) if name else 'an argument', shown))
+        if not eq:
+            if not args:
+                return inputs, Refusal('bad_input', '%s needs a value (INPUT_%s)' % (flag, name))
+            value = str(args.pop(0))
+        inputs['INPUT_' + name] = value
+    return inputs, None
 
 
 def _plain(env, name, default=''):
@@ -503,7 +545,9 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None, is_mys
     artefacts = _plain(env, 'INPUT_ARTEFACTS')
     declaration_text = _plain(env, 'INPUT_DECLARATION')
     has_conn = bool(str(env.get('INPUT_CONNECTION') or '').strip())
-    if bool(artefacts) == has_conn:
+    # serve-102 (DD-156 item 3): python-auth with neither reads the checkout itself, in one step
+    checkout = profile == declaration_draft.PROFILE and not artefacts and not has_conn
+    if bool(artefacts) == has_conn and not checkout:
         raise Refusal('bad_input', 'set exactly one of connection and artefacts (%s set)'
                       % ('both are' if has_conn else 'neither is'))
     http_identity.parse_key_source(env.get('INPUT_IDENTITY_KEY'))     # serve-012: masked already, refused here
@@ -560,6 +604,9 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None, is_mys
         if str(config_dirs_text or '').strip(' \t\r\n:'):
             raise Refusal('bad_input', 'config-dirs applies only with connection; with artefacts, put the collected '
                           'files under raw/')
+        return out
+    if checkout:
+        out['checkout'] = True
         return out
     out['role'] = collect.check_role(_plain(env, 'INPUT_COLLECTION_ROLE'), conn)
     out['privileges'] = collect.check_privileges(_plain(env, 'INPUT_COLLECTION_PRIVILEGES'),
@@ -838,18 +885,20 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
         raise Refusal('bad_input', 'the feedback input is invalid') from None
 
 
-def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_dir=None, collector_sha256=_FROZEN,
+def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=None, collector_dir=None, collector_sha256=_FROZEN,
          psql='psql', mysql='mysql', collect_timeout=None, check_timeout=60, limits=None, cwd=None, client_factory=None) -> int:
     """Run one check as the Action; return the exit code. `load_checker`, `pin_path`, `collector_dir`,
     `collector_sha256`, `psql`, `limits` and `client_factory(base_url, api_key) -> Client` are test seams; production
-    passes none of them."""
+    passes none of them. `argv` (issue #1953): each `--<input> VALUE` sets its INPUT_* name over `env` before any
+    input is read; an unknown or secret flag is `bad_input`."""
     out = stdout if stdout is not None else sys.stdout
 
     def say(line):
         out.write(line + '\n')
         out.flush()
 
-    env = dict(env)
+    flags, argv_error = argv_inputs(argv or ())
+    env = {**dict(env or {}), **flags}
     cwd = cwd or os.getcwd()
     check_id = secrets.token_hex(16)
     raw_key = str(env.get('INPUT_API_KEY') or '')
@@ -880,6 +929,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         if on_runner:
             say(_mask(v))
     scrub = _Scrub(first)
+    scrub.add([str(env.get('GITHUB_TOKEN') or '')])   # serve-102 r2: the workflow token, never printed (GitHub masks it)
 
     def protect(value):
         """Issue #1263: a secret learnt during the run is masked (on a runner) and scrubbed before any use."""
@@ -907,7 +957,7 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'files': None}
+             'draft': None, 'files': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1047,6 +1097,64 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             is_mysql=is_mysql, root=root)       # issue #206: the identity producer's tree, as run_api gives it
         return verdict, ignored
 
+    def manifest_written(written):
+        if written is not None:
+            say('Assure: %s written in the runner: %d repository file(s), commit %s, tree %s' % (
+                repository_manifest.NAME, len(written['files']), written['commit'], written['tree']))
+
+    def declaration(collected, where, target, checkout):
+        """serve-102 (DD-150, DD-156): python-auth with no declaration runs on a draft, bounded by it; on a pull
+        request, a checkout's declaration that is not yet on the base branch is the same unaccepted draft."""
+        top = declaration_draft.toplevel(where, env)
+        rel = target.resolve().relative_to(top.resolve()).as_posix() if top is not None and \
+            str(target.resolve()).startswith(str(top.resolve()) + os.sep) else declaration_draft.CHECKOUT_PATH
+        if declaration_draft.NAME not in collected.files:
+            repo = {n[len(repository_manifest.PREFIX):]: d for n, d in collected.files.items()
+                    if n.startswith(repository_manifest.PREFIX)}
+            record = declaration_draft.draft(repo, client=state['client'])
+            data = declaration_draft.dumps(record['declaration'])
+            collected.files[declaration_draft.NAME] = data
+            state['draft'] = {'record': record, 'data': data, 'top': top, 'rel': rel}
+            say('Assure: %s drafted in the runner from %d repository file(s); %d field(s) to confirm' % (
+                declaration_draft.NAME, len(repo), len(record['confirm'])))
+        elif checkout and declaration_draft.is_pull_request(env) and top is not None:
+            # tri-state: True is a known match; False is a known absence; None is an unknown reading, bounded too
+            on_base = declaration_draft.on_base(top, rel, collected.files[declaration_draft.NAME], env)
+            if on_base is not True:
+                state['draft'] = {'record': None, 'data': None, 'top': top, 'rel': rel, 'unread': on_base is None}
+
+    def declaration_note():
+        """(log line, summary markdown, output line) for a run bounded by an unaccepted draft, proposing a new draft
+        first; ('', '', '') otherwise. Never changes the verdict, its file or its exit."""
+        d = state['draft']
+        if d is None:
+            return '', '', ''
+        base = _plain(env, 'GITHUB_BASE_REF') or 'the base branch'
+        if d['record'] is None:
+            told = '%s %s on %s%s; merging the pull request accepts it' % (
+                d['rel'], 'could not be read' if d.get('unread') else 'is not', base, '' if d.get('unread') else ' yet')
+            md = '\n### Declaration: bounded by an unaccepted declaration draft\n\n%s.\n' % render.esc(told)
+        else:
+            tmp = _scratch(env)
+            try:
+                if d['top'] is None:
+                    raise Refusal('bad_input', 'the artefacts directory is not inside a git checkout')
+                token = str(env.get('GITHUB_TOKEN') or '').strip()
+                github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token) if token else None
+                got = declaration_draft.propose(d['top'], d['rel'], d['data'], d['record'], env, tmp, github)
+                told = 'proposed in pull request #%d (%s), from %s into the base branch (commit %s); merging it accepts it' % (
+                    got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12])
+            except Refusal as e:
+                told = 'not proposed (%s); the draft is below' % scrub(e.reason)
+                say('::warning title=Assure declaration::%s' % _cmd_data(told))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'))
+            if told.startswith('not proposed'):
+                md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
+        return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
+                declaration_draft.OUTPUT_BOUNDED + '\n')
+
     def run_api():
         if out_error is not None:
             raise out_error
@@ -1093,6 +1201,15 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
                 root, (art if art.is_absolute() else Path(cwd) / art).resolve(), state['scratch'].resolve(), scope=scope)
             scope = sorted(binding['endpoint_tokens'])
             collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
+        elif inputs.get('checkout'):              # serve-102: python-auth from the checkout, in one step
+            top = Path(env.get('GITHUB_WORKSPACE') or cwd)
+            collected, modes = repository_manifest.from_checkout(top, allow, lim, env)
+            collected = withhold.apply(collected, allow)
+            target = top / declaration_draft.CHECKOUT_PATH
+            if os.path.isfile(target) and not os.path.islink(target):
+                collected.files[declaration_draft.NAME] = target.read_bytes()
+            manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
+            declaration(collected, top, target, checkout=True)
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             art = art if art.is_absolute() else Path(cwd) / art
@@ -1100,11 +1217,9 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
                 collected = withhold.apply(bundle.from_directory(art, allow, lim), allow)
             except Refusal as e:
                 raise _with_layout(e, allow, art) from None
-            # serve-099: python-auth's raw/REPOSITORY.json, from the checkout over the files sent, when none was given
-            written = repository_manifest.complete(collected, inputs['profile'], art, env)
-            if written is not None:
-                say('Assure: %s written in the runner: %d repository file(s), commit %s, tree %s' % (
-                    repository_manifest.NAME, len(written['files']), written['commit'], written['tree']))
+            manifest_written(repository_manifest.complete(collected, inputs["profile"], art, env))
+            if inputs["profile"] == declaration_draft.PROFILE:
+                declaration(collected, art, repository_manifest.raw_dir(art) / "declaration.json", checkout=False)
         elif is_mysql:
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'
@@ -1160,6 +1275,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             summary = _lint_markdown(found)
         except Exception as e:  # the class name only, never a value
             return failed(Refusal('api_error', 'the lint record could not be rendered (%s)' % type(e).__name__))
+        decl_line, decl_md, decl_out = declaration_note()       # serve-102
+        summary += decl_md
         try:
             _write_file(out_path, bundle.dumps(doc))
         except (OSError, ValueError) as w:
@@ -1172,13 +1289,17 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
             say('::warning title=%s::%s' % (_cmd_prop('Assure lint'), _cmd_data(_lint_line(f))))
         if ignored:
             say(_notice_line(ignored, _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE))
+        if decl_line:
+            say(decl_line)
         say(LINT_LINE % {'reading': 'ready for a check' if code == 0 else 'fix these before a check',
                          'findings': len(found), 'exit': code, 'output': _cmd_data(out_text)})
-        outputs('lint', code, 'lint-findings=%d\n' % len(found), lint_colour='green' if code == 0 else 'red')
+        outputs('lint', code, 'lint-findings=%d\n%s' % (len(found), decl_out), lint_colour='green' if code == 0 else 'red')
         return code
 
     try:
         try:
+            if argv_error is not None:                 # issue #1953: before any input is read
+                raise argv_error
             state['mode'] = _mode(env)
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'), state['mode'])   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
@@ -1224,6 +1345,8 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
         summary = render.upgrade_markdown(verdict) + summary   # launch 2026-10-12: the server's upgrade line, first
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
+    decl_line, decl_md, decl_out = declaration_note()           # serve-102: the draft bounds this verdict
+    summary += decl_md
     try:
         _write_file(out_path, bundle.dumps(verdict))
     except (OSError, ValueError) as w:
@@ -1248,11 +1371,13 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
     bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line
     if bound is not None:
         say('Assure: scope: %s' % _cmd_data(bound))
+    if decl_line:
+        say(decl_line)
     line = render.verdict_line(verdict)              # serve-016: the verdict line; an older server's coverage phrase
     line = render.first_line(verdict) if line is None else line
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line, cap=None) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
-    outputs(verdict['outcome'], code, report_extra, verdict)
+    outputs(verdict['outcome'], code, report_extra + decl_out, verdict)
     finish_feedback()
     return code
 
@@ -1260,6 +1385,6 @@ def main(env, *, root, stdout=None, load_checker=None, pin_path=None, collector_
 if __name__ == '__main__':
     _env = dict(os.environ)
     scrub_process_env(os.environ)
-    sys.exit(main(_env, root=_ROOT))
+    sys.exit(main(_env, root=_ROOT, argv=sys.argv[1:]))
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.
