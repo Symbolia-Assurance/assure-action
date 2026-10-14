@@ -19,11 +19,14 @@ Rules:
   §7 (4)): fail-on is applied at render on the stored verdict, so the key leaves it out: one bundle under any policy is
   one key, one check and one charge, and each answer is decided under the fail-on this submit sends.
 - Delivery failures (refused or reset connection, DNS, TLS, timeout, a 5xx with no failure envelope, a body that is not
-  bounded JSON or has no known schema, a body over 16 MiB) are retried on the same route with bounded backoff (3
+  bounded JSON or has no known schema, a body over 128 MiB: the server's 64 MiB stored-result bound and as much again for
+  what serving adds to a stored verdict, issue #2595) are retried on the same route with bounded backoff (3
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
   retried the same way, except that a `Retry-After` of at most 60 s is waited in place of the backoff (issue #2298:
   a full queue names `check_timeout_s`), and so is a longer one while the call's server_busy waits stay within
-  `total_wait_s` (issue #2475: a check wall bound above 60 s). `rate_limited` waits for `Retry-After` when it is at most 60 s, and sends
+  `total_wait_s` (issue #2475: a check wall bound above 60 s). On the check's POST a named server_busy wait of at least
+  1 s is also kept past the attempts while the call's server_busy waits plus that one stay within `total_wait_s`
+  (issue #2479: a queue full for more than two windows); the sign-in and the other routes keep the attempts. `rate_limited` waits for `Retry-After` when it is at most 60 s, and sends
   again while the waits it honoured stay within `total_wait_s` (each counted as at least 1 s; issue #2450: another job
   of the account can take the slot the first wait freed; issue #2465: a herd of them can outlast `attempts` waits).
   A typed failure envelope is raised as a Refusal with the server's outcome, reason and check id (an outcome name
@@ -86,7 +89,10 @@ FEEDBACK_RESPONSE_LIMITS = bundle.Limits(body_bytes=FEEDBACK_RESPONSE_BYTES, jso
 FEEDBACK_ID_RE = re.compile(r'fb-([0-9]{8})-[0-9a-f]{16}')
 DEFAULT_URL = 'https://api.symbolia.ai'
 LOOPBACK = frozenset({'127.0.0.1', '::1', 'localhost'})
-MAX_RESPONSE = 16 * 2 ** 20
+# issue #2592 (REG-048): at least serve/worker.py MAX_RESULT_BYTES (serve/store.py MAX_VERDICT_BYTES), the largest stored
+# result; issue #2595 (REG-051): the API serves a stored verdict with more on it (the replay marker, a fail-on
+# re-decision, a free account's upgrade line), so the bound is twice the stored one
+MAX_RESPONSE = 2 * 64 * 2 ** 20
 RESPONSE_LIMITS = bundle.Limits(body_bytes=MAX_RESPONSE, file_bytes=MAX_RESPONSE, files=1, json_depth=128)
 MAX_KEY = 512
 MAX_RETRY_AFTER_S = 60
@@ -395,9 +401,13 @@ class Client:
                             self._rate_slept += self.clock() - before
                             attempt -= 1                 # the honoured wait is not a delivery attempt
                             continue
-                    if refusal.outcome in RETRY_TYPED and attempt < self.attempts:
+                    wait = _retry_after(retry_after)         # issue #2298: the server's wait, when it names one
+                    # issue #2479 (REG-041): past the attempts, the check's POST keeps a named wait of at least 1 s
+                    # while this call's server_busy waits plus that one stay within total_wait_s
+                    kept = route == 'check' and wait is not None and 0 < wait \
+                        and busy_waited + wait <= self.total_wait_s
+                    if refusal.outcome in RETRY_TYPED and (attempt < self.attempts or kept):
                         last = refusal
-                        wait = _retry_after(retry_after)     # issue #2298: the server's wait, when it names one
                         # issue #2475 (REG-037): a wait past 60 s (a server whose check wall bound is above 60 s) is
                         # waited while this call's server_busy waits stay within total_wait_s
                         if wait is not None and (wait <= MAX_RETRY_AFTER_S or busy_waited + wait <= self.total_wait_s):

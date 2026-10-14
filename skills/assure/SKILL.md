@@ -186,7 +186,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `key_expired` | 2 | The API key is past its expiry date. |
 | `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits the API's `Retry-After` when it is at most 60 seconds and sends the same request again, for up to 300 seconds of waits on each request. |
 | `credit_exhausted` | 3 | The account's free credit is spent. |
-| `server_busy` | 3 | The API's queue stayed full after three attempts; between them the Action waits the API's `Retry-After` when it is at most 60 s, or a longer one while those waits add up to at most 300 s; the 300 s the Action waits for the check itself starts when the queue admits it. |
+| `server_busy` | 3 | The API's queue stayed full: the Action sends the check again after each refusal, three times in all, or more while the API names a `Retry-After` of at least 1 s and those waits add up to at most 300 s (five 60 s waits); between sends it waits the API's `Retry-After` when it is at most 60 s, or a longer one within the same 300 s; the 300 s the Action waits for the check itself starts when the queue admits it. The sign-in stops after three attempts. |
 | `api_unreachable` | 3 | The runner could not reach the API after three attempts. |
 | `api_error` | 3 | The API answered in a way the Action does not accept, after three attempts where a retry applies. |
 | `engine_digest_mismatch` | 3 | The server's engine does not match its pin, so it runs no check. |

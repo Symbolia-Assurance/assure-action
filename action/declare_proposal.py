@@ -53,6 +53,8 @@ ID_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 #: table privilege letters the declaration speaks of (aclitem letters r, a, w, d)
 TABLE_PRIVS = {"r": "SELECT", "a": "INSERT", "w": "UPDATE", "d": "DELETE"}
 TABLE_KINDS = ("r", "p")
+#: the tls_floor values the declaration schema and the M3 explorer represent (postgresql-declaration-v1.schema.json)
+TLS_VERSIONS = ("TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3")
 #: the derive step reads at most 32 privilege_queries rows (derive_lifted.py m1_acl scoped(...)[:32])
 QUERY_CAP = 32
 #: keys the snapshot gives no basis for: every one is reported unread, never drafted (observed needs_intent ids)
@@ -558,6 +560,22 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     else:
         d.unread("untrusted_roles", "no application role outside the owner and the administrators was drafted")
 
+    # tls_floor (TLS-1..TLS-5; issue #2555): the floor the server enforces today (pg_settings ssl_min_protocol_version),
+    # confirmed, since raising it is the operator's choice; a value the declared model cannot represent stays unread
+    floor = [(i, row) for i, row in enumerate(section("pg_settings") or [])
+             if isinstance(row, dict) and row.get("name") == "ssl_min_protocol_version"]
+    if not floor:
+        d.unread("tls_floor", "ssl_min_protocol_version was not collected (pg_settings)")
+    elif floor[0][1].get("setting") in TLS_VERSIONS:
+        d.put("tls_floor", floor[0][1]["setting"], SNAP + "/pg_settings/%d/setting" % floor[0][0])
+    else:
+        d.unread("tls_floor", "the observed ssl_min_protocol_version is not a TLS version name (%s)"
+                 % ", ".join(TLS_VERSIONS))
+    # key_file_mode, key_owner (TLS-1..TLS-5 after the floor): file facts the snapshot cannot show, so never drafted
+    for key in ("key_file_mode", "key_owner"):
+        d.unread(key, "the server key file's mode and owner are file facts the catalog snapshot does not show; "
+                      "TLS-1 to TLS-5 need them")
+
     for key in ALWAYS_UNREAD:
         d.unread(key, "the catalog snapshot gives no basis for it; the customer states it")
 
@@ -645,6 +663,7 @@ GOALS = (
 #: drafted keys no requirement row rests on, and why (the draft's notes name them)
 NO_ROW = {
     "id": "it names the declaration; no obligation reads it",
+    "tls_floor": "TLS-1 to TLS-5 also need key_file_mode and key_owner, which the catalog snapshot does not give",
     "replication_roles": "HBA-4 also needs standby_addresses, which the catalog snapshot does not give",
     "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
                        "snapshot does not give",
