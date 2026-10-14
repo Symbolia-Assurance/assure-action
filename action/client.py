@@ -21,9 +21,12 @@ Rules:
 - Delivery failures (refused or reset connection, DNS, TLS, timeout, a 5xx with no failure envelope, a body that is not
   bounded JSON or has no known schema, a body over 16 MiB) are retried on the same route with bounded backoff (3
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
-  retried the same way. `rate_limited` waits for `Retry-After` once when it is at most 60 s. A typed failure envelope
-  is raised as a Refusal with the server's outcome, reason and check id (an outcome name this client does not know is
-  `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
+  retried the same way, except that a `Retry-After` of at most 60 s is waited in place of the backoff (issue #2298:
+  a full queue names `check_timeout_s`). `rate_limited` waits for `Retry-After` when it is at most 60 s, and sends
+  again while the waits it honoured stay within `total_wait_s` (each counted as at least 1 s; issue #2450: another job
+  of the account can take the slot the first wait freed; issue #2465: a herd of them can outlast `attempts` waits).
+  A typed failure envelope is raised as a Refusal with the server's outcome, reason and check id (an outcome name
+  this client does not know is `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
   poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `key_expired`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
 - A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
@@ -88,7 +91,7 @@ RETRY_TYPED = frozenset({'server_busy'})
 CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')
 _TEXT_CAP = 300
-_CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id'})    # set by the client only, never by a server
+_CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id', 'server_charged'})    # set by the client only, never by a server
 # issue #1263 (GitHub OIDC sign-in): with no api-key, the Action asks GitHub for this job's OIDC token with this
 # audience and exchanges it at OIDC_PATH for a key that lives for the run (at most an hour)
 OIDC_AUDIENCE = 'assure'
@@ -141,7 +144,7 @@ def canonical_fail_on(text):
 
 
 def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requirements=None, repository=None,
-              commit=None, provenance=None):
+              commit=None, provenance=None, compile_requirements=None):
     """serve-023: the Idempotency-Key of one request, derived from its content: the first 32 hex of
     sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256,
     repository, commit, provenance, query}).
@@ -154,13 +157,17 @@ def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requi
     `submit` passes it), so the key never holds the fail-on words. The server compares the body and that query and
     answers a repeated key whose request differs with `bad_input`; fail-on is applied at render on the stored verdict,
     so a repeat under another fail-on is the same check, decided under the fail-on it sends. The key is a digest of the
-    whole document, never the bundle digest itself."""
+    whole document, never the bundle digest itself. Issue #2252: `compile_requirements`, when sent, joins the document
+    (absent otherwise, so every key made before it is unchanged): the same request with the reading off is another
+    check."""
     manifest = [{'path': n, 'bytes': len(files[n]), 'sha256': hashlib.sha256(bytes(files[n])).hexdigest()}
                 for n in sorted(files)]
     req = None if requirements is None else hashlib.sha256(requirements.encode('utf-8')).hexdigest()
     doc = {'bundle_sha256': bundle.bundle_sha256(manifest), 'profile': profile_id, 'scope_sha256': _digest_of(scope),
            'scope_binding_sha256': _digest_of(scope_binding), 'requirements_sha256': req, 'repository': repository,
            'commit': commit, 'provenance': provenance, 'query': query or ''}
+    if compile_requirements is not None:
+        doc['compile_requirements'] = compile_requirements
     return hashlib.sha256(bundle.canonical_json(doc)).hexdigest()[:32]
 
 
@@ -344,13 +351,15 @@ class Client:
                 if isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) and k not in _CLIENT_KEYS \
                         and (v is None or isinstance(v, (bool, int, float)) or isinstance(v, str)):
                     detail[k] = _clip(v) if isinstance(v, str) else v
+        if isinstance(doc.get('charged'), bool):
+            detail['server_charged'] = doc['charged']    # issue #1103: the charge the server stated, for the failure file
         detail['answered'] = route       # which request the API answered: the page says what left the runner
         return Refusal(name, _clip(doc.get('reason')), **detail)
 
     def _call(self, method, path, body=None, headers=None, *, route):
         """Send with retries on the same route (`route` names it for `_typed`). Returns (status, doc) for 200 and 202 with a parsed object; raises the
         typed Refusal for a failure envelope, `api_unreachable` or `api_error` once the attempts are spent."""
-        waited_retry_after = False
+        rate_waited = 0         # issue #2465 (REG-027): seconds of rate_limited Retry-After honoured, at most `total_wait_s`
         attempt = 0
         last = None
         while True:
@@ -368,16 +377,18 @@ class Client:
                     raise Refusal('api_error', 'the API answered %d without a failure envelope' % status) from None
                 if isinstance(doc, dict) and doc.get('schema') == FAILURE_SCHEMA:
                     refusal = self._typed(doc, status, route)
-                    if refusal.outcome == 'rate_limited' and not waited_retry_after:
+                    if refusal.outcome == 'rate_limited':
                         wait = _retry_after(retry_after)
-                        if wait is not None and wait <= MAX_RETRY_AFTER_S:
-                            waited_retry_after = True
+                        if wait is not None and wait <= MAX_RETRY_AFTER_S \
+                                and rate_waited + max(wait, 1) <= self.total_wait_s:
+                            rate_waited += max(wait, 1)
                             self.sleep(wait)
                             attempt -= 1                 # the honoured wait is not a delivery attempt
                             continue
                     if refusal.outcome in RETRY_TYPED and attempt < self.attempts:
                         last = refusal
-                        self.sleep(self._backoff(attempt))
+                        wait = _retry_after(retry_after)     # issue #2298: the server's wait, when it names one
+                        self.sleep(wait if wait is not None and wait <= MAX_RETRY_AFTER_S else self._backoff(attempt))
                         continue
                     raise refusal
                 if status in (200, 202) and isinstance(doc, dict):
@@ -432,7 +443,7 @@ class Client:
 
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
                scope_binding=None, accepted_scope_ref=None, limits=None, requirements=None, repository=None,
-               commit=None, provenance=None, key_from_bundle=False):
+               commit=None, provenance=None, compile_requirements=None, key_from_bundle=False):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
         built here under `limits` (default the serving limits) with the scope fields and the serve-019 requirements
@@ -446,9 +457,9 @@ class Client:
             body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                        scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                        requirements=requirements, repository=repository, commit=commit,
-                                       provenance=provenance)
+                                       provenance=provenance, compile_requirements=compile_requirements)
         elif (scope, scope_binding, accepted_scope_ref, requirements, repository, commit,
-              provenance) != (None,) * 7:
+              provenance, compile_requirements) != (None,) * 8:
             raise ValueError('pass the scope fields or a built body, not both')
         path = '/v1/checks'
         query = {}
@@ -463,7 +474,8 @@ class Client:
         if key_from_bundle:      # serve-035: the key's query leaves fail_on out (check_key)
             keyed = urllib.parse.urlencode({k: v for k, v in query.items() if k != 'fail_on'})
             idem = check_key(profile_id, files, keyed, scope=scope, scope_binding=scope_binding,
-                             requirements=requirements, repository=repository, commit=commit, provenance=provenance)
+                             requirements=requirements, repository=repository, commit=commit, provenance=provenance,
+                             compile_requirements=compile_requirements)
         else:
             idem = secrets.token_hex(16)
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
@@ -536,13 +548,14 @@ class Client:
             raise Refusal('api_error', 'the feedback receipt was not confirmed') from None
 
     def lint(self, profile_id, files, fail_on=None, *, allow_partial=False, scope=None, scope_binding=None,
-             accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None):
+             accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None,
+             compile_requirements=None):
         """serve-043: the free pre-flight of one upload (`POST /v1/lint`, serve/lint.py): the lint document (schema
         assure.serve.lint/v1) the API answers with. Nothing is charged and no check runs. Every other end is a Refusal."""
         body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                    scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                    requirements=requirements, repository=repository, commit=commit,
-                                   provenance=provenance)
+                                   provenance=provenance, compile_requirements=compile_requirements)
         query = {}
         if fail_on:
             query['fail_on'] = canonical_fail_on(fail_on)

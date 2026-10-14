@@ -1,6 +1,6 @@
 # Route 1: a connection to the server
 
-## Managed PostgreSQL and connection poolers (section 6)
+## Managed PostgreSQL and connection poolers
 
 On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. It can grant `pg_monitor`, and the collector this Action ships refuses `pg_monitor` as broader than it needs (section 2). So this Action version cannot collect from a Supabase database.
 
@@ -14,16 +14,17 @@ If the database is on Supabase, tell the operator so before any grant; do not gr
 
 ## 1. Get an API key
 
-The Action can get one for each run itself, and you store nothing. Give the job that runs Assure the permission `id-token: write`. The Action then asks GitHub for this workflow's identity token, made for Assure, and exchanges it at `POST /v1/auth/oidc` for a key that lives for this run only (at most one hour). Your Assure account is your GitHub owner (the user or organisation that owns the repository), on the free plan the first time it signs in. The key is masked in the job log before it is used.
+The Action can get one for each run itself, and you store nothing. Give the job that runs Assure the permission `id-token: write`. The Action then asks GitHub for this workflow's identity token, made for Assure, and exchanges it at `POST /v1/auth/oidc` for a key that lives for this run only (at most one hour). A sign-in key never rotates into a longer-lived key (`POST /v1/keys/rotate` refuses it `rotate_too_early`); the next run signs in again. Your Assure account is your GitHub owner (the user or organisation that owns the repository), on the free plan the first time it signs in. The key is masked in the job log before it is used.
 
 Naming one permission sets every other permission to none, so keep `contents: read` beside it, or `actions/checkout` fails on a private repository. The permission lets the job ask GitHub for an identity token for this repository; it gives no write access to the repository.
 
-The smallest job, for files you collected and committed in `collected/` (section 9); put it under `jobs:` in a workflow that runs on `pull_request` and on `push` to your default branch:
+The smallest job, for files you collected and committed in `collected/` (references/postgres-local.md, section 9); put it under `jobs:` in a workflow that runs on `pull_request` and on `push` to your default branch:
 
 ```yaml
     permissions:
       contents: read
       id-token: write
+      pull-requests: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@<full commit sha of the release you trust>
@@ -81,7 +82,7 @@ Rules for this role:
 - Grant it only these two roles. The collector refuses a broader role: `pg_monitor` or `pg_stat_scan_tables` in `collection-privileges` stops the Action with exit 2 (`bad_input`) before anything runs, and a role that belongs to either stops it with exit 3 (`collector_refused`). The collector also refuses to run if the role is a superuser, has `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, or belongs to any other role.
 - Allow it to log in through `pg_hba.conf` from the runner's address.
 
-The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so (section 8).
+The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so.
 
 ## 3. Store the connection as a secret
 
@@ -132,6 +133,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
     steps:
       - name: Set up Python 3.14
         uses: actions/setup-python@<full commit sha of the release you trust>
@@ -145,7 +150,6 @@ jobs:
         id: assure
         uses: Symbolia-Assurance/assure-action@beta
         with:
-          api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline
           connection: ${{ secrets.ASSURE_PG_CONNECTION }}
           collection-role: assure_collector
@@ -165,9 +169,19 @@ Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new
 
 To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
-This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line.
+This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line. The template above already does: it signs in with the workflow's GitHub identity, so you store no key. To use a stored key instead, pass it to the step:
 
-This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (section 9).
+```yaml
+      - name: Assure check
+        id: assure
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          api-key: ${{ secrets.ASSURE_API_KEY }}
+```
+
+**A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). Leave out `data-dir` and `config-dirs`: the runner cannot read the container's files, so each configuration file reads as a recorded gap (section 6, option c).
+
+This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (references/postgres-local.md, section 9).
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
@@ -195,7 +209,7 @@ The collector asks the server where each file is (`config_file`, `hba_file`, `id
 
 By default the runner cannot read these files. The data directory is mode 0700, and `pg_hba.conf` and `pg_ident.conf` are 0640, owned by `postgres`. There are three ways forward. The examples use Debian or Ubuntu, PostgreSQL 18 and a runner user named `runner`.
 
-The commands for (a) and (b), the two ways to let the runner read the configuration files, are in the quick start's section 6, with paths for Debian or Ubuntu; show them to the operator and let the operator choose and run one.
+The commands for (a) and (b), the two ways to let the runner read the configuration files, are in section 6, with paths for Debian or Ubuntu; show them to the operator and let the operator choose and run one.
 
 **(a) Run on the database host, with the runner in the `postgres` group.**
 
@@ -218,7 +232,7 @@ When the server keeps every configuration file in its data directory (the layout
 
 **(c) Managed PostgreSQL.** The runner has no access to the server's files. Leave out `data-dir` and `config-dirs`. Every reading that needs a file reads **not observed** or **representation**, with the file named. The readings from the catalog still come back.
 
-## Managed PostgreSQL and connection poolers (section 6)
+### Managed PostgreSQL and connection poolers
 
 Some managed services put a connection pooler in front of the server, and the pooler routes on the login name. Supabase's pooler, for example, takes the login name `assure_collector.<project-ref>`; inside the database the role is `assure_collector`.
 
@@ -227,11 +241,9 @@ Some managed services put a connection pooler in front of the server, and the po
 
 When the two differ, the Action logs in with the login name and the collector checks the role. If you leave `collection-role` unset behind such a pooler, the collector refuses with `collection_role_mismatch` (`collector_refused`, exit 3), and the reason says which name to set.
 
-On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. It can grant `pg_monitor`, and the collector this Action ships refuses `pg_monitor` as broader than it needs (section 2). So this Action version cannot collect from a Supabase database.
-
 Use the session pooler. Assure has run through Supabase's session pooler on port 5432. The collector runs each query in its own `psql` process, one short session per query; a transaction pooler has not been tested.
 
-The collector asks for a read-only session. A pooler may not pass the request on: through Supabase's session pooler the session was not read-only. The collector runs only fixed SELECT statements either way. The job summary states whether the session was read-only (section 8).
+The collector asks for a read-only session. A pooler may not pass the request on: through Supabase's session pooler the session was not read-only. The collector runs only fixed SELECT statements either way. The job summary states whether the session was read-only.
 
 The runner cannot read a managed server's configuration files, so the readings that need them read **not observed** or **representation**, as above.
 

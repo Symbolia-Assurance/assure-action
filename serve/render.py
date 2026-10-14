@@ -101,6 +101,13 @@ fallback reasons; any other reason (a typed refusal's own text) is bounded and e
 A written body enters the job summary through `report_markdown`: at most REPORT_CAP characters, every line HTML-escaped
 with link brackets, pipes, backticks and tildes escaped and link-shaped text as a code span, so it can carry its one
 bold span and its paragraphs and nothing else; `report_page_line(url)` names the page as a code span.
+
+The pull request comment (issue #2189; the demo-grade comment, 13 Oct 2026, `pr_comment_markdown`) labels each rule by
+its requirement id and sentence, says per holding rule what was checked in the checker's own words (never the default
+holds sentence), reads each rule not checked yet as one plain sentence for its reason class, and closes with what
+Assure read, the profile and the commit. Its one link is the file:line of a broken rule at the commit's blob on
+GitHub, built only from the Action's validated repository name, a commit id and a repository path and line; customer
+text in it stays a code span.
 """
 from __future__ import annotations
 
@@ -994,9 +1001,42 @@ def _quote_words(quote):
     return ' — quote USD %s–%s' % (_money(q.get('low'), 2), _money(q.get('high'), 2))
 
 
+EMPTY_DOMAIN_WORDS = 'empty domain, nothing to check'
+
+
+# issue #1292: the auth checker's reason when no elevation key is declared; it reads `vacuous`, or `missing_premise`
+# when requirements.md claims AUTH-5 (grade.py), and either way there is nothing to elevate
+EMPTY_DOMAIN_REASON = 'no elevation key is declared'
+EMPTY_DOMAIN_TEXTS = ('not established (vacuous)', 'not established (missing_premise)')
+
+
+def empty_domain_row(row, profile_id):
+    """True for an auth row whose domain is empty (issue #1292): the checker read it `EMPTY_DOMAIN_TEXTS` because no
+    elevation key is declared. An empty domain, not an input fault: it carries no owner and no action."""
+    r = row if isinstance(row, dict) else {}
+    return (profile_id == 'python-auth-declared-model' and r.get('status_text') in EMPTY_DOMAIN_TEXTS
+            and str(r.get('reason') or '').startswith(EMPTY_DOMAIN_REASON))
+
+
+def _vacuous_row(envelope, machine, ob_id):
+    """The envelope's empty-domain row (`empty_domain_row`) for machine and obligation, or None."""
+    env = envelope if isinstance(envelope, dict) else {}
+    return next((r for r in _rows(env) if r.get('machine') == machine and r.get('id') == ob_id
+                 and empty_domain_row(r, env.get('profile'))), None)
+
+
+def _empty_domain(entry, envelope):
+    """True for a not-established entry whose row is `_vacuous_row`."""
+    return _vacuous_row(envelope, entry.get('machine'), entry.get('id')) is not None
+
+
 def not_established_words(entry, envelope=None):
-    """The words of a not-established line after its id: '<reason> — <owner>: <needs>[ — quote USD a–b]'."""
+    """The words of a not-established line after its id: '<reason> — <owner>: <needs>[ — quote USD a–b]'; an empty
+    domain (`_empty_domain`) reads '<EMPTY_DOMAIN_WORDS> — <the row's reason>', with no owner and no action."""
     e = entry if isinstance(entry, dict) else {}
+    if _empty_domain(e, envelope):
+        reason = _vacuous_row(envelope, e.get('machine'), e.get('id')).get('reason')
+        return '%s%s' % (EMPTY_DOMAIN_WORDS, ' — %s' % _clip(reason) if reason else '')
     tail = '%s: %s' % (_clip(e['owner']), _clip(e.get('needs'))) if e.get('owner') else _clip(e.get('action'))
     return '%s — %s%s' % (_clip(reason_words(e, envelope)), tail, _quote_words(e.get('quote')))
 
@@ -1059,6 +1099,12 @@ def undecided_by_cause(entries, profile_id=None):
     return sorted(out, key=lambda g: (-g['rows'], g['class']))
 
 
+def decided_entries(entries, envelope=None):
+    """The not-established entries the #1193 groups read: every entry but an empty domain (`_empty_domain`, issue
+    #1292), which has no next step to group under."""
+    return [e for e in entries or () if not (isinstance(e, dict) and _empty_domain(e, envelope))]
+
+
 def undecided_lines(entries, envelope=None):
     """Issue #1193: the summary's group lines, largest first, before the per-row list: '- <n> row(s) not established
     — next step: <action> (<class label>: <reason words>)', so the first names the count and the action that decides it."""
@@ -1066,7 +1112,7 @@ def undecided_lines(entries, envelope=None):
     return ['- %s' % _esc_line('%d %s not established — next step: %s (%s: %s)' % (
         g['rows'], 'row' if g['rows'] == 1 else 'rows', _clip(g['action']), label(g['class']),
         REASON_WORDS.get(g['class'], REASON_WORDS['representation'])))
-        for g in undecided_by_cause(entries, env.get('profile'))]
+        for g in undecided_by_cause(decided_entries(entries, env), env.get('profile'))]
 
 
 def _coverage_words(env):
@@ -1102,6 +1148,59 @@ def _prove_words(env):
     if type(total) is not int or total <= 0:
         return None
     return 'prove-class obligations: %d (unproven: %d)' % (total, unproven if type(unproven) is int else total)
+
+
+def row_objects(envelope, row):
+    """[(object, [roles])] of an observed-profile M6 row's obligation `cases` in `readings` whose status is the row's
+    own, one entry per object in the order first read, its login roles in the order read (issue #2176: derive_observed.py
+    reads one case per (definer function, login), case id '<function>:<login>', and only when no function is a definer
+    one V2-03 case per login, case id 'invoker:<login>', which names no object); [] for another profile or machine
+    (their case ids have other shapes), when every case id of the obligation is 'invoker:<login>' (so a database whose
+    only definer is named 'invoker' reads no names, never a wrong one) and when the reading carries no such cases.
+    Never raises."""
+    try:
+        profile = envelope.get('profile')
+        if (profile.get('id') if isinstance(profile, dict) else profile) != 'postgresql-observed-baseline' or \
+                row.get('machine') != 'M6':
+            return []
+        rd = (envelope.get('readings') or {}).get(row.get('machine'))
+        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
+        obs = rd.get('obligations') if isinstance(rd, dict) else None
+        ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
+            (o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None) if isinstance(obs, list) \
+            else None
+        cases = ob.get('cases') if isinstance(ob, dict) else None
+        cases = cases if isinstance(cases, list) else []
+        ids = [c.get('case_id') for c in cases if isinstance(c, dict) and isinstance(c.get('case_id'), str)]
+        if all(i.startswith('invoker:') for i in ids):
+            return []
+        objects = {}
+        for case in cases:
+            if not isinstance(case, dict) or case.get('status') != row.get('status'):
+                continue
+            case_id = case.get('case_id')
+            if not isinstance(case_id, str) or ':' not in case_id:
+                continue
+            name, role = case_id.rsplit(':', 1)
+            roles = objects.setdefault(name, [])
+            if role not in roles:
+                roles.append(role)
+        return list(objects.items())
+    except (AttributeError, TypeError):
+        return []
+
+
+def objects_text(envelope, row):
+    """'15 objects: fn_a (roles app, report), fn_b (role app), ... and 10 more' for the row's objects (`row_objects`,
+    at most MAX_WITNESSES named, each name and role bounded); None when the reading carries no such cases."""
+    objects = row_objects(envelope, row)
+    if not objects:
+        return None
+    named = ['%s (%s %s)' % (_clip(name), 'role' if len(roles) == 1 else 'roles', ', '.join(_clip(r) for r in roles))
+             for name, roles in objects[:MAX_WITNESSES]]
+    more = len(objects) - MAX_WITNESSES
+    return '%d %s: %s%s' % (len(objects), 'object' if len(objects) == 1 else 'objects', ', '.join(named),
+                            ' and %d more' % more if more > 0 else '')
 
 
 def _witness_parts(env, row):
@@ -1360,17 +1459,34 @@ def needs_words(row):
     return '%s; %s' % (status, NEEDS_UNTABLED)
 
 
+def confirm_leaves(envelope):
+    """issue #651: the JSON pointers a declared-model envelope's `declaration.confirm_leaves` names (strings only);
+    [] for an envelope without the block."""
+    env = envelope if isinstance(envelope, dict) else {}
+    block = env.get('declaration')
+    leaves = block.get('confirm_leaves') if isinstance(block, dict) else None
+    return [p for p in leaves if isinstance(p, str)] if isinstance(leaves, list) else []
+
+
+def provisional_words(envelope):
+    """'provisional: N leaves await confirmation' while the declaration has confirm leaves, else None."""
+    n = len(confirm_leaves(envelope))
+    return 'provisional: %d leaves await confirmation' % n if n else None     # one documented phrase, N = 1 too
+
+
 def verdict_line(envelope):
     """serve-016: the one first line (module docstring), plain text with every part bounded; None for an envelope
     without `colour` (an older server). One denominator per line (REFUTATION-028 F7): N counts every obligation reading;
-    established counts the holds on machines that were read."""
+    established counts the holds on machines that were read. issue #651: a declared-model verdict read on a declaration
+    with confirm leaves ends '; provisional: N leaves await confirmation'."""
     env = envelope if isinstance(envelope, dict) else {}
     c = env.get('colour')
     if c not in COLOURS:
         return None
     req = requirements_words(env)                     # serve-019: after the not-established count
     if c == 'yellow':
-        return 'yellow: could not look: %s%s' % (_could_not_look_words(env), '; %s' % req if req else '')
+        line = 'yellow: could not look: %s%s' % (_could_not_look_words(env), '; %s' % req if req else '')
+        return _provisional_line(line, env)
     parts = [p for p in (_coverage_words(env), _bounds_words(env), _prove_words(env), _strict_words(env)) if p]
     read = _read_set(env)
     obligations = _obligation_rows(env)
@@ -1401,7 +1517,7 @@ def verdict_line(envelope):
         if req:
             parts.append(req)
         parts.append(words)
-        return '%s: %s' % (c, '; '.join(parts))
+        return _provisional_line('%s: %s' % (c, '; '.join(parts)), env)
     held = len([r for r in obligations if r.get('status') == 'holds' and r.get('machine') in read])
     entries = [e for e in env.get('not_established') or () if isinstance(e, dict)]
     # serve-064 (dogfood fb-20261009-b841067fe3d852c9): every reading class on the machines read is named, so the parts
@@ -1431,7 +1547,12 @@ def verdict_line(envelope):
     parts.append(tail)
     if req:
         parts.append(req)
-    return '%s: %s' % (c, '; '.join(parts))
+    return _provisional_line('%s: %s' % (c, '; '.join(parts)), env)
+
+
+def _provisional_line(line, env):
+    words = provisional_words(env)
+    return line if words is None else '%s; %s' % (line, words)
 
 
 def lead_finding(envelope):
@@ -1592,21 +1713,49 @@ def requirement_locator(row):
     return None
 
 
-def requirement_line(row):
+def empty_domain_requirement(row, envelope):
+    """The vacuous auth row (`_vacuous_row`) of a not-established requirement every matched obligation of which is one,
+    or None: such a requirement reads as an empty domain whatever reason class its JSON row carries (issue #1292)."""
+    matched = row.get('matched_obligations') if row.get('state') == 'not_established' else None
+    if not isinstance(matched, list) or not matched:
+        return None
+    found = [_vacuous_row(envelope, m.get('machine'), m.get('id')) if isinstance(m, dict) else None for m in matched]
+    return found[0] if all(found) else None
+
+
+# issue #1292: the profile whose requirement line says a state once when its reason class only repeats it
+SAID_ONCE_PROFILE = 'python-auth-declared-model'
+
+
+def requirement_line(row, envelope=None):
     """'<id> — "<sentence>" — <state> — <reason class>[ — <locator>] — <action>[ — quote USD a–b]' for one requirement
     row (DD-070 item 1): the sentence as written, bounded to SENTENCE_CAP characters with …, the locator when the row's
-    evidence carries one. Plain text, every part bounded; the summary, the annotations and the Action's log read the
-    same words. The JSON row is never changed."""
+    evidence carries one. With an envelope of SAID_ONCE_PROFILE, a holds or disproven line whose reason class reads the
+    same as its state says it once, and an empty-domain requirement (`empty_domain_requirement`) reads
+    '<state> — empty domain, nothing to check — <the row's reason>', with no action. Plain text, every part bounded;
+    the summary, the annotations and the Action's log read the same words. The JSON row is never changed."""
     r = row if isinstance(row, dict) else {}
     sentence = _CONTROL.sub(' ', '' if r.get('sentence') is None else str(r.get('sentence')))
     if len(sentence) > SENTENCE_CAP:
         sentence = sentence[:SENTENCE_CAP - 1] + '…'
+    vacuous = empty_domain_requirement(r, envelope) if isinstance(envelope, dict) else None
+    if vacuous is not None:
+        reason = vacuous.get('reason')
+        return format_space('%s — "%s" — %s — empty domain, nothing to check%s' % (
+            _clip(r.get('id')), sentence, _requirement_label(r), ' — %s' % _clip(reason) if reason else ''))
     locator = requirement_locator(r)
     # REFUTATION-034 F7: a failed producer verification is Symbolia's to repair, said so in the customer's words
     action = CONTRACT_WORDS if r.get('reason_class') == 'checker_contract' else _clip(r.get('establishing_action'))
+    state, reason = _requirement_label(r), _clip(label(r.get('reason_class')))
+    loc, quote = ' — %s' % locator if locator else '', _quote_words(r.get('formalisation_quote'))
+    said_once = (isinstance(envelope, dict) and envelope.get('profile') == SAID_ONCE_PROFILE and reason == state)
+    # each said-once template names its state, so tools/ci/phrase_pins.py --explain-line resolves it here (#1397)
+    if said_once and state == 'holds':
+        return format_space('%s — "%s" — holds%s — %s%s' % (_clip(r.get('id')), sentence, loc, action, quote))
+    if said_once and state == 'disproven':
+        return format_space('%s — "%s" — disproven%s — %s%s' % (_clip(r.get('id')), sentence, loc, action, quote))
     line = '%s — "%s" — %s — %s%s — %s%s' % (
-        _clip(r.get('id')), sentence, _requirement_label(r), _clip(label(r.get('reason_class'))),
-        ' — %s' % locator if locator else '', action, _quote_words(r.get('formalisation_quote')))
+        _clip(r.get('id')), sentence, state, reason, loc, action, quote)
     return format_space(line)
 
 
@@ -1637,6 +1786,12 @@ def _requirement_findings(env, found):
 # The subject and the family each profile's meaning sentence names, by the profile id's first word.
 PROFILE_WORDS = {'postgresql': ('database configuration', 'PostgreSQL'), 'http': ('HTTP responses', 'HTTP')}
 DEFAULT_PROFILE_WORDS = ('system', 'software')
+# issue #1292: the green head that says what the auth profile read, in the place of the generic "safe <family> setups"
+# (subject, head when AUTH-1 and AUTH-2 both hold, head otherwise)
+GREEN_HEADS = {'python-auth-declared-model': ('Flask app', 'Every route in your Flask app is guarded as your '
+                                              'declaration says.',
+                                              'Nothing read in the routes of your Flask app contradicts your '
+                                              'declaration.')}
 # Why a check could not be completed, for "mostly because ...", one per closed reason class.
 CLASS_BECAUSE = {'needs_intent': 'they depend on what the system is for, which has not been stated',
                  'not_observed': 'some facts were not collected',
@@ -1698,6 +1853,10 @@ def _meaning_line(envelope):
         entries = [e for e in env.get('not_established') or () if isinstance(e, dict)]
         n_all = len(_obligation_rows(env))
         head = 'Nothing in your %s contradicts what is known about safe %s setups.' % (subject, family)
+        if env.get('profile') in GREEN_HEADS:
+            subject, guarded, other = GREEN_HEADS[env['profile']]
+            held = {r.get('id') for r in _rows(env) if r.get('status') == 'holds'}
+            head = guarded if {'AUTH-1', 'AUTH-2'} <= held else other
         top = top_entry(entries, env)
         if not entries or top is None:
             return '%s All %d checks could be completed.' % (head, n_all)
@@ -1943,6 +2102,12 @@ def upgrade_markdown(envelope):
     words = line[:-len(url)].rstrip()
     if not words or _CONTROL.search(words) or len(words) > CAP:
         return ''
+    # issue #2306 item 4: a spent free balance is said once, at the start of the same line; a notice that is not one
+    # plain sentence (a link, a control character, too long) is left out and the pay line prints as before
+    notice = up.get('notice')
+    if isinstance(notice, str) and notice and not _CONTROL.search(notice) and len(notice) <= CAP \
+            and '://' not in notice and not _UPGRADE_URL.search(notice):
+        words = notice.strip() + ' ' + words
     return '%s <%s>\n\n' % (_esc_line(words), url)
 
 
@@ -1983,7 +2148,7 @@ def summary_markdown(envelope, now=None):
     reqs = requirement_rows(env) if line is not None else None
     if reqs:                                      # serve-019: one line per requirement, under the not-established list
         out += ['### %s' % _esc_line(requirements_words(env)[0].upper() + requirements_words(env)[1:]), '']
-        out += ['- %s' % _esc_line(requirement_line(r)) for r in reqs[:MAX_REQUIREMENT_LINES]]
+        out += ['- %s' % _esc_line(requirement_line(r, env)) for r in reqs[:MAX_REQUIREMENT_LINES]]
         if len(reqs) > MAX_REQUIREMENT_LINES:
             out.append('- and %d more' % (len(reqs) - MAX_REQUIREMENT_LINES))
         out.append('')
@@ -2103,6 +2268,9 @@ def summary_markdown(envelope, now=None):
             if extra:
                 line += ' (%s)' % extra
             out.append(line)
+            named = objects_text(env, r) if s == 'deviates' else None
+            if named:                                     # issue #2176: one entry per object, its roles as a list
+                out.append('  - %s' % esc(named))
     if machines is not None and machines.get('source') == 'inferred' and not machines['refused']:
         out += ['', 'The checker did not report which machines it refused; which machines were read is inferred from the '
                 'readings.']
@@ -2207,12 +2375,15 @@ def annotations(envelope):
         elif _extra_reason(r):
             gloss = bound_gloss(r.get('reason'))
             msg += ' (%s%s)' % (r.get('reason'), '; %s' % gloss if gloss else '')
+        named = objects_text(envelope, r) if r.get('status') == 'deviates' else None
+        if named:                                     # issue #2176: the annotation names the objects too
+            msg += ' — %s' % named
         lines.append('::%s title=%s::%s' % (level, _cmd_prop(title), _cmd_data(msg)))
     if first is not None:                         # serve-019: each requirement that does not hold, in the same words
         for r in [r for r in requirement_rows(envelope) or () if r.get('state') != 'holds'][:MAX_ANNOTATIONS]:
             lines.append('::%s title=%s::%s' % ('error' if r.get('state') == 'disproven' else 'notice',
                                                 _cmd_prop('Assure requirement %s' % _clip(r.get('id'))),
-                                                _cmd_data(requirement_line(r))))
+                                                _cmd_data(requirement_line(r, envelope))))
     if first is not None and STRICT in ((envelope.get('policy') or {}).get('fail_on') or ()):
         for e in [e for e in envelope.get('not_established') or () if isinstance(e, dict)][:MAX_ANNOTATIONS]:
             lines.append('::notice title=%s::%s' % (_cmd_prop('Assure not established %s' % e.get('id')),
@@ -2377,5 +2548,564 @@ def failure_markdown(failure_envelope):
                       if isinstance(f.get('detail'), dict) and _malformation_line(f['detail'].get('malformation'))
                       else []) +
                      [check_line(f)]) + '\n'
+
+
+# ---------- issue #2189: the pull request comment, from the stored envelope, no model ----------
+PR_COMMENT_MARKER = '<!-- assure:pr-comment -->'
+NO_READING_HEAD = 'no reading of this change'
+# the red findings that are not a broken rule, in the summary's own words (`_red_words`): one count each in the heading
+PR_OTHER_KINDS = (('not_proven', 'not proven', 'not proven: it must hold, and no machine that was read shows it holds'),
+                  ('strict', 'not resolved under strict', 'not resolved, and strict is set'),
+                  ('chosen', 'stopped by your choice', 'stopped by your choice: its status is one your fail-on names'))
+
+
+# The demo-grade comment (the Director, 13 Oct 2026: the platform writes the comment the launch video showed;
+# tests/serving/test_pr_comment_demo_grade.py). Every rule is labelled by the customer's requirement id and sentence
+# (the obligation id only when no requirement row maps), each holding rule says what was checked in the checker's own
+# words, a rule not checked yet reads one plain sentence for its reason class, and the closing line says what Assure
+# read. Nothing is written anew: the plain words come from the profile row (`obligation_words`, carried in the envelope:
+# a short name, what was checked when it holds, and a fix filled from the reading's own witnesses); where the envelope
+# carries none, the checker's own words stand, and the catalogue's phrase names the rule.
+#
+# The catalogue's requirement phrase per obligation, copied from the checker's pinned catalogue
+# (assure/checkers/python-auth-declared-model/catalogue/AUTH-CATALOGUE-001.json; the Action ships no checker): the
+# name of a rule no requirement row maps. test_pr_comment_demo_grade pins it to the catalogue file.
+PR_CATALOGUE_PHRASES = {'python-auth-declared-model': {
+    'AUTH-1': 'No route outside the declared public routes is reachable without signing in.',
+    'AUTH-2': 'Routes that carry a declared role guard are reachable only by that role.',
+    'AUTH-3': 'The signed-in identity is set only after second-factor verification.',
+    'AUTH-4': 'Signing out always returns to the signed-out state.',
+    'AUTH-5': 'Elevated sessions start only from a signed-in admin.',
+    'AUTH-6': 'Bearer-token routes check the caller.'}}
+# serve/requirements.py's default reason for a holding or disproven row: it says nothing about the rule, so the row's
+# own words (its matched obligation's reason) take its place
+PR_DEFAULT_REASONS = ('The matched methods hold within the stated observed bounds.',
+                      'An applicable witnessed result contradicts the sentence.')
+# "Not checked yet": one plain sentence per reason class ({s}: "app" for a python-* profile, else "system")
+PR_UNCHECKED_WORDS = {
+    'vacuous': 'the {s} declares none, so there is nothing to check',
+    'missing_method': 'this profile does not check this yet; nothing for you to do',
+    'not_observed': 'the check could not look at this part',
+    'missing_premise': 'the check could not look at this part',
+    'not_observable_at_pin': 'the check could not look at this part; nothing for you to do',
+    'missing_baseline': 'the baseline for this version is not pinned yet; nothing for you to do',
+    'needs_intent': 'this depends on what the {s} is for; say so in requirements.md',
+    'representation': 'the check could not read this part in the form it is written',
+    'not_evaluated': 'the check did not reach this part',
+    'method_stopped_early': 'the check stopped before it reached this part; nothing for you to do',
+    'checker_contract': 'the profile failed its own verification; nothing for you to do, Symbolia repairs it',
+    'scope_mismatch': 'no profile in this check reads this kind of rule',
+    'not_understood': 'Assure could not read this line of requirements.md; write it as one sentence',
+    'duplicate_id': 'this id is used twice in requirements.md; give each rule its own id'}
+PR_UNCHECKED_FALLBACK = 'the check could not decide this yet; the job summary gives the reason'
+PR_VACUOUS_OBSERVED = 'the {s} has none, so there is nothing to check'
+NOTHING_TO_DO = 'nothing for you to do'
+_PR_REPOSITORY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}')
+_PR_COMMIT = re.compile(r'[0-9a-f]{7,40}')
+_PR_LOCATOR = re.compile(r'(%s):([1-9][0-9]{0,6})' % REPO_PATH_RE.pattern)
+_PR_PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}')
+_PR_SCOPE_READ = re.compile(r'\bover [^:.]{1,100}: ([^.]{1,300})\.')
+MAX_PR_LOCATORS = 5
+
+
+def _plural(n, one, many):
+    return '%d %s' % (n, one if n == 1 else many)
+
+
+def _pr_requirements(env):
+    """{requirement id: row} and {(machine, obligation id): the first requirement row matched to it}."""
+    by_id, by_ob = {}, {}
+    for r in requirement_rows(env) or ():
+        by_id.setdefault(r.get('id'), r)
+        for m in r.get('matched_obligations') or ():
+            if isinstance(m, dict):
+                by_ob.setdefault((m.get('machine'), m.get('id')), r)
+    return by_id, by_ob
+
+
+def _pr_static(env):
+    return str(env.get('profile') or '').startswith('python-')    # a reading of the repository's files
+
+
+def _pr_shows_machine(env):
+    """False when the envelope reads one machine of one, none refused: naming it adds nothing for the reader."""
+    m = _machines(env)
+    return m is None or len(m['read']) != 1 or int(m['total']) != 1 or bool(m['refused'])
+
+
+def _pr_obligation_text(env, r):
+    if r.get('machine') and _pr_shows_machine(env):
+        return '%s on %s' % (_clip(r.get('id')), _clip(r.get('machine')))
+    return _clip(r.get('id'))
+
+
+def _pr_phrase(env, ob_id):
+    table = PR_CATALOGUE_PHRASES.get(env.get('profile')) if isinstance(env.get('profile'), str) else None
+    return (table or {}).get(ob_id)
+
+
+def _pr_words(env, ob_id, key):
+    """The profile's plain words for an obligation (the envelope's `obligation_words`, from the profile row:
+    short_name, plain_checked, plain_broken, remedy, remedy_generic), or None when the envelope carries none."""
+    words = env.get('obligation_words') if isinstance(env.get('obligation_words'), dict) else {}
+    w = words.get(ob_id) if isinstance(ob_id, str) else None
+    t = w.get(key) if isinstance(w, dict) else None
+    return t if isinstance(t, str) and t.strip() else None
+
+
+def _pr_reading_ob(env, row):
+    """The obligation's entry in `readings` for a row ({machine, id}), or None."""
+    try:
+        rd = (env.get('readings') or {}).get(row.get('machine'))
+        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
+        obs = rd.get('obligations') if isinstance(rd, dict) else None
+        ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
+            (o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None) \
+            if isinstance(obs, list) else None
+    except (AttributeError, TypeError):
+        return None
+    return ob if isinstance(ob, dict) else None
+
+
+_PR_PLACEHOLDER = re.compile(r'\{([a-z_]+)\}')
+
+
+def _pr_fill(env, row, key):
+    """The profile's template `key` for a failing obligation, its placeholders filled from the reading's own witnesses
+    (each distinct value of the field, at most MAX_PR_LOCATORS); None when the profile gives none, or a witness lacks a
+    field the template names, or the reading carries no witness. Never a value the witnesses do not hold."""
+    row = row if isinstance(row, dict) else {}
+    template = _pr_words(env, row.get('id'), key)
+    names = _PR_PLACEHOLDER.findall(template) if template is not None else []
+    if not names:
+        return template
+    ob = _pr_reading_ob(env, row) or {}
+    ws = ob.get('witnesses') if isinstance(ob.get('witnesses'), list) else (
+        [ob['witness']] if isinstance(ob.get('witness'), dict) else [])
+    values = {}
+    for n in names:
+        vals = [w.get(n) if isinstance(w, dict) else None for w in ws]
+        if not vals or not all(_scalar(v) and str(v).strip() for v in vals):
+            return None
+        seen = []
+        for v in vals:
+            if format_space(_clip(v)).strip() not in seen:
+                seen.append(format_space(_clip(v)).strip())
+        values[n] = ', '.join(seen[:MAX_PR_LOCATORS])
+    return _PR_PLACEHOLDER.sub(lambda m: values[m.group(1)], template)
+
+
+def _pr_remedy(env, row):
+    """The profile's fix for a failing obligation filled from its witnesses (`_pr_fill`), else the obligation's unfilled
+    generic remedy; None when the profile gives no fix."""
+    row = row if isinstance(row, dict) else {}
+    return _pr_fill(env, row, 'remedy') or _pr_words(env, row.get('id'), 'remedy_generic')
+
+
+def _pr_trim(text):
+    """`text` bounded, without its final full stop, its first letter upper case; None when empty."""
+    t = format_space(_clip(text)).strip().rstrip('.').strip() if text is not None else ''
+    return (t[:1].upper() + t[1:]) if t else None
+
+
+def _pr_own_words(row, text):
+    """`text` less serve/requirements.py's default reason and less a bare repeat of the row's status; None when nothing
+    is left (the row then says nothing of its own)."""
+    t = format_space(text).strip() if isinstance(text, str) else ''
+    for d in PR_DEFAULT_REASONS:
+        if t.startswith(d):
+            t = t[len(d):].strip()
+    if not t or t in (row.get('status'), row.get('status_text'), label(row.get('status'))):
+        return None
+    return t
+
+
+def _pr_ob_row(env, machine, ob_id):
+    return next((r for r in _obligation_rows(env) if r.get('machine') == machine and r.get('id') == ob_id), None)
+
+
+def _pr_matched_rows(env, req):
+    out = []
+    for m in req.get('matched_obligations') or ():
+        r = _pr_ob_row(env, m.get('machine'), m.get('id')) if isinstance(m, dict) else None
+        if r is not None:
+            out.append(r)
+    return out
+
+
+def _pr_reading_text(env, req):
+    """The reading's own requirement line after its '<id> reads <state> through <obligation>:' lead, or None."""
+    for rd in (env.get('readings') or {}).values() if isinstance(env.get('readings'), dict) else ():
+        for q in (rd.get('requirements') if isinstance(rd, dict) else None) or ():
+            if isinstance(q, dict) and q.get('id') == req.get('id') and isinstance(q.get('text'), str):
+                m = re.match(r'\S+ reads \S+ through \S+: (.+)$', q['text'], re.S)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def _pr_label(env, req, row):
+    """(label, name): the requirement id and its sentence, or the obligation (with its machine when more than one is
+    read) and the profile's short name for it, else the catalogue's phrase; name None when there is none."""
+    if req is not None:
+        return _clip(req.get('id')), _pr_trim(req.get('sentence'))
+    row = row if isinstance(row, dict) else {}
+    return _pr_obligation_text(env, row), _pr_trim(_pr_words(env, row.get('id'), 'short_name')
+                                                   or _pr_phrase(env, row.get('id')))
+
+
+def _pr_checked(env, req, row):
+    """What Assure checked for a rule that holds, never the default holds sentence: the profile's plain sentence for
+    each matched obligation (`obligation_words` plain_checked, when every one has it), then the matched obligation's
+    reason (the checker's own words), then the requirement row's reason, then the reading's requirement line, then the obligation's
+    catalogue phrase, then the rule's sentence or status."""
+    rows = _pr_matched_rows(env, req) if req is not None else [row]
+    if req is not None:
+        rows = rows or [{'id': m.get('id'), 'machine': m.get('machine')} for m in req.get('matched_obligations') or ()
+                        if isinstance(m, dict)]
+    plain = [_pr_words(env, r.get('id'), 'plain_checked') for r in rows]
+    if plain and all(plain):
+        return '; '.join(dict.fromkeys(_pr_trim(p) for p in plain))
+    for r in rows:
+        w = _pr_own_words(r, r.get('reason'))
+        if w:
+            return _pr_trim(w)
+    if req is not None:
+        for text in (_pr_own_words(req, req.get('reason')), _pr_reading_text(env, req)):
+            if text:
+                return _pr_trim(text)
+    for r in rows:
+        if _pr_phrase(env, r.get('id')):
+            return _pr_trim(_pr_phrase(env, r.get('id')))
+    if req is not None:
+        return _pr_trim(req.get('sentence')) or 'Holds'
+    return _pr_trim(row.get('status_text') or row.get('status')) or 'Holds'
+
+
+def _pr_reason_class(env, row):
+    """A reading's reason class: its obligation's own `reason_class` in `readings` (vacuous, missing_method), else the
+    row's status."""
+    try:
+        rd = (env.get('readings') or {}).get(row.get('machine'))
+        rd = rd.get('reading') if isinstance(rd, dict) and isinstance(rd.get('reading'), dict) else rd
+        obs = rd.get('obligations') if isinstance(rd, dict) else None
+        ob = obs.get(row.get('id')) if isinstance(obs, dict) else next(
+            (o for o in obs if isinstance(o, dict) and o.get('id') == row.get('id')), None) if isinstance(obs, list) \
+            else None
+        if isinstance(ob, dict) and isinstance(ob.get('reason_class'), str) and ob['reason_class']:
+            return ob['reason_class']
+    except (AttributeError, TypeError):
+        pass
+    return row.get('status')
+
+
+def _pr_unchecked_words(env, cls):
+    """The plain sentence for a reason class; "nothing for you to do" when the class is Symbolia's."""
+    s = 'app' if _pr_static(env) else 'system'
+    if cls == 'vacuous' and not _pr_static(env):
+        words = PR_VACUOUS_OBSERVED.format(s=s)
+    else:
+        words = PR_UNCHECKED_WORDS.get(cls, PR_UNCHECKED_FALLBACK).format(s=s)
+    if CLASS_OWNERS.get(cls) == 'symbolia' and NOTHING_TO_DO not in words:
+        words += '; ' + NOTHING_TO_DO
+    return words
+
+
+def _pr_locators(env, req, row):
+    """The locators a finding carries: the requirement row's (`requirement_locator`), then each witness's `locator`
+    and the obligation's sibling `locator` in `readings`; at most MAX_PR_LOCATORS, never invented."""
+    out = []
+    if req is not None and requirement_locator(req):
+        out.append(requirement_locator(req))
+    if isinstance(row, dict):
+        ob = _pr_reading_ob(env, row)
+        if isinstance(ob, dict):
+            ws = ob.get('witnesses') if isinstance(ob.get('witnesses'), list) else [ob.get('witness')]
+            for w in ws + [ob]:
+                loc = w.get('locator') if isinstance(w, dict) else None
+                if _scalar(loc) and str(loc).strip():
+                    out.append(_clip(loc))
+    seen = []
+    for loc in out:
+        if loc not in seen:
+            seen.append(loc)
+    return seen[:MAX_PR_LOCATORS]
+
+
+def _pr_where(locator, repository=None, commit=None):
+    """A file:line locator as a link to the commit's blob on GitHub when the repository and commit are known and the
+    locator is a repository path and line ('[`app/x.py:7`](https://github.com/<repo>/blob/<commit>/app/x.py#L7)'),
+    else as a code span; any other locator is escaped text. The link is built only from validated parts."""
+    loc = str(locator)
+    m = _PR_LOCATOR.fullmatch(loc)
+    repo_ok = (isinstance(repository, str) and _PR_REPOSITORY.fullmatch(repository) is not None
+               and '..' not in repository)
+    if m and repo_ok and isinstance(commit, str) and _PR_COMMIT.fullmatch(commit):
+        return '[`%s`](https://github.com/%s/blob/%s/%s#L%s)' % (loc, repository, commit, m.group(1), m.group(2))
+    if m or REPO_PATH_RE.fullmatch(loc):
+        return '`%s`' % loc
+    return esc(loc)
+
+
+def _pr_item(env, finding, by_id, by_ob):
+    """{label, name, text, what, where, locators, fix, requirement, sentence, escaped} for one red finding: for a
+    requirement row (or an obligation a requirement row is matched to) its id and sentence, what the change does (the
+    profile's `plain_broken` filled from the witnesses, else the row's own reason, else its matched obligation's), the
+    locators, and the fix (the profile's remedy filled from the witnesses, `_pr_remedy`, else the row's action); else
+    the obligation and its machine, the profile's short name for it, its status text, the witness the summary shows and
+    the profile's remedy."""
+    kind, ob_id, row = finding
+    row = row if isinstance(row, dict) else {}
+    req = by_id.get(row.get('requirement')) if row.get('requirement') is not None else by_ob.get(
+        (row.get('machine'), row.get('id')))
+    lab, name = _pr_label(env, req, row if row.get('id') is not None else {'id': ob_id})
+    locators = _pr_locators(env, req, row)
+    if req is not None:
+        obs = [row] + _pr_matched_rows(env, req)        # the finding's own obligation, then the rule's matched ones
+        fix = CONTRACT_WORDS if req.get('reason_class') == 'checker_contract' else (
+            next((x for x in map(lambda r: _pr_remedy(env, r), obs) if x), None) or req.get('establishing_action'))
+        what = (next((x for x in map(lambda r: _pr_fill(env, r, 'plain_broken'), obs) if x), None)
+                or _pr_own_words(req, req.get('reason')) or _pr_own_words(row, row.get('reason')))
+        if what is None:
+            what = next((_pr_own_words(r, r.get('reason')) for r in _pr_matched_rows(env, req)
+                         if _pr_own_words(r, r.get('reason'))), None) or witness_words(env, row)
+        return {'label': lab, 'name': name, 'text': format_space(req.get('sentence') or req.get('id')),
+                'what': what, 'where': locators[0] if locators else None, 'locators': locators, 'fix': fix,
+                'requirement': req.get('id'), 'sentence': format_space(req.get('sentence') or ''), 'escaped': None}
+    text = _pr_obligation_text(env, row) if row.get('id') is not None else _clip(ob_id)
+    plain = _pr_fill(env, row, 'plain_broken') if row.get('id') is not None else None
+    return {'label': lab, 'name': name, 'text': text,
+            'what': plain or row.get('status_text') or (label(row['status']) if row.get('status') else None),
+            'where': None, 'locators': locators, 'fix': _pr_remedy(env, row) if row.get('id') is not None else None,
+            'requirement': None, 'sentence': None,
+            # the plain words say what the witness shows, and its locators are under Where
+            'escaped': None if plain else (_row_extra(env, row) if row else None)}
+
+
+def pr_reading(envelope):
+    """The comment's reading (issue #2189), decided from the sets the job summary decides from: `red_findings` (the
+    obligation readings on machines that were read, then the requirement rows), the read set, `could_not_look`, `a0`
+    and `outcome`. Returns {no_reading, red, broken, deviations, others, holds, unchecked}:
+    - no_reading: None, or the summary's words for why there is no reading (`a0`: "No reading: input integrity";
+      an outcome that is not `verdict`: "No verdicts"; nothing could be read: "Could not look");
+    - red: `red_findings(envelope)`, unchanged; every red finding is in exactly one of broken, deviations (those
+      marked red) and others, so their counts add up to len(red);
+    - broken: the 'disproven' findings whose reading is not `deviates` (a deviation is never called broken);
+    - deviations: every `deviates` reading on a machine that was read, as (item, red);
+    - others: the 'not_proven', 'strict' and 'chosen' findings, as (kind, item);
+    - holds: the requirement rows that hold, then the `holds` readings on read machines no requirement row names, each
+      {label, name, checked} (`_pr_label`, `_pr_checked`);
+    - unchecked: every other requirement row and reading, vacuous ones included (never shown as holds), and a reading
+      the checker kept on a refused machine as not observed, each {label, name, requirement, words}: the plain
+      sentence for its reason class (`_pr_unchecked_words`)."""
+    env = envelope if isinstance(envelope, dict) else {}
+    by_id, by_ob = _pr_requirements(env)
+    red = red_findings(env)
+    read = _read_set(env)
+    broken, others, red_dev = [], [], set()
+    shown_reqs, shown_rows, shown_ids = set(), set(), set()
+    for f in red:
+        kind, ob_id, row = f
+        item = _pr_item(env, f, by_id, by_ob)
+        if item['requirement'] is not None:
+            shown_reqs.add(item['requirement'])
+        if isinstance(row, dict) and row.get('requirement') is None:
+            shown_rows.add((row.get('machine'), row.get('id')))
+        if kind in ('not_proven', 'strict'):
+            shown_ids.add(ob_id)
+        if kind == 'disproven' and isinstance(row, dict) and row.get('status') == 'deviates':
+            red_dev.add((row.get('machine'), row.get('id')))
+        elif kind == 'disproven':
+            broken.append(item)
+        else:
+            others.append((kind, item))
+    obligations = [r for r in _obligation_rows(env) if not is_machine_refusal(r)]
+    deviations = []
+    for r in obligations:
+        if r.get('status') == 'deviates' and r.get('machine') in read:
+            key = (r.get('machine'), r.get('id'))
+            item = _pr_item(env, ('disproven', r.get('id'), r), by_id, by_ob)
+            shown_rows.add(key)
+            if item['requirement'] is not None:
+                shown_reqs.add(item['requirement'])
+            deviations.append((item, key in red_dev))
+    holds, unchecked = [], []
+    for r in requirement_rows(env) or ():
+        if r.get('id') in shown_reqs:
+            continue
+        shown_reqs.add(r.get('id'))
+        lab, name = _pr_label(env, r, None)
+        if r.get('state') == 'holds':
+            holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None)})
+        else:
+            unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'),
+                              'words': _pr_unchecked_words(env, r.get('reason_class'))})
+    for r in obligations:
+        key = (r.get('machine'), r.get('id'))
+        if key in shown_rows or r.get('id') in shown_ids:
+            continue
+        req = by_ob.get(key)
+        if req is not None and req.get('id') in shown_reqs:
+            continue                                   # its requirement row is listed already
+        lab, name = _pr_label(env, None, r)
+        if kept_on_refused(env, r):
+            unchecked.append({'label': lab, 'name': name, 'requirement': None,
+                              'words': '%s (machine %s was not read)' % (_pr_unchecked_words(env, KEPT_READ_AS),
+                                                                        _clip(r.get('machine')))})
+        elif r.get('machine') not in read:
+            continue                                   # a refused machine's rows: the closing line names the machine
+        elif r.get('status') == 'holds':
+            holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, None, r)})
+        else:
+            unchecked.append({'label': lab, 'name': name, 'requirement': None,
+                              'words': _pr_unchecked_words(env, _pr_reason_class(env, r))})
+    if env.get('a0') is not None:
+        no_reading = ('No reading: input integrity. The input integrity gate stopped the check, so no rule was read: '
+                      '%s' % _clip(env.get('a0')))
+    elif env.get('outcome') != 'verdict':
+        no_reading = ('No verdicts: none of the readings is a verdict that checked something, so no rule was read; '
+                      'a vacuous reading only says a domain was empty.')
+    elif could_not_look(env):
+        no_reading = 'Could not look: %s.' % _could_not_look_words(env)
+    else:
+        no_reading = None
+    return {'no_reading': no_reading, 'red': red, 'broken': broken, 'deviations': deviations, 'others': others,
+            'holds': holds, 'unchecked': unchecked}
+
+
+def pr_heading(reading):
+    """'Assure: <n> rules broken by this change' ('no rule', '1 rule'), or 'Assure: no reading of this change' when
+    the reading has none, then one count per other red kind and the deviations; the counts of broken, red deviations
+    and other kinds add up to the red findings."""
+    parts = []
+    n = len(reading['broken'])
+    if reading['no_reading'] is not None:
+        parts.append(NO_READING_HEAD)
+    if reading['no_reading'] is None or n:
+        parts.append('%s broken by this change' % ('no rule' if n == 0 else _plural(n, 'rule', 'rules')))
+    if reading['deviations']:
+        parts.append(_plural(len(reading['deviations']), 'deviation', 'deviations'))
+    for kind, words, _ in PR_OTHER_KINDS:
+        k = len([1 for x, _ in reading['others'] if x == kind])
+        if k:
+            parts.append('%d %s' % (k, words))
+    return 'Assure: ' + '; '.join(parts)
+
+
+def _pr_bullet(item, label_what):
+    line = '- **%s**' % esc(item['text'])
+    sub = []
+    if item['what']:
+        sub.append('  - %s: %s%s' % (label_what, esc(item['what']), ' (%s)' % esc(item['where'])
+                                     if item['where'] else ''))
+    elif item['where']:
+        sub.append('  - Where: %s' % esc(item['where']))
+    if item.get('escaped'):
+        sub.append('  - Witness: %s' % item['escaped'])          # `_row_extra` is escaped and bounded already
+    if item['fix']:
+        sub.append('  - Fix: %s' % esc(item['fix']))
+    return [line] + sub
+
+
+def _pr_broken(item, repository, commit):
+    """One broken rule: '### Broken: <name> (<id>)', what the change does with each locator (a link to the commit's
+    blob when the repository and commit are known), the witness the summary shows, the requirement as quoted, the fix."""
+    head = ('%s (%s)' % (esc(item['name']), esc(item['label'])) if item['name'] else esc(item['label']))
+    out = ['### Broken: %s' % head, '']
+    where = ', '.join(_pr_where(x, repository, commit) for x in item['locators'])
+    parts = []
+    if item['what']:
+        parts.append('What this change does: %s.' % esc(str(item['what']).rstrip('.')))
+    if where:
+        parts.append('Where: %s.' % where)
+    if item.get('escaped'):
+        parts.append('Witness: %s.' % str(item['escaped']).rstrip('.'))     # `_row_extra` is escaped already
+    if parts:
+        out += [' '.join(parts), '']
+    if item['requirement'] is not None and item['sentence']:
+        out += ['> **%s** (`requirements.md`): %s' % (esc(item['requirement']), esc(item['sentence'])), '']
+    if item['fix']:
+        out += ['**Fix:** %s' % esc(item['fix']), '']
+    return out
+
+
+def _pr_rule(lab, name):
+    return '**%s** %s' % (esc(lab), esc(name)) if name else '**%s**' % esc(lab)
+
+
+def _pr_closing(env, commit):
+    """The closing line: what Assure read (for a python-* profile the profile's own scope note, '... over <catalogue>:
+    <what it reads>.'; else the machines read and not read when there is more than one or one was refused, else the
+    inputs the profile lists), that it ran none of the app's code (python-* profiles, which read the repository's
+    files), the profile and the commit."""
+    words = None
+    if _pr_static(env):
+        for note in env.get('scope_notes') or ():
+            m = _PR_SCOPE_READ.search(note) if isinstance(note, str) else None
+            if m:
+                words = esc(m.group(1).strip())
+                break
+    m = _machines(env)
+    if words is None and m is not None and _pr_shows_machine(env):
+        refused = [r.get('machine') for r in m['refused'] if isinstance(r, dict)]
+        words = ('machines %s' % ', '.join(esc(x) for x in m['read'])) if m['read'] else 'no machine'
+        words += ('; it could not read %s' % ', '.join(esc(x) for x in refused)) if refused else ''
+    if words is None:
+        words = 'the inputs the profile lists'
+    profile = env.get('profile')
+    profile = ('`%s`' % profile if isinstance(profile, str) and _PR_PROFILE.fullmatch(profile) else esc(profile))
+    named = '`%s`' % commit[:7] if isinstance(commit, str) and _PR_COMMIT.fullmatch(commit) else (
+        esc(commit[:12]) if commit else 'not named')
+    return 'Assure read %s.%s Profile %s, commit %s.' % (
+        words, " It ran none of the app's code." if _pr_static(env) else '', profile, named)
+
+
+def pr_comment_markdown(envelope, commit=None, repository=None):
+    """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
+    finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
+    entries, each headed in words: one "Broken: <rule>" per broken rule (what the reading says the change does, each
+    file:line linked to the commit's blob on GitHub when `repository` ('owner/name') and `commit` are known, the
+    requirement as quoted, the fix), Deviations (each says whether your fail-on stops on it; a deviation is never
+    called broken), Other findings (not proven, not resolved under strict, stopped by your choice), Still holds (a
+    table: the rule, labelled by its requirement id, and what Assure checked for it), Not checked yet (one plain
+    sentence per remaining rule for its reason class, "nothing for you to do" when the class is Symbolia's); then a
+    rule and one closing line (`_pr_closing`) under it. Deterministic: closed templates over the envelope's own words,
+    each escaped and bounded with `esc`; the one link is built from the validated repository, commit and locator."""
+    env = envelope if isinstance(envelope, dict) else {}
+    rd = pr_reading(env)
+    out = [PR_COMMENT_MARKER, '## %s' % _esc_line(pr_heading(rd)), '']
+    if rd['no_reading'] is not None:
+        out += [esc(rd['no_reading']), '']
+    for item in rd['broken'][:MAX_ANNOTATIONS]:
+        out += _pr_broken(item, repository, commit)
+    if rd['deviations']:
+        out += ['### Deviations', '', 'A deviation differs from the baseline; it is not a broken rule.', '']
+        for item, red in rd['deviations'][:MAX_ANNOTATIONS]:
+            out += _pr_bullet(item, 'Reading')
+            if red:
+                out.append('  - Your fail-on names deviates, so it stops the job.')
+        out.append('')
+    if rd['others']:
+        out += ['### Other findings', '']
+        words = {k: w for k, _, w in PR_OTHER_KINDS}
+        for kind, item in rd['others'][:MAX_ANNOTATIONS]:
+            out.append('- **%s**: %s.' % (esc(item['text']), words[kind]))
+        out.append('')
+    if rd['holds']:
+        out += ['### Still holds', '', '| Rule | What Assure checked |', '| --- | --- |']
+        out += ['| %s | %s |' % (_pr_rule(h['label'], h['name']), esc(h['checked']))
+                for h in rd['holds'][:MAX_ANNOTATIONS]]
+        out.append('')
+    if rd['unchecked']:
+        out += ['### Not checked yet', '']
+        for u in rd['unchecked'][:MAX_ANNOTATIONS]:
+            if u['requirement'] is not None:
+                rule = '%s:' % _pr_rule(u['label'], u['name'])
+            else:
+                rule = '**%s:**' % esc(u['name'] or u['label'])
+            out.append('- %s %s.' % (rule, esc(u['words'])))
+        out.append('')
+    out += ['---', '<sub>%s</sub>' % _pr_closing(env, commit)]
+    return '\n'.join(out) + '\n'
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

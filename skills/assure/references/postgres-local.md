@@ -1,6 +1,6 @@
 # Route 2: collected files
 
-## Managed PostgreSQL and connection poolers (section 6)
+## Managed PostgreSQL and connection poolers
 
 On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. It can grant `pg_monitor`, and the collector this Action ships refuses `pg_monitor` as broader than it needs (section 2). So this Action version cannot collect from a Supabase database.
 
@@ -35,9 +35,9 @@ Rules for this role:
 - Grant it only these two roles. The collector refuses a broader role: `pg_monitor` or `pg_stat_scan_tables` in `collection-privileges` stops the Action with exit 2 (`bad_input`) before anything runs, and a role that belongs to either stops it with exit 3 (`collector_refused`). The collector also refuses to run if the role is a superuser, has `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, or belongs to any other role.
 - Allow it to log in through `pg_hba.conf` from the runner's address.
 
-The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so (section 8).
+The collector runs a fixed, published set of `SELECT` queries. It writes nothing to your database. The collector asks for a read-only session. A pooler may not pass the request on. The collector runs only fixed SELECT statements either way. The collector records whether the session was read-only, and the job summary says so.
 
-## Running the collector yourself (section 9)
+## Running the collector yourself
 
 The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/assure-action` repository. Use it at the same ref as your `uses:` line. Fetch it on a machine that can reach the server and has Python 3.14 and `psql`:
 
@@ -78,11 +78,11 @@ The refusals name the reason in their `type`: for example `collection_role_super
 | `--extra-root` | A directory outside the data directory that holds configuration files, such as `/etc/postgresql/18/main`. Once per directory. The collector reads configuration files only inside `--data-dir` and these directories. |
 | `--psql` | The `psql` command to run, when it is not `psql` on the path. |
 | `--role-created-for-run` | `yes` or `no`: whether you created the role for this run. The collector records your answer in `COLLECTION-SIDECAR.json`; left out, it records that you did not say. The collector itself creates, alters and grants nothing. |
-| `--login-user` | The login name, when a connection pooler's login name differs from the role (section 6). Left out, it is `--role`. |
+| `--login-user` | The login name, when a connection pooler's login name differs from the role. Left out, it is `--role`. |
 
 The collector logs in as `--login-user`, or as `--role` when that is not given. The collector never asks for a password: give it in `PGPASSWORD`, or in a password file `psql` reads.
 
-## A server on your own machine (section 9)
+## A server on your own machine
 
 For a PostgreSQL server on the machine you collect on, ask the server where its files are, as the user you normally connect as:
 
@@ -101,8 +101,6 @@ CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICA
 GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;
 GRANT CONNECT ON DATABASE <your database> TO assure_collector;
 ```
-
-In these statements `<your database>` is the name of the database to check, or `postgres` for a local server that holds no other database.
 
 Otherwise create it with a password as in section 2. The collector never asks for a password, so set `PGPASSWORD` for the collector's run only, and `unset PGPASSWORD` afterwards. Test the role first; it prints `assure_collector`:
 
@@ -145,7 +143,7 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
           fail-on: fails
 ```
 
-## Bringing the folder to the runner (section 9)
+## Bringing the folder to the runner
 
 Show the operator `docs/DATA.md` before the first run, and ask before committing collected files to the repository.
 
@@ -175,6 +173,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@<full commit sha of the release you trust>
@@ -222,7 +223,7 @@ The earlier job uploads the whole folder as the collector wrote it, under the na
     runs-on: ubuntu-latest
 ```
 
-## Collecting again after a change (section 9)
+## Collecting again after a change
 
 A check on collected files reads the server as it was when you collected. After you change the server (a setting, a `pg_hba.conf` rule, a role or a grant), collect again. `--out` must be a new or empty directory, so remove the old output first, then run the collector as above and commit the new folder:
 

@@ -395,6 +395,17 @@ def build(args, env, flt):
     for key in ('declared_policy', 'm3'):
         if key in decl:
             submission[key] = decl[key]
+    if 'declaration_state' in decl:
+        state = decl['declaration_state']
+        # Closed marker strings are metadata, not values of the leaves named by their pointers. Carry the
+        # pointers as data so the unchanged filter scans their text without mistaking a marker for a leaf value.
+        # An invalid map keeps its original shape and goes through the same full-document filter pass.
+        if isinstance(state, dict) and all(isinstance(k, str) and 0 < len(k) <= 512 and
+                                          re.fullmatch(r'(/([^/~]|~[01])*)+', k) and
+                                          isinstance(v, str) and v in ('confirm', 'confirmed')
+                                          for k, v in state.items()):
+            state = [{'pointer': k, 'state': state[k]} for k in sorted(state)]
+        submission['declaration_state'] = state
     submission['configuration_sha256'] = hashlib.sha256(canonical({k: sections.get(k) for k in sorted(sections)} | {'version': submission['version']})).hexdigest()
     findings = flt.scan(submission)
     if findings:

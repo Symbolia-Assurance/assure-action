@@ -57,7 +57,11 @@ SERVING_DIR = 'context'
 SCOPE_FIELDS = (('scope', 'scope_missing'), ('scope_binding', 'scope_binding'), ('accepted_scope_ref', 'scope_ref'))
 # serve-019 (coordination 2136): the requirements upload fields, metadata beside the files and never a raw/ file. The
 # bounds are serve.requirements' own (a test holds them equal); this module never imports the matcher.
-REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance')
+# Issue #2252: `compile_requirements` (a boolean, only with `requirements`) false keeps the lines from Claude Haiku.
+REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance', 'compile_requirements')
+# issue #2126: the top-level keys from_request reads with `with_scope`, in the order its body-shape refusal names them;
+# the lint names the first 16 other keys a body holds as unknown_field findings and counts the rest (lint.py).
+BODY_FIELDS = ('profile', 'files') + tuple(k for k, _ in SCOPE_FIELDS) + REQUIREMENT_FIELDS
 MAX_REQUIREMENTS_BYTES = 65536
 MAX_REQUIREMENTS_LINES = 256
 MAX_REQUIREMENT_LINE_BYTES = 8192
@@ -92,7 +96,8 @@ LIMITS = Limits()
 
 @dataclass
 class Collected:
-    """What `from_directory` found: allow-listed files by name, and the names it ignored. `withheld` holds the counts
+    """What `from_directory` found: allow-listed files by name, and the names it ignored (an unlisted name, or an
+    optional input over its cap as `<name>: over <cap> bytes (optional input)`, issue #295). `withheld` holds the counts
     of the Action's withholding pass (action/withhold.py) once it has run, else None. `records` holds the collector's
     runner-only records by base name (RUNNER_ONLY: REDACTION-MANIFEST.json), read for the runner's checks and never
     uploaded."""
@@ -175,6 +180,12 @@ def _rule_for(name, profile):
     return None
 
 
+def _is_optional(rule, profile):
+    """Whether `rule` (from `_rule_for`) is one of the profile's optional rules: by identity, not value, since a row
+    listed in both lists is the required one (`_rule_for` returns it first)."""
+    return not any(rule is r for r in profile.required)
+
+
 def accepted_inputs(profile):
     """The required paths and optional paths or patterns published for this profile, in row order."""
     return {'required': [r.path for r in profile.required],
@@ -233,8 +244,8 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
         why = ('' if at is None else '; it lacks the key %s' % missing[0] if missing
                else '; it holds the key %s' % extra[0])
         raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s%s'
-                      % (' (and optionally scope, scope_binding, accepted_scope_ref, requirements, repository, commit '
-                         'and provenance)' if with_scope else '', why),
+                      % (' (and optionally scope, scope_binding, accepted_scope_ref, requirements, repository, commit, '
+                         'provenance and compile_requirements)' if with_scope else '', why),
                       malformation=malformation('body_shape', pointer=at))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
@@ -342,6 +353,13 @@ def upload_fields(fields):
         if fields['provenance'] not in PROVENANCES:
             raise bad('provenance must be caller or runner', 'provenance')
         out['provenance'] = fields['provenance']
+    if 'compile_requirements' in fields:            # issue #2252: the off switch of reading lines with Claude Haiku
+        if 'requirements' not in fields:
+            raise bad('compile_requirements says whether the requirements text is read by Claude Haiku; send it only '
+                      'with requirements', 'compile_requirements')
+        if type(fields['compile_requirements']) is not bool:
+            raise bad('compile_requirements must be true or false', 'compile_requirements')
+        out['compile_requirements'] = fields['compile_requirements']
     return out
 
 
@@ -368,8 +386,11 @@ def _read_capped(path, cap):
 def from_directory(root, profile, limits=LIMITS):
     """Collect allow-listed files from `root` (a directory holding `raw/`, or the `raw` directory itself). Links are
     never followed: a symlink or non-regular file at an allow-listed name is `bad_input`; unlisted names are ignored and
-    reported. Sizes are checked from lstat before any byte is read. COLLECTION-SIDECAR.json and TIMING.json beside
-    `raw/` (where the frozen collector writes them) are taken as raw/COLLECTION-SIDECAR.json and raw/TIMING.json.
+    reported. Sizes are checked from lstat before any byte is read. Issue #295: a file that matches only an optional
+    rule and is over that rule's cap is left out and reported under `ignored` as `<name>: over <cap> bytes (optional
+    input)`; a required file over its cap is `oversize_input` as before. COLLECTION-SIDECAR.json and TIMING.json beside
+    `raw/` (where the frozen collector writes them) are taken as raw/COLLECTION-SIDECAR.json and raw/TIMING.json, under
+    the same rule (an optional one over cap is listed as `<base> beside raw/: over <cap> bytes (optional input)`).
     REDACTION-MANIFEST.json beside `raw/` or directly inside it goes to `records`, never to `files`."""
     root = Path(root)
     raw = None
@@ -408,6 +429,9 @@ def from_directory(root, profile, limits=LIMITS):
                 raise Refusal('bad_input', '%s is a link or not a regular file' % name)
             cap = min(rule.max_bytes, limits.file_bytes)
             if st.st_size > cap:
+                if _is_optional(rule, profile):          # issue #295: an optional input over its cap is left out, not refused
+                    out.ignored.append('%s: over %d bytes (optional input)' % (name, cap))
+                    continue
                 raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (name, st.st_size, cap))
             if len(out.files) >= limits.files:
                 raise Refusal('oversize_input', 'more than %d files' % limits.files)
@@ -467,6 +491,9 @@ def _beside(parent, profile, limits, out):
             raise Refusal('bad_input', '%s beside raw/ is a link or not a regular file' % base)
         cap = min(rule.max_bytes, limits.file_bytes)
         if st.st_size > cap:
+            if _is_optional(rule, profile):          # issue #295: the same rule as inside raw/
+                out.ignored.append('%s beside raw/: over %d bytes (optional input)' % (base, cap))
+                continue
             raise Refusal('oversize_input', '%s beside raw/ is %d bytes; the limit is %d' % (base, st.st_size, cap))
         data = _read_capped(src, cap)
         if name in out.files:
@@ -600,15 +627,16 @@ def dumps(obj):
 
 
 def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None,
-                 requirements=None, repository=None, commit=None, provenance=None):
+                 requirements=None, repository=None, commit=None, provenance=None, compile_requirements=None):
     """The upload body `{profile, files: {name: base64}}`, plus each of `scope`, `scope_binding` and
-    `accepted_scope_ref` (serve-006 gap 1) and of `requirements`, `repository`, `commit` and `provenance` (serve-019)
-    that is not None; `oversize_input` when the encoded body passes the body cap."""
+    `accepted_scope_ref` (serve-006 gap 1), of `requirements`, `repository`, `commit` and `provenance` (serve-019)
+    and of `compile_requirements` (issue #2252) that is not None; `oversize_input` when the encoded body passes the
+    body cap."""
     doc = {'profile': profile_id,
            'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}}
     for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref),
                        ('requirements', requirements), ('repository', repository), ('commit', commit),
-                       ('provenance', provenance)):
+                       ('provenance', provenance), ('compile_requirements', compile_requirements)):
         if value is not None:
             doc[key] = value
     body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')

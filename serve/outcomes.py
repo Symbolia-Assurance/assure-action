@@ -25,6 +25,9 @@ _TABLE = {
     # issue #1262 (key expiry 1/5): a known key past its `expires` (serve/keys.py); the next step is the rotation
     'key_expired': (401, 2, 'Rotate the key: ask Symbolia to issue a new key for this account, then send the request '
                             'with it in the Authorization header.'),
+    # issue #1264 (key expiry 3/5): a rotate before the key's window (serve/keys.py rotate_opens_at); the key still works
+    'rotate_too_early': (409, None, 'Send the rotate request again at detail.opens_at, or when it is null do what the '
+                                    'reason names; this key keeps working until Assure-Key-Expires.'),
     'rate_limited': (429, None, 'Wait for the time given in Retry-After, then send the request again.'),
     'credit_exhausted': (402, None, 'Your free credit is spent; contact Symbolia to continue.'),
     'engine_digest_mismatch': (503, 3, 'Report it to Symbolia (or reinstall the pinned release when you run the engine yourself), because the engine files differ from their pin and no check ran.'),
@@ -82,6 +85,24 @@ _TABLE = {
 OUTCOMES = MappingProxyType({name: MappingProxyType({'http': http, 'exit': code, 'action': action})
                              for name, (http, code, action) in _TABLE.items()})
 
+# Issue #1103: the one table of the failures a paid check is charged for, read by the API's charge decision
+# (serve/api.py), the lint's findings (serve/lint.py) and the envelopes' `charged` (serve/envelope.py): the outcomes
+# only a checker gives once it has started. A refusal before the run is never charged; a verdict always is.
+CHARGED_OUTCOMES = frozenset({'checker_error', 'checker_timeout', 'checker_cpu_limit', 'checker_memory_limit',
+                              'profile_refused'})  # Main issue #1420: the worker's limit outcomes
+VERDICT_OUTCOMES = frozenset({'verdict', 'no_verdict'})
+
+
+def charged(outcome, detail=None, started=None):
+    """Issue #1103: True when a check that ends in `outcome` is charged. A verdict is; a failure is when its outcome is
+    in CHARGED_OUTCOMES (or, when the worker said whether the checker started, when it did), except one whose detail
+    says `charge: false` (the assembler's own internal_error, the checker's fault), which is never charged."""
+    if outcome in VERDICT_OUTCOMES:
+        return True
+    if isinstance(detail, dict) and detail.get('charge') is False:
+        return False
+    return (outcome in CHARGED_OUTCOMES) if started is None else bool(started)
+
 # ---------- what was malformed (DIRECTOR-DECISIONS-SERVE-002 Addendum 1, decision 10) ----------
 # A typed failure whose cause is in the customer's input carries `detail.malformation`: {kind, file, line, field,
 # expected}. Every value is closed: `kind` and `expected` come from this table, `field` from FIELDS (or a derive kind
@@ -134,6 +155,9 @@ MALFORMATIONS = MappingProxyType({
     'manifest_rows': 'COLLECTION-SIDECAR.json and REDACTION-MANIFEST.json rows that agree for this file',
     # the checker's derive refused the collection (the derive's own typed kind is in `field`)
     'derive_refused': 'a collection the derive step accepts; the field names the derive\'s own refusal kind',
+    # issue #1504: raw/declaration.json names a stack REGISTRY.json registers but this build has no runner leg for; the
+    # expected names the stack and the missing leg (stack_expected), both the registry row's own strings
+    'stack_not_wired': 'a stack with a runner leg on this build; the declared stack is registered but not wired',
     # issue #1959: the python-auth reader's own schema fault of raw/declaration.json (the check's detail.kind), at
     # the malformation's pointer
     'declaration_invalid': 'a raw/declaration.json that meets its schema at the pointer named (QUICKSTART-API.md '
@@ -159,6 +183,10 @@ MALFORMATIONS = MappingProxyType({
                      '(1 to 4096 bytes of UTF-8 without control characters but LF and TAB), and optionally check_id, '
                      'profile, profile_wanted, obligation, package {name, version}, agent {model_id, client} and '
                      'consent_follow_up',
+    # serve-085: the operator's state of a note, POST /v1/feedback/{id}/status (internal accounts)
+    'feedback_status': 'a JSON object with state (received, in_pr, merged or declined) and the field the state takes: '
+                       'pr (1 to 1000000) for in_pr, release (40-hex engine commit) and optionally pr for merged, '
+                       'reason (1 to 300 bytes) for declined',
 })
 # A field path the malformation may name: request fields, JSON fields the checks read, and derive locators.
 FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key', 'fail_on',
@@ -166,7 +194,7 @@ FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', '
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
                     'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
                     'provenance', 'sentence', 'kind', 'text', 'check_id', 'obligation', 'package', 'agent',
-                    'consent_follow_up', 'profile_wanted'})
+                    'consent_follow_up', 'profile_wanted', 'stack', 'compile_requirements'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',
@@ -291,6 +319,21 @@ SCOPE_EXPECTED_RE = {
         r'[a-z0-9][a-z0-9._/-]{0,127}, of at most (?:[1-9][0-9]{0,4}) bytes)*'
         % (_PROFILE, _NAME, _NAME, _NAME, _GRAMMAR, re.escape(GENERIC_TOKEN_FORM), _NAME)),
 }
+
+
+# issue #1504: a stack_not_wired refusal's `expected`, built from the REGISTRY.json row of the declared stack: its
+# `stack` (language/framework) and its `package` (the adapter's directory, the leg this build does not run).
+_STACK = r'[a-z][a-z0-9+-]{0,31}/[a-z][a-z0-9.+-]{0,63}'
+SCOPE_EXPECTED_RE['stack_not_wired'] = re.compile(
+    r'a stack with a runner leg on this build; (%s) is registered but not wired \(missing: assure/checkers/%s\)'
+    % (_STACK, _SEGMENTS))
+
+
+def stack_expected(stack, leg):
+    """The `expected` text of a `stack_not_wired` malformation for a registered `stack` whose adapter package `leg` has
+    no runner leg on this build (issue #1504); None outside the closed template, so the generic text then stands."""
+    text = 'a stack with a runner leg on this build; %s is registered but not wired (missing: %s)' % (stack, leg)
+    return text if _row_expected('stack_not_wired', text) else None
 
 
 def _row_expected(kind, expected):
@@ -425,7 +468,7 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
 # serve-072 (3797, dogfood fb-20261009-ac2d8e303fa3089d): a bad_input whose malformation is a request field or body,
 # not a file of the upload, says how to fix that field; the file action ("every file is allow-listed") misled an agent.
 REQUEST_KINDS = frozenset({'allow_partial', 'body_encoding', 'body_not_json', 'body_not_utf8', 'body_shape',
-                           'email_address', 'fail_on', 'feedback_body', 'idempotency_key', 'query', 'quote_body',
+                           'email_address', 'fail_on', 'feedback_body', 'feedback_status', 'idempotency_key', 'query', 'quote_body',
                            'report_body', 'requirements', 'scope_binding', 'scope_missing', 'scope_ref'})
 # issue #589: the next step per closed cause code of the HTTP observed derive's customer refusal (profile_refused with
 # detail.cause_code). `{file}` takes the malformation's file (a raw/ name that passed NAME_RE) or 'the bundle' when
@@ -527,6 +570,8 @@ FREE_ACTIONS = {
                                    'gives the keyword; QUICKSTART-API.md section 15 gives the shape), then send again.',
     ('declaration_invalid', 'parse'): 'Rewrite raw/declaration.json as UTF-8 JSON (the reason gives the position), '
                                       'then send again.',
+    ('stack_not_wired', None): 'Send this declaration once its stack has a runner leg on this build (the reason names '
+                               'the missing leg); nothing was charged.',
 }
 FLAGS_ACTION = ('Add the seven flags at their standing values to raw/REPOSITORY.json (execution_authorized, '
                 'hardware_authorized, industrial_release_authorized, release_allowed and physical_validation false; '

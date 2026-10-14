@@ -46,7 +46,7 @@ A `scope` file, when you give one, is a JSON list of the manifest's ids, for exa
 
 Replace the example endpoint values with the operator's own; keep the top-level keys and the seven flags as shown.
 
-## Capturing the response heads (section 12)
+### Capturing the response heads
 
 Capture each head with `curl`, one HEAD request over HTTP/1.1, and write it to the file the manifest names:
 
@@ -83,6 +83,9 @@ permissions:
 jobs:
   http:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@<full commit sha of the release you trust>
@@ -116,7 +119,7 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Each run is a new check, even when the heads are the same as the last run's, byte for byte: the Action makes a fresh identity key for each job, so the endpoint tokens it sends differ from run to run (section 9).
+Each run is a new check, even when the heads are the same as the last run's, byte for byte: the Action makes a fresh identity key for each job, so the endpoint tokens it sends differ from run to run.
 
 You can instead commit the captured heads with the manifest and leave out the capture steps. Use this offline route when you must reproduce a check on a fixture that does not change, for example heads you captured once to keep as a record.
 
@@ -128,7 +131,7 @@ Every reading summary carries the profile's three scope notes:
 
 A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 3; not established: 6 — top action: collect the facts HTTP-TLS10-NEGOTIATION reads": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 6; not established: 3 — top action: no HTTP requirement can be stated in this release; the reading informs and asks nothing of you". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red.
 
-The policy exits are those of section 7. `policy.reason` takes exactly one of these eight values, the serving core's closed list, in the source's order (the policy decides them in the order docs/customer/VERDICTS.md section 9 gives):
+`policy.reason` takes exactly one of these eight values, the serving core's closed list, in the source's order (the policy decides them in the order VERDICTS.md gives):
 
 - `never` (0, as the readings give) when your `fail-on` is `never`; a prove-class obligation that is not proven still exits 1 as `not_proven`.
 - `could_not_look` (3, yellow) when nothing could be read at all: the input gate stopped the check, no machine was read, or no selected unit was observed.

@@ -10,7 +10,7 @@ The observed profile on the official PostgreSQL 18 image (the successor build's 
 green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; vacuous: 13; not established: 21 — top action: state it in requirements.md
 ```
 
-The top action stays "state it in requirements.md". In the summary under the line, each row that depends on what the system is for gives a second way: "operator: commit the proposed declaration (assure-declaration-proposal.json) as raw/declaration.json and run postgresql-declared-model, or state it in requirements.md". On this profile the Action writes `assure-declaration-proposal.json` beside the verdict file, a declaration drafted from the same catalog snapshot, with `assure-requirements-draft.md`, the same proposal as plain sentences to confirm. The summary's section "Declaration proposal" counts the leaves it proposes, the keys to confirm and the rows a committed declaration would decide.
+The top action stays "state it in requirements.md". In the summary under the line, each row that depends on what the system is for gives a second way: "operator: commit the proposed declaration (assure-declaration-proposal.json) as raw/declaration.json and run postgresql-declared-model, or state it in requirements.md". On this profile the Action writes `assure-declaration-proposal.json` beside the verdict file, a declaration drafted from the same catalog snapshot, with `assure-requirements-draft.md`, the goals that proposal lets Assure check, as plain sentences to confirm, and `assure-requirements-typed.json`, which pins each goal to the checks under it. The summary's section "Declaration proposal" counts the leaves it proposes, the keys to confirm and the rows a committed declaration would decide.
 
 ## Red: something disproven
 
@@ -112,4 +112,28 @@ Yellow:
 
 ```text
 We could not read the collected files, so nothing below is a finding about your HTTP responses. Collect the selected endpoints.
+```
+
+### Python auth
+
+`python-auth-declared-model` on the checker's own Flask fixtures, bundled as the Action bundles them, with the six catalogue phrases as the repository's requirements.md and as the check's requirements: green on `flask-session-b` (every reading holds but AUTH-6, which has no method yet); red on `flask-session-a` with no elevation key in its declaration.json, so AUTH-5 has nothing to elevate (the checker reads it `missing_premise`, because requirements.md claims it) and reads as an empty domain. The declared premises count the premises the checker confirms. AUTH-1 states its consequence.
+
+Green, the first line and the sentence under it:
+
+```text
+green: 1 of 1 machines read; declared premises: 7; version pins: none; nothing disproven; established: 5 of 6; not established: 1 — top action: a method is a later profile version; requirements: 5 hold, 1 not established
+```
+
+```text
+Every route in your Flask app is guarded as your declaration says. 1 of 6 checks could not be completed, mostly because Assure has no method yet for some of these shapes. That is a gap in what we could see; your Flask app is unchanged by it. 6 of 6 requirements in requirements.md could be read.
+```
+
+Red, the first line and the sentence under it:
+
+```text
+red: 1 of 1 machines read; declared premises: 6; version pins: none; requirements: 2 hold, 2 not established, 2 disproven; disproven: 2, first AUTH-1 — app/__init__.py:49
+```
+
+```text
+Anyone who can reach your Flask app can call a route outside your declared public routes without signing in. The finding is at app/__init__.py:49. 6 of 6 requirements in requirements.md could be read.
 ```

@@ -91,6 +91,21 @@
       "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
       "type": "string"
     },
+    "declaration_state": {
+      "additionalProperties": {
+        "enum": [
+          "confirm",
+          "confirmed"
+        ]
+      },
+      "description": "Optional, issue #651: the state of leaves a drafter wrote. Each key is the JSON pointer of one leaf of this declaration; its value is confirm (still awaiting the operator's confirmation, so a verdict read on it is provisional) or confirmed. The checker reads the declaration as written either way.",
+      "propertyNames": {
+        "minLength": 2,
+        "pattern": "^(/([^/~]|~[01])*)+$",
+        "type": "string"
+      },
+      "type": "object"
+    },
     "declared_predicate": {
       "minLength": 1,
       "pattern": "\\S",

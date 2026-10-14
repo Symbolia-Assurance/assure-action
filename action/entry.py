@@ -6,7 +6,8 @@ SERVE-001 U2).
 Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT_API_URL, INPUT_PROFILE,
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
-INPUT_REPORT, INPUT_FEEDBACK, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_FRESH_CHECK, INPUT_OUTPUT, INPUT_DECLARATION), with
+INPUT_REPORT, INPUT_FEEDBACK, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_COMPILE_REQUIREMENTS, INPUT_FRESH_CHECK,
+INPUT_OUTPUT, INPUT_DECLARATION), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP, and (serve-019) GITHUB_WORKSPACE, GITHUB_REPOSITORY and GITHUB_SHA
 for `requirements_upload`. Issue #1953: run from the source tree as `python3 -m action.entry --mode local --artefacts DIR
 --profile P [--fail-on ...] [--out FILE]`, each `--<input> VALUE` sets its INPUT_* name (`--out` is INPUT_OUTPUT) before
@@ -124,12 +125,19 @@ Issue #1186 part 2: on a `postgresql-observed-baseline` verdict (api and local m
 written, the Action drafts a declaration from the bundle it already collected and withheld in the runner
 (`draft_proposal`: raw/catalog_snapshot.json and the server major in raw/COLLECTION-SIDECAR.json) and writes two files
 beside the verdict file: assure-declaration-proposal.json (the proposal record, `assure.declare_proposal.propose`) and
-assure-requirements-draft.md (`requirements_draft`). The job summary adds one short section naming the leaves proposed,
+assure-requirements-draft.md (`requirements_draft`), with its typed companion assure-requirements-typed.json
+(`typed_companion`; in api mode `typed_requirements` sends each unchanged drafted sentence as its typed row). The job summary adds one short section naming the leaves proposed,
 the keys to confirm and the rows that need intent (`proposal_markdown`). Nothing new is sent to the API: the drafter
 reads only the withheld bytes, so the proposal holds no literal the withholding pass replaced. With no snapshot, no
 readable server major, or a major outside 14..18, nothing is drafted and nothing is said; a write fault is one
 `::warning`. The verdict file, the outputs and the exit never change. The drafter is imported only there
 (`_proposal_module`): action/declare_proposal.py in the public tree, assure/declare_proposal.py in this checkout.
+
+Issue #2189: on a pull_request event with GITHUB_TOKEN set, after the job summary is written, the verdict is also
+posted as one pull request comment (`post_pr_comment`, the body `serve.render.pr_comment_markdown`, decided from the
+summary's own red findings), found again by its marker and updated in place on each later run. A 403 (the job's token
+lacks `pull-requests: write`) is one `::notice` naming the line to add; any other GitHub refusal is one `::warning`; the
+verdict file, the outputs and the exit never change.
 
 This module imports, at its top, the standard library and modules that never import the engine: `action.client`,
 `action.declaration_draft` (python-auth's declaration drafted and proposed in Assure's own pull request through
@@ -138,6 +146,7 @@ This module imports, at its top, the standard library and modules that never imp
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -190,6 +199,10 @@ MAX_LINT_LINES = 50
 PROPOSAL_PROFILE = 'postgresql-observed-baseline'
 PROPOSAL_FILE = 'assure-declaration-proposal.json'
 REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
+# Issue #1186 (coordination 7588): the draft's typed companion, written beside it; read beside the requirements file
+# that is sent (`typed_requirements`)
+REQUIREMENTS_TYPED_FILE = 'assure-requirements-typed.json'
+MAX_TYPED_BYTES = 256 * 1024
 PROPOSAL_SNAPSHOT = 'raw/catalog_snapshot.json'
 PROPOSAL_SIDECAR = 'raw/COLLECTION-SIDECAR.json'
 PROPOSAL_MAJOR_SOURCE = 'COLLECTION-SIDECAR.json#/server/server_version_num'
@@ -243,7 +256,7 @@ def scrub_process_env(environ):
 # on a command line is visible to every process on the host, so the three secret inputs are read from the environment only.
 FLAG_INPUTS = ('MODE', 'API_URL', 'PROFILE', 'ARTEFACTS', 'DECLARATION', 'COLLECTION_ROLE', 'COLLECTION_PRIVILEGES',
                'DATA_DIR', 'CONFIG_DIRS', 'FAIL_ON', 'ALLOW_PARTIAL', 'SCOPE', 'SCOPE_BINDING', 'ACCEPTED_SCOPE_REF',
-               'REPORT', 'FEEDBACK', 'ALLOW_OVERAGE', 'REQUIREMENTS', 'FRESH_CHECK', 'OUTPUT')
+               'REPORT', 'FEEDBACK', 'ALLOW_OVERAGE', 'REQUIREMENTS', 'COMPILE_REQUIREMENTS', 'FRESH_CHECK', 'OUTPUT')
 SECRET_INPUTS = ('API_KEY', 'CONNECTION', 'IDENTITY_KEY')
 
 
@@ -328,10 +341,14 @@ def _with_layout(e, allow, art):
                    **e.detail)
 
 
-def failure_envelope(check_id, refusal):
-    """The failure envelope (`assure.serve.failure/v1`), the same object `serve.envelope.failure` builds."""
+def failure_envelope(check_id, refusal, charged=False):
+    """The failure envelope (`assure.serve.failure/v1`), the same object `serve.envelope.failure` builds. Its `charged`
+    (issue #1103) is the one the server's failure envelope stated, else `charged`: False when nothing reached the
+    server, None when a check did and the Action could not read its charge."""
     doc = {'schema': FAILURE_SCHEMA, 'check_id': check_id}
     doc.update(refusal.to_dict())
+    stated = doc['detail'].pop('server_charged', None)
+    doc['charged'] = stated if isinstance(stated, bool) else charged
     doc.update(FLAGS)
     return doc
 
@@ -496,7 +513,60 @@ def _head_commit(env):
     return sha
 
 
-def requirements_upload(env, cwd):
+PR_EVENTS = ('pull_request',)              # the event the docs name for the comment
+PR_COMMENT_NOTICE = ('the pull request comment was not posted: GitHub answered 403. To have it posted, add '
+                     '`pull-requests: write` under the job\'s `permissions:` (keep `contents: read` beside it)')
+PR_COMMENT_PAGES = 10                       # 100 comments a page: the marker is looked for in the first 1000
+
+
+def _pull_number(env):
+    """The pull request number from the event file (GITHUB_EVENT_PATH, bounded), or None."""
+    path = str(env.get('GITHUB_EVENT_PATH') or '').strip()
+    if not path:
+        return None
+    try:
+        doc = bundle.parse_json(bundle._read_capped(Path(path), MAX_EVENT_BYTES),
+                                bundle.Limits(body_bytes=MAX_EVENT_BYTES, json_depth=128))
+        n = ((doc.get('pull_request') or {}).get('number') or doc.get('number')) if isinstance(doc, dict) else None
+    except (OSError, Refusal, AttributeError):
+        return None
+    return n if type(n) is int and n > 0 else None
+
+
+def post_pr_comment(env, verdict, github):
+    """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
+    request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
+    looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
+    A GitHub answer that is not 2xx is `api_error` naming its status, with `detail.status` (a 403 is the missing
+    `pull-requests: write`; `main` prints it as one notice)."""
+    if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
+        return None
+    repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or number is None:
+        return None
+    body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo)
+    root = '/repos/%s/issues' % repo
+
+    def ok(status, what):
+        if not 200 <= status < 300:
+            raise Refusal('api_error', 'the pull request comment could not be %s (GitHub answered %d)' % (what, status),
+                          status=status)
+    for page in range(1, PR_COMMENT_PAGES + 1):
+        status, found = github.call('GET', '%s/%d/comments?per_page=100&page=%d' % (root, number, page))
+        ok(status, 'read')
+        found = found if isinstance(found, list) else []
+        for c in found:
+            if isinstance(c, dict) and type(c.get('id')) is int and str(c.get('body') or '').startswith(
+                    render.PR_COMMENT_MARKER):
+                ok(github.call('PATCH', '%s/comments/%d' % (root, c['id']), {'body': body})[0], 'updated')
+                return 'updated'
+        if len(found) < 100:
+            break
+    ok(github.call('POST', '%s/%d/comments' % (root, number), {'body': body})[0], 'posted')
+    return 'posted'
+
+
+def requirements_upload(env, cwd, goals=None):
     """serve-019 (coordination 2136): ({requirements?, repository?, commit?, provenance?}, notice or None). The text is
     the `requirements` input's file (relative to the working directory): one that is missing, unreadable, a link,
     not a regular file, beyond the bounds or not UTF-8 is `bad_input` before anything is collected or sent. The input
@@ -504,18 +574,21 @@ def requirements_upload(env, cwd):
     repository root's requirements.md (GITHUB_WORKSPACE) is sent when it can be; REFUTATION-034 F1: when it cannot,
     no text is sent and the notice says why (`skipped_notice`), so a file the operator never selected never stops the
     run. GITHUB_REPOSITORY and the head commit (`_head_commit`) go as repository and commit with `provenance:
-    runner`; the API reads them as metadata, never as authority."""
-    out, notice = {}, None
+    runner`; the API reads them as metadata, never as authority. Issue #1186: a sent file with the draft's typed
+    companion beside it goes through `typed_requirements`, and the notice then names the lines changed since they
+    were compiled, if any; `goals`, a list when given, receives the goals sent."""
+    out, notice, sent = {}, None, []
     named = _plain(env, 'INPUT_REQUIREMENTS')
     workspace = str(env.get('GITHUB_WORKSPACE') or '').strip()
     if named == NONE_SENTINEL:                       # REFUTATION-034-R2 N5: send no text, print no notice
         pass
     elif named:
         path = Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named
-        out['requirements'] = _read_requirements(path)
+        out['requirements'], notice, sent = typed_requirements(_read_requirements(path), path.parent)
     elif workspace and os.path.lexists(os.path.join(workspace, REQUIREMENTS_FILE)):
         try:
-            out['requirements'] = _read_requirements(Path(workspace) / REQUIREMENTS_FILE)
+            out['requirements'], notice, sent = typed_requirements(
+                _read_requirements(Path(workspace) / REQUIREMENTS_FILE), Path(workspace))
         except Refusal as e:
             kind = e.detail.get('kind', 'bounds')
             why = e.reason.replace('requirements are ', '', 1).replace('requirements ', '', 1) \
@@ -524,7 +597,44 @@ def requirements_upload(env, cwd):
     repo, sha = str(env.get('GITHUB_REPOSITORY') or '').strip(), _head_commit(env)
     if repo and sha:
         out.update(bundle.upload_fields({'repository': repo, 'commit': sha, 'provenance': 'runner'}))
+    if goals is not None:
+        goals[:] = sent
     return out, notice
+
+
+def typed_requirements(text, directory):
+    """Issue #1186 (coordination 7588): (text, sentence or None, goals). `text` with each drafted goal sentence that
+    REQUIREMENTS_TYPED_FILE in `directory` pins by sha256 sent as its children's typed rows
+    (`declare_proposal.typed_text`); an edited or new line is sent as written, and the sentence names the lines changed
+    since they were compiled (`declare_proposal.changed_sentence`); `goals` are the goals sent, for the summary's
+    roll-up (`goal_rollup_markdown`). A companion that is absent, a link, not a regular file, larger than
+    MAX_TYPED_BYTES, not JSON, or whose goals do not check is ignored, and so is a result beyond the requirements
+    bounds: `text` is sent unchanged."""
+    path = Path(directory) / REQUIREMENTS_TYPED_FILE
+    try:
+        if os.path.islink(path) or not path.is_file():
+            return text, None, []
+        companion = bundle.parse_json(bundle._read_capped(path, MAX_TYPED_BYTES),
+                                      bundle.Limits(body_bytes=MAX_TYPED_BYTES, json_depth=32))
+        dp = _proposal_module()
+        typed, changed, goals = dp.typed_text(text, companion)
+        return bundle.check_requirements(typed), dp.changed_sentence(changed), goals
+    except (OSError, Refusal, ValueError, TypeError, AttributeError, KeyError):
+        return text, None, []
+
+
+def goal_rollup_markdown(goals, verdict):
+    """Issue #1186: the job summary's roll-up of the goals sent (`typed_requirements`), one line per goal from its
+    children's requirement states in the verdict (`declare_proposal.rollup`); '' when no goal was sent or the verdict
+    carries no requirement rows."""
+    rows = render.requirement_rows(verdict)
+    if not goals or rows is None:
+        return ''
+    states = {r.get('id'): r.get('state') for r in rows}
+    dp = _proposal_module()
+    return '\n### Requirement goals\n\n' + ''.join('- %s %s\n' % (render.esc(goal['english']),
+                                                                       render.esc(dp.rollup(goal, states)))
+                                                    for goal in goals)
 
 
 def local_requirements_notice(env):
@@ -650,6 +760,18 @@ def parse_allow_overage(text):
     raise Refusal('bad_input', 'allow-overage must be true or false')
 
 
+def parse_compile_requirements(text):
+    """Issue #2252: the `compile-requirements` input, read as `fresh-check` is, but on by default: true (the default)
+    lets the server read requirement lines outside the grammar with Claude Haiku; false sends `compile_requirements:
+    false` with the requirements text, and the lines are matched exactly."""
+    v = (text or '').strip().lower()
+    if v in ('', 'true', '1'):
+        return True
+    if v in ('false', '0'):
+        return False
+    raise Refusal('bad_input', 'compile-requirements must be true or false')
+
+
 def parse_fresh_check(text):
     """serve-023: the `fresh-check` input, read as `allow-partial` is."""
     v = (text or '').strip().lower()
@@ -760,7 +882,7 @@ def _declaration_leaves(node):
 
 
 def draft_proposal(files):
-    """Issue #1186 part 2: (proposal record, draft requirements.md text) drafted from `files`, the bundle as collected
+    """Issue #1186 part 2: (proposal record, draft requirements.md text, drafter notes) drafted from `files`, the bundle as collected
     and withheld in the runner (`action.withhold.apply` has already replaced every SQL literal in the snapshot's policy
     expressions, so the proposal holds only what the upload holds); None when there is no catalog snapshot or the
     collector's sidecar names no server major the drafter reads. Nothing here is sent anywhere."""
@@ -777,7 +899,7 @@ def draft_proposal(files):
         record, notes = dp.propose_with_notes(snapshot, major=major, major_source=PROPOSAL_MAJOR_SOURCE)
     except ValueError:                       # a major outside 14..18, or a snapshot that is not an object
         return None
-    return record, dp.requirements_draft(record, notes)
+    return record, dp.requirements_draft(record, notes), notes
 
 
 def proposal_counts(record, verdict):
@@ -807,11 +929,15 @@ def write_proposal(verdict, files, directory, say):
         drafted = draft_proposal(files)
         if drafted is None:
             return ''
-        record, text = drafted
+        record, text, notes = drafted
         counts = proposal_counts(record, verdict)
         _write_file(directory / PROPOSAL_FILE,
                     (json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
         _write_file(directory / REQUIREMENTS_DRAFT_FILE, text.encode('utf-8'))
+        snap = hashlib.sha256(bytes(files[PROPOSAL_SNAPSHOT])).hexdigest()
+        companion = _proposal_module().typed_companion(record, text, PROPOSAL_SNAPSHOT + ' sha256:' + snap, notes)
+        _write_file(directory / REQUIREMENTS_TYPED_FILE,
+                    (json.dumps(companion, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
     except Exception as w:  # the class name only, never a value
         say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
                                                      % type(w).__name__))
@@ -957,7 +1083,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'draft': None, 'files': None}
+             'compile_requirements': True, 'draft': None, 'files': None, 'goals': []}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1015,7 +1141,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if 'check_id' not in e.detail and isinstance(server_cid, str) and CHECK_ID_RE.fullmatch(server_cid):
             e.detail['check_id'] = server_cid          # a verdict came back, so the check reached the server
         cid = e.detail.get('check_id') or e.detail.get('sent_check_id')    # a refused poll: the id from the 202
-        doc = failure_envelope(cid if isinstance(cid, str) and CHECK_ID_RE.fullmatch(cid) else check_id, e)
+        reached = state['mode'] == 'api' and any(isinstance(c, str) and CHECK_ID_RE.fullmatch(c) for c in (
+            cid, server_cid, getattr(state.get('client'), '_feedback_check_id', None)))   # issue #1103: a 202 came
+        doc = failure_envelope(cid if isinstance(cid, str) and CHECK_ID_RE.fullmatch(cid) else check_id, e,
+                               charged=None if reached else False)
         try:
             _write_file(out_path, bundle.dumps(doc))
         except (OSError, ValueError) as w:
@@ -1095,7 +1224,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
             on_withheld=lambda counts: say(WITHHELD_LINE % {'withheld': withhold.describe(counts)}), on_collected=session,
             is_mysql=is_mysql, root=root)       # issue #206: the identity producer's tree, as run_api gives it
-        return verdict, ignored
+        return dict(verdict, charged=False), ignored             # issue #1103: no API was contacted; nothing charged
 
     def manifest_written(written):
         if written is not None:
@@ -1163,7 +1292,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd, is_mysql=is_mysql)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
-        upload, state['requirements_notice'] = requirements_upload(env, cwd)   # serve-019: before anything is sent
+        upload, state['requirements_notice'] = requirements_upload(env, cwd, state['goals'])   # serve-019: before anything is sent
+        if 'requirements' in upload and not state['compile_requirements']:   # issue #2252: sent only when off
+            upload['compile_requirements'] = False
         if state['requirements_notice']:
             say('::notice title=Assure requirements::%s' % _cmd_data(state['requirements_notice'], cap=None))
         url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
@@ -1304,6 +1435,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'), state['mode'])   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
             state['fresh_check'] = parse_fresh_check(_plain(env, 'INPUT_FRESH_CHECK'))           # serve-023
+            state['compile_requirements'] = parse_compile_requirements(
+                _plain(env, 'INPUT_COMPILE_REQUIREMENTS'))                                        # issue #2252
             if state['report_on'] and state['mode'] != 'api':
                 raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
@@ -1338,6 +1471,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         summary += markers.session_markdown(state['session'])
         if state['requirements_notice']:                  # REFUTATION-034 F1/F2: the same words in the summary
             summary += '\n' + render.esc(state['requirements_notice']) + '\n'
+        summary += goal_rollup_markdown(state['goals'], verdict)          # issue #1186
+        compiled = verdict.get('requirements_compilation')  # issue #2252: the server's sentence on the Haiku reading
+        if isinstance(compiled, dict) and isinstance(compiled.get('summary'), str) and compiled['summary']:
+            summary += '\n' + render.esc(compiled['summary']) + '\n'
         key_line = render.key_expiry_line(getattr(state.get('client'), 'key_expires', None))    # issue #1262
         if key_line is not None:
             summary += '\n' + render.esc(key_line) + '\n'
@@ -1356,6 +1493,18 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         _append(env.get('GITHUB_STEP_SUMMARY'), summary)
     except OSError as w:
         say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
+    if env.get('GITHUB_EVENT_NAME') in PR_EVENTS and str(env.get('GITHUB_TOKEN') or '').strip():
+        try:                                           # issue #2189: never changes the verdict, its file or its exit
+            post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
+                                                 str(env.get('GITHUB_TOKEN')).strip()))
+        except Refusal as e:
+            if e.detail.get('status') == 403:          # the token cannot write comments: say the line to add, once
+                say('::notice title=Assure comment::%s' % _cmd_data(PR_COMMENT_NOTICE))
+            else:
+                say('::warning title=Assure comment::%s' % _cmd_data(scrub(e.reason)))
+        except Exception as e:  # the class name only, never a value
+            say('::warning title=Assure comment::%s' % _cmd_data(
+                'the pull request comment failed unexpectedly (%s)' % type(e).__name__))
     for line in notes:
         say(line)
     if ignored:

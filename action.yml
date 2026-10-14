@@ -91,6 +91,10 @@ inputs:
     description: A requirements file to send with the check, api mode only (a path relative to the workspace). Empty sends the repository root's requirements.md when it can be sent; when it cannot (over 65536 bytes, 256 lines or 8192 bytes per line, a symbolic link, not a regular file or not UTF-8) nothing is sent and one notice says why. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements.
     required: false
     default: ''
+  compile-requirements:
+    description: true (the default) lets the server send each requirements line it cannot match exactly, and only those lines, to Claude Haiku, which proposes the profile's statements the line asks for; the server then checks the proposal and decides the line itself, and the job summary says how many lines were read. False keeps every line from Claude Haiku, and the lines are matched exactly. API mode only.
+    required: false
+    default: 'true'
   fresh-check:
     description: true sends a random Idempotency-Key, so the same bundle is checked, and charged, again. False (the default) derives the key from the content of the request, so a repeat of the same request gets the stored verdict back and is not charged again.
     required: false
@@ -175,6 +179,7 @@ runs:
         INPUT_FEEDBACK: ${{ inputs.feedback }}
         INPUT_ALLOW_OVERAGE: ${{ inputs.allow-overage }}
         INPUT_REQUIREMENTS: ${{ inputs.requirements }}
+        INPUT_COMPILE_REQUIREMENTS: ${{ inputs.compile-requirements }}
         INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}

@@ -2,7 +2,7 @@
  "schema": "assure.serve.collector-pin/v1",
  "generation": "my1",
  "files": {
-  "collect_mysql.py": "abd61223e92ff3eaf5a4fcd49f56733e1c22712058bc548cb0c7d4d2021164d8",
+  "collect_mysql.py": "65895722a6ce834f115d913a8a0fc349d4044c547080a756f5961b67c3babd66",
   "sensitive_field_filter_rev20.py": "575549c5e02a11e986c3ba1ac1d06eb6623812e201f61d51e086f12359916104"
  },
  "filter_sha256": "575549c5e02a11e986c3ba1ac1d06eb6623812e201f61d51e086f12359916104",
@@ -10,7 +10,7 @@
   "collect_mysql.py": "Symbolia read-only MySQL collector, first generation (my1): fixed SELECT/SHOW reads through the mysql client, password by MYSQL_PWD only, never authentication_string; the observable sections of symbolia.mysql-declared-input.v0 merged with the customer declaration file; the frozen sensitive-field filter (rev 20) run over the whole document before any byte is written",
   "filter": "action/collector/sensitive_field_filter_rev20.py: the frozen sensitive-field filter, revision 20, byte-identical to the registry copy it is pinned to (its sha256 is in files); shipped beside the collector and imported statically from there, digest-checked before use",
   "authored": "2026-10-09, MySQL stage 3 lane; proposal, approves nothing",
-  "revised": "2026-10-10, trial lane trial-013 (REG-003, Assure #174): filter revision 20, a $ between two letters separates word-like segments so MySQL sys schema names read as names; proposal, approves nothing; 2026-10-10, trial lane trial-015 (REG-005): the mysql.user read takes the lock options from User_attributes.Password_locking (password_lock_time_days, failed_login_attempts; absent = the manual's implicit default 0), since stock 8.0, 8.4 and 9.7 have no such columns; proposal, approves nothing; 2026-10-10, fix dispatch (Assure #271): a sensitive_field refusal names the flagged row's object type and schema (VIEW in schema sys) and whether the schema is MySQL's own, never the flagged value; proposal, approves nothing"
+  "revised": "2026-10-10, trial lane trial-013 (REG-003, Assure #174): filter revision 20, a $ between two letters separates word-like segments so MySQL sys schema names read as names; proposal, approves nothing; 2026-10-10, trial lane trial-015 (REG-005): the mysql.user read takes the lock options from User_attributes.Password_locking (password_lock_time_days, failed_login_attempts; absent = the manual's implicit default 0), since stock 8.0, 8.4 and 9.7 have no such columns; proposal, approves nothing; 2026-10-10, fix dispatch (Assure #271): a sensitive_field refusal names the flagged row's object type and schema (VIEW in schema sys) and whether the schema is MySQL's own, never the flagged value; proposal, approves nothing; 2026-10-12, fix dispatch (Assure #651): the declaration's optional declaration_state markers are copied into the submission verbatim, like declared_policy and m3; proposal, approves nothing"
  },
  "flags": {
   "execution_authorized": false,

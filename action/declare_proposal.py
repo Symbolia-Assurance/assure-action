@@ -22,12 +22,20 @@ true beside protected_tables, always confirmed, since without it the row-securit
 accepts (an empty untrusted-role list, an empty administrator list) is never drafted from an absence: that key stays
 unread. A snapshot section the collector did not read (absent from the snapshot) is never read as empty.
 
+The draft requirements.md (``requirements_draft``) holds the goals a person would write (``GOALS``), one plain
+sentence each, for the obligation families the drafted declaration decides; the header is a Markdown heading, so the
+matcher reads only the goals. Its companion (``typed_companion``, assure-requirements-typed.json) is a tree: each goal
+pinned by its sentence's sha256 to its child typed rows (``ROWS``: the canonical statement the matcher establishes,
+with its waypoint sentence and provenance). ``typed_text`` sends each unchanged goal as its children's typed rows
+(issue #1186; coordination 7570, 7588).
+
 Standard library only. No network, no database, no model call, no verdict.
 execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -143,6 +151,51 @@ def strip_outer_parens(text):
 
 def _trivial(sql):
     return re.sub(r"\s+", " ", strip_outer_parens(str(sql))).strip().lower() in ("true", "false")
+
+
+#: what a `true` clause opens, by command (pg_policy.polcmd): USING lets every row be read, changed or deleted, WITH
+#: CHECK lets any row be added or written
+_OPENS = {("polqual", "r"): "read every row of %s", ("polqual", "*"): "read and change every row of %s",
+          ("polqual", "w"): "change every row of %s", ("polqual", "d"): "delete every row of %s",
+          ("polwithcheck", "a"): "add rows to %s", ("polwithcheck", "*"): "add rows to %s",
+          ("polwithcheck", "w"): "change rows of %s to any value"}
+
+
+def _open_line(table, policies):
+    """The heading line requirements.md carries for a table its own permissive `true` policies open (issue #1186):
+    who can do what to its rows, which policies allow it, and the goal to add if it is not intended. Headings are
+    never read as requirements."""
+    acts, names = [], []
+    for _index, policy in policies:
+        if policy.get("polpermissive", True) is False:
+            continue
+        roles = policy.get("polroles")
+        who = ("everyone" if not isinstance(roles, list) or not roles
+               or "public" in [str(r).lower() for r in roles]
+               or not all(type(r) is str and NAME.match(r) for r in roles) else "the roles " + _and(roles))
+        for field in ("polqual", "polwithcheck"):
+            what = _OPENS.get((field, policy.get("polcmd")))
+            if what and type(policy.get(field)) is str and _is_true(policy[field]):
+                act = "%s can %s" % (who, what % table)
+                if act not in acts:
+                    acts.append(act)
+                name = policy.get("polname")
+                if type(name) is str and '"' not in name and name not in names \
+                        and not re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", name) and len(name) <= 200:
+                    names.append(name)
+    if not acts:
+        return None
+    allows = (" (its polic%s %s allow%s it)" % ("y" if len(names) == 1 else "ies",
+                                                 _and(['"%s"' % n for n in names]), "s" if len(names) == 1 else "")
+              if names else "")
+    goal = ("Each user sees only their own rows in %s." % table if any("read" in a for a in acts)
+            else "Each user writes only their own rows in %s." % table)
+    return ('## To confirm: %s%s. If that is not intended, add a goal such as "%s"'
+            % (_and(acts), allows, goal))
+
+
+def _is_true(sql):
+    return re.sub(r"\s+", " ", strip_outer_parens(str(sql))).strip().lower() == "true"
 
 
 class _Draft:
@@ -374,7 +427,9 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
 
     # protected_tables, declared_predicate, required_policies (RLS-2, RLS-3): the row-security tables whose policies
     # carry exactly one non-trivial USING expression, grouped by it; the largest group (first in snapshot order on a
-    # tie) is drafted, since the declaration states one predicate
+    # tie) is drafted, since the declaration states one predicate. Issue #1186: a table with a permissive policy whose
+    # USING or WITH CHECK is `true` admits every row by its own policy (Supabase's "viewable by everyone"): the
+    # snapshot shows no tenant boundary there, so it is never drafted as protected (the customer says so)
     if objects_sec is None or policies_sec is None:
         for key in ("protected_tables", "declared_predicate", "required_policies"):
             d.unread(key, "objects or policies were not collected")
@@ -385,6 +440,16 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 by_table.setdefault(row["polrelid"], []).append((index, row))
         groups = {}
         for index, row in rls_tables:
+            open_to_all = [str(policy.get("polname")) for _pindex, policy in by_table.get(row["relname"], [])
+                           if policy.get("polpermissive", True) is not False
+                           and any(type(policy.get(f)) is str and _is_true(policy[f])
+                                   for f in ("polqual", "polwithcheck"))]
+            if open_to_all:
+                d.notes.append({"key": "protected_tables", "note": "table %s has a policy that admits every row (%s); "
+                                "its rows are open by its own policy, so it was not drafted as protected"
+                                % (row["relname"], "; ".join(open_to_all)),
+                                "open": _open_line(row["relname"], by_table.get(row["relname"], []))})
+                continue
             quals = {}
             for pindex, policy in by_table.get(row["relname"], []):
                 qual = policy.get("polqual")
@@ -427,7 +492,14 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 d.put("required_policies", [n for n, _ in names], _list_sources([s for _, s in names]))
             else:
                 d.unread("required_policies", "no policy on the drafted tables has a name the declaration format holds")
-            d.put("rls_exempt_logins", [], "default:[] exempts no login from row security")
+            # rls_exempt_logins (RLS-1, RLS-3; issue #1186): the drafted administrators that can log in. A superuser
+            # bypasses row security whatever is declared, and SU-1 holds the superuser set to the administrators
+            exempt = [(name, SNAP + "/roles/%d/rolsuper" % roles[name][0]) for name in d.decl.get("administrators", [])
+                      if name in roles and roles[name][1].get("rolcanlogin") is True]
+            if exempt:
+                d.put("rls_exempt_logins", [n for n, _ in exempt], _list_sources([w for _, w in exempt]))
+            else:
+                d.put("rls_exempt_logins", [], "default:[] exempts no login from row security")
             d.put("view_exemptions", [], "default:[] exempts no view from row security")
 
     # intended_tables (LR-1-SCOPE): the tables the observed publications name (none when no publication exists)
@@ -474,59 +546,420 @@ def propose(snapshot, *, major, major_source="argument:major"):
     return propose_with_notes(snapshot, major=major, major_source=major_source)[0]
 
 
-#: one plain sentence per proposed key, for the draft requirements.md
-SENTENCES = {
-    "administrators": "Only {v} may hold superuser.",
-    "applications": "The application connects as {v}.",
-    "privilege_queries": "These table privileges are intended: {v}.",
-    "sensitive_objects": "These tables hold sensitive data: {v}.",
-    "default_acl_expectations": "New tables get exactly these default privileges: {v}.",
-    "replication_roles": "Only {v} may replicate.",
-    "protected_tables": "Row security protects {v}.",
-    "declared_predicate": "Each tenant sees only the rows where {v}.",
-    "required_policies": "These row-security policies must exist: {v}.",
-    "access_paths_complete": "Every way to reach the protected tables is a grant, membership or view in the catalog.",
-    "rls_exempt_logins": "No login is exempt from row security.",
-    "view_exemptions": "No view is exempt from row security.",
-    "intended_tables": "Logical replication publishes only {v}.",
-    "untrusted_roles": "These roles are untrusted and must not control a SECURITY DEFINER function's search path: {v}.",
-    "id": "This declaration is named {v}.",
+#: the requirement rows the draft can carry (issue #1186; coordination 7570, 7588): (obligation id, the declaration keys
+#: it rests on, the obligation's canonical statement in the postgresql-declared-model profile, package-model-003
+#: models/M*/MACHINE.json). The requirements matcher (serve/requirements.py) establishes a line only when its sentence is
+#: that statement. An obligation is drafted only when every key it rests on is drafted; a key marked `?` is named when
+#: drafted, and the obligation is decided without it (measured on D-g with the declared profile).
+#: tests/serving/test_issue_1186_typed_rows_accept.py pins each statement to the profile.
+ROWS = (
+    ("PRIV-1", ("privilege_queries",),
+     "Compute declared ordinary ACL queries as direct/inherited/after_set/not_held with derived path; explicit "
+     "broad-role/RLS uncertainty is missing_method."),
+    ("PRIV-4", ("sensitive_objects",),
+     "No sensitive object in the supplied finite object list has an explicit/effective PUBLIC ACL entry."),
+    ("PRIV-5", ("default_acl_expectations",),
+     "For each declared future creator/schema query, resolved global ACL union additive schema ACL equals declared "
+     "expected ACL; existing objects remain separate."),
+    ("GRANT-OPTION-POLICY", ("sensitive_objects", "administrators"),
+     "Additional declared policy: no sensitive-object grant option outside administrators, including owner implicit "
+     "grant options independent of ordinary ACL contents. Not a vendor policy."),
+    ("SU-1", ("administrators", "applications?"),
+     "Direct rolsuper set equals declared administrator set and includes no application login."),
+    ("RLS-1", ("protected_tables", "rls_exempt_logins", "access_paths_complete"),
+     "Each protected table/non-exempt login path is RLS enabled, owner only with FORCE, no superuser/BYPASSRLS reach."),
+    ("RLS-2", ("protected_tables", "required_policies?", "declared_predicate", "access_paths_complete"),
+     "Required policies exist; every applicable permissive predicate implies the declared tenant predicate."),
+    ("RLS-3", ("protected_tables", "declared_predicate", "access_paths_complete"),
+     "INSERT/UPDATE admission implies the declared new-row predicate through explicit CHECK or implicit USING."),
+    ("RLS-4", ("protected_tables", "view_exemptions", "access_paths_complete"),
+     "No non-exempt view-owner read path over protected tables."),
+    ("LR-1-SCOPE", ("intended_tables",),
+     "Published tables, including modeled future FOR ALL TABLES members, stay within declared intent."),
+)
+_PATHS = ", and every way to reach them is a grant, membership or view in the catalog."
+#: the plain-English face of each row: (template, values the template fixes) in the order tried; a {key} is the
+#: drafted value in words (`_phrase`), read back by `_unphrase`
+ENGLISH = {
+    "PRIV-1": (("These table privileges are held as declared: {privilege_queries}.", {}),),
+    "PRIV-4": (("PUBLIC holds no privilege on the sensitive tables {sensitive_objects}.", {}),),
+    "PRIV-5": (("New tables get exactly these default privileges: {default_acl_expectations}.", {}),),
+    "GRANT-OPTION-POLICY": (("Only {administrators} may hold a grant option on the sensitive tables "
+                             "{sensitive_objects}.", {}),),
+    "SU-1": (("Only {administrators} may hold superuser, and the application logins {applications} are not "
+              "superusers.", {}),
+             ("Only {administrators} may hold superuser.", {})),
+    "RLS-1": (("Row security covers every login that reaches {protected_tables}" + _PATHS,
+               {"rls_exempt_logins": [], "access_paths_complete": True}),
+              ("Row security covers every login that reaches {protected_tables}, except {rls_exempt_logins}" + _PATHS,
+               {"access_paths_complete": True})),
+    "RLS-2": (("Each tenant reads only the rows of {protected_tables} where {declared_predicate}, through the policies "
+               "{required_policies}" + _PATHS, {"access_paths_complete": True}),
+              ("Each tenant reads only the rows of {protected_tables} where {declared_predicate}" + _PATHS,
+               {"access_paths_complete": True})),
+    "RLS-3": (("Each tenant inserts or updates only rows of {protected_tables} where {declared_predicate}" + _PATHS,
+               {"access_paths_complete": True}),),
+    "RLS-4": (("No view reads {protected_tables} past row security" + _PATHS,
+               {"view_exemptions": [], "access_paths_complete": True}),
+              ("No view except {view_exemptions} reads {protected_tables} past row security" + _PATHS,
+               {"access_paths_complete": True})),
+    "LR-1-SCOPE": (("Logical replication publishes no table.", {"intended_tables": []}),
+                   ("Logical replication publishes only {intended_tables}.", {})),
 }
+#: the goals a person would write, each over the obligation family it rolls up (key, sentence, obligations): a goal
+#: is drafted when at least one of its obligations is; its sentence names no role, table or obligation
+GOALS = (
+    ("access", "Only the people who run the database can change who has access to it.",
+     ("SU-1", "GRANT-OPTION-POLICY", "PRIV-1", "PRIV-4", "PRIV-5")),
+    ("tenant", "Each user sees only their own data.", ("RLS-1", "RLS-2", "RLS-3", "RLS-4")),
+    ("replication", "Only the data meant to be shared leaves the database through replication.", ("LR-1-SCOPE",)),
+)
+#: drafted keys no requirement row rests on, and why (the draft's notes name them)
+NO_ROW = {
+    "id": "it names the declaration; no obligation reads it",
+    "replication_roles": "HBA-4 also needs standby_addresses, which the catalog snapshot does not give",
+    "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
+                       "snapshot does not give",
+}
+#: the companion of the draft: each goal line, keyed by its sha256, with its child typed rows (`typed_companion`)
+TYPED_SCHEMA = "assure.requirements-typed/v1"
+TYPED_PROFILE = "postgresql-declared-model"
+#: the longest waypoint sentence drafted (serve/requirements.py reads lines of at most 8 KiB)
+LINE_CAP = 3072
+#: the most open-table lines requirements.md carries (the rest are counted; the companion's notes name each)
+OPEN_CAP = 20
+_N = NAME.pattern[1:-2]     # the name pattern without its anchors
+_PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE")
+_PLACE = re.compile(r"\{([a-z_]+)\}")
+_GID = re.compile(r"G[1-9][0-9]{0,5}\Z")
+_MARKER = re.compile(r"(?:[-*+]\s+|\d+[.)]\s+)")
 
 
-def _phrase(value):
-    if isinstance(value, list):
-        if not value:
-            return "nothing"
-        parts = []
-        for item in value:
-            if isinstance(item, dict) and "privilege" in item:
-                parts.append("%s %s on %s" % (item["role"], item["privilege"], item["object"]))
-            elif isinstance(item, dict) and "creator" in item:
-                parts.append("tables %s creates in %s grant %s" % (item["creator"], item["schema"],
-                             ", ".join("%s %s" % (g, p) for g, p in item["expected_acl"]) or "nothing"))
-            else:
-                parts.append(str(item))
-        return ", ".join(parts)
-    return str(value)
+def _and(words):
+    """a | a and b | a, b and c"""
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _unand(text):
+    parts = text.split(", ")
+    last = parts[-1].split(" and ")
+    if len(last) > 2 or (len(parts) > 1 and len(last) != 2):
+        return None
+    return parts[:-1] + last
+
+
+def _runs(pairs):
+    """[(head, privilege)] -> [(head, [privileges])], consecutive equal heads joined (order kept)."""
+    out = []
+    for head, privilege in pairs:
+        if out and out[-1][0] == head:
+            out[-1][1].append(privilege)
+        else:
+            out.append((head, [privilege]))
+    return out
+
+
+def _phrase(key, value):
+    """The plain words for one drafted value, or None when it has none (an empty list, an unknown shape)."""
+    if key == "declared_predicate":
+        return "`%s`" % value if isinstance(value, str) else None
+    if not isinstance(value, list) or not value:
+        return None
+    if key == "privilege_queries":
+        return "; ".join("%s %s on %s" % (role, _and(privs), obj) for (role, obj), privs in
+                         _runs([((m["role"], m["object"]), m["privilege"]) for m in value]))
+    if key == "default_acl_expectations":
+        if any(m.get("kind") != "table" for m in value):
+            return None
+        return ", while ".join("tables %s creates in %s grant %s" % (m["creator"], m["schema"], "; ".join(
+            "%s %s" % (g, _and(privs)) for g, privs in _runs(m["expected_acl"])) or "nothing") for m in value)
+    return _and([str(name) for name in value])
+
+
+def _privs(text):
+    privs = _unand(text)
+    return privs if privs and all(p in _PRIVS for p in privs) else None
+
+
+def _unphrase(key, text):
+    """`_phrase` read back: the drafted value, or None when the words are not its phrase."""
+    if key == "declared_predicate":
+        return text[1:-1] if len(text) > 1 and text[0] == text[-1] == "`" else None
+    if key == "privilege_queries":
+        out = []
+        for part in text.split("; "):
+            m = re.fullmatch(r"(%s) (.+) on (%s)" % (_N, _N), part)
+            privs = _privs(m.group(2)) if m else None
+            if privs is None:
+                return None
+            out += [{"object": m.group(3), "privilege": p, "role": m.group(1)} for p in privs]
+        return out
+    if key == "default_acl_expectations":
+        out = []
+        for part in text.split(", while "):
+            m = re.fullmatch(r"tables (%s) creates in (%s) grant (.+)" % (_N, _N), part)
+            if m is None:
+                return None
+            pairs = []
+            for group in ([] if m.group(3) == "nothing" else m.group(3).split("; ")):
+                g = re.fullmatch(r"(%s) (.+)" % _N, group)
+                privs = _privs(g.group(2)) if g else None
+                if privs is None:
+                    return None
+                pairs += [[g.group(1), p] for p in privs]
+            out.append({"creator": m.group(1), "expected_acl": pairs, "kind": "table", "schema": m.group(2)})
+        return out
+    names = _unand(text)
+    return names if names and all(NAME.match(n) for n in names) else None
+
+
+def english(row):
+    """The plain-English sentence of a typed row ({obligation, statement, values}), built from the drafted values; None
+    when no template of the obligation says them."""
+    for template, fixed in ENGLISH.get(row["obligation"], ()):
+        named = _PLACE.findall(template)
+        if set(named) | set(fixed) != set(row["values"]) or any(row["values"][k] != v for k, v in fixed.items()):
+            continue
+        words = {key: _phrase(key, row["values"][key]) for key in named}
+        if None not in words.values():
+            return template.format(**words)
+    return None
+
+
+def parse_english(sentence):
+    """`english` read back to its typed row, or None when the sentence is not one."""
+    for obligation, _keys, statement in ROWS:
+        for template, fixed in ENGLISH[obligation]:
+            named = _PLACE.findall(template)
+            pattern = "".join(re.escape(piece) if i % 2 == 0 else "(.*?)"
+                              for i, piece in enumerate(_PLACE.split(template)))
+            m = re.fullmatch(pattern, sentence, re.S)
+            if m is None:
+                continue
+            values = dict(fixed, **{key: _unphrase(key, text) for key, text in zip(named, m.groups())})
+            if any(value is None for value in values.values()):
+                continue
+            order = [k.rstrip("?") for k in _keys if k.rstrip("?") in values]
+            row = {"obligation": obligation, "statement": statement, "values": {k: values[k] for k in order}}
+            if english(row) == sentence:
+                return row
+    return None
+
+
+def _one_line(text, cap=LINE_CAP):
+    return (isinstance(text, str) and len(text.encode("utf-8")) <= cap
+            and not re.search(r"[\x00-\x1f\x7f-\x9f  ]", text))
+
+
+def _drafted(record):
+    """(rows, left): the typed rows the drafted declaration decides, in ROWS order, and a note for each obligation left
+    out because its English is not one line that reads back to the same row."""
+    decl, rows, left = record["declaration"], [], []
+    for obligation, keys, statement in ROWS:
+        if not all(key in decl for key in keys if not key.endswith("?")):
+            continue
+        row = {"obligation": obligation, "statement": statement,
+               "values": {key.rstrip("?"): decl[key.rstrip("?")] for key in keys if key.rstrip("?") in decl}}
+        face = english(row)
+        if not _one_line(face) or parse_english(face) != row:
+            left.append("%s has no row: its value does not read back from one plain line" % obligation)
+            continue
+        rows.append(row)
+    return rows, left
+
+
+def typed_rows(record):
+    """The typed requirement rows the drafted declaration decides: [{obligation, statement, values}], in ROWS order.
+    `values` holds each key the row rests on, as drafted. Every row's `english` reads back to it."""
+    return _drafted(record)[0]
+
+
+def row_line(rid, row):
+    """The typed requirements line of a row: the matcher's `ID [postgres]: sentence` with the canonical statement."""
+    return "- %s [postgres]: %s" % (rid, row["statement"])
+
+
+def _sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def goal_sentence(key):
+    """The goal sentence of a goal key, or None."""
+    return next((sentence for k, sentence, _obligations in GOALS if k == key), None)
+
+
+def parse_goal(sentence):
+    """The goal key of a goal sentence, or None."""
+    return next((k for k, s, _obligations in GOALS if s == sentence), None)
+
+
+def drafted_goals(record):
+    """[{key, english, rows}]: each goal (GOALS order) with at least one typed row the drafted declaration decides,
+    its rows in the goal's order."""
+    rows = {row["obligation"]: row for row in typed_rows(record)}
+    return [{"key": key, "english": sentence, "rows": [rows[o] for o in obligations if o in rows]}
+            for key, sentence, obligations in GOALS if any(o in rows for o in obligations)]
+
+
+def _left(record, notes):
+    """The drafter's notes: obligations with no row and why, drafted keys no row rests on, and `notes`."""
+    decl = record["declaration"]
+    rows, left = _drafted(record)
+    used = {key for row in rows for key in row["values"]}
+    for obligation, keys, _statement in ROWS:
+        required = [key for key in keys if not key.endswith("?")]
+        missing = [key for key in required if key not in decl]
+        if missing and len(missing) < len(required):
+            left.append("%s has no row: it also needs %s, which is not drafted" % (obligation, ", ".join(missing)))
+    for key in sorted(k for k in decl if "/" + _esc(k) in record["confirm"] and k not in used):
+        left.append("%s is drafted with no row: %s" % (key, NO_ROW.get(key, "no obligation rests on it alone")))
+    return left + [n["note"] for n in notes if "note" in n]
+
+
+def typed_companion(record, text, drafted_from=None, notes=()):
+    """The companion of the draft `text` (assure-requirements-typed.json beside it), a tree: the sha256 of `text`
+    (`source_sha256`), what the proposal was drafted from (`drafted_from`), the drafter's notes, and per goal its id
+    (G1..), key, sentence, the sentence's sha256 and 1-based `line` in `text`, `status` (proposed: committing the file
+    is the acceptance, DD-150) and its child rows: id (G1.1..), obligation, canonical statement (the typed row the
+    matcher establishes), waypoint sentence (`english`), declaration keys and values, and the snapshot rows each key
+    was drafted from. The customer never edits it; `typed_text` reads it."""
+    lines = text.split("\n")
+    goals = []
+    for g, goal in enumerate(drafted_goals(record), 1):
+        children = []
+        for c, row in enumerate(goal["rows"], 1):
+            provenance = {key: sorted({source for pointer, source in record["sources"].items()
+                                       if pointer == "/" + _esc(key) or pointer.startswith("/" + _esc(key) + "/")})
+                          for key in row["values"]}
+            children.append({"id": "G%d.%d" % (g, c), "obligation": row["obligation"], "statement": row["statement"],
+                             "english": english(row), "keys": list(row["values"]), "values": row["values"],
+                             "provenance": provenance})
+        goals.append({"id": "G%d" % g, "key": goal["key"], "english": goal["english"], "sha256": _sha(goal["english"]),
+                      "line": lines.index("- " + goal["english"]) + 1 if "- " + goal["english"] in lines else None,
+                      "status": "proposed", "rows": children})
+    return dict({"schema": TYPED_SCHEMA, "profile": TYPED_PROFILE, "source_sha256": _sha(text),
+                 "drafted_from": drafted_from, "notes": _left(record, notes), "goals": goals}, **FLAGS)
+
+
+def _goals(companion):
+    """{sha256: {id, english, line, rows: [(id, statement, waypoint)]}} of the companion goals that check: the goal
+    sentence is its key's, its sha256 is that sentence's, and every child is one of the goal's obligations with its
+    obligation's statement, the waypoint its own values render, and the id G<n>.<k> in order. A goal with any child
+    that does not check is ignored whole."""
+    if not isinstance(companion, dict) or companion.get("schema") != TYPED_SCHEMA \
+            or companion.get("profile") != TYPED_PROFILE or not isinstance(companion.get("goals"), list):
+        return {}
+    statements = {obligation: statement for obligation, _keys, statement in ROWS}
+    family = {key: obligations for key, _sentence, obligations in GOALS}
+    out, ids = {}, set()
+    for goal in companion["goals"]:
+        try:
+            line, children = goal.get("line"), []
+            ok = (type(goal["id"]) is str and _GID.match(goal["id"]) and goal["id"] not in ids
+                  and goal_sentence(goal["key"]) == goal["english"] and goal["sha256"] == _sha(goal["english"])
+                  and (line is None or type(line) is int and line > 0)
+                  and isinstance(goal["rows"], list) and goal["rows"])
+            seen = set()
+            for k, child in enumerate(goal["rows"] if ok else (), 1):
+                row = {"obligation": child["obligation"], "statement": child["statement"], "values": child["values"]}
+                ok = ok and (child["id"] == "%s.%d" % (goal["id"], k) and row["obligation"] in family[goal["key"]]
+                             and row["obligation"] not in seen and statements[row["obligation"]] == row["statement"]
+                             and isinstance(row["values"], dict) and child["english"] == english(row))
+                seen.add(row["obligation"])
+                children.append((child["id"], child["statement"], child["english"]))
+        except (KeyError, TypeError, AttributeError, ValueError):
+            ok = False
+        if ok and goal["sha256"] not in out:
+            ids.add(goal["id"])
+            out[goal["sha256"]] = {"id": goal["id"], "english": goal["english"], "line": line, "rows": children}
+    return out
+
+
+def compile_line(sentence, goals):
+    """The checked companion goal for one English requirement sentence, by its sha256; None when there is none (a line
+    the customer wrote or edited), and the line is sent as written. The hook where issue #2252 compiles such a line."""
+    return goals.get(_sha(sentence))
+
+
+def typed_text(text, companion):
+    """(text the matcher reads, changed lines, expanded goals). Each English line whose sha256 a checked companion
+    goal names becomes its children's typed lines (`- G1.1 [postgres]: <statement>`, one per line); every other line,
+    and every line inside a code fence, is sent as written. `changed` lists the requirement lines with no match where a
+    checked goal was compiled (its `line`): lines changed since they were compiled, checked as written. `expanded`
+    lists each goal sent as {id, english, rows: [(id, statement, waypoint)]}. A companion that does not check changes
+    nothing."""
+    goals = _goals(companion)
+    if not goals:
+        return text, [], []
+    compiled_at = {goal["line"] for goal in goals.values() if goal["line"] is not None}
+    out, fenced, expanded, changed = [], False, [], []
+    for n, line in enumerate(text.split("\n"), 1):
+        end = "\r" if line.endswith("\r") else ""
+        stripped = (line[:-1] if end else line).strip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and stripped and not re.match(r"#{1,6}(?:\s|$)", stripped):
+            marker = _MARKER.match(stripped)
+            goal = compile_line(stripped[marker.end():] if marker else stripped, goals)
+            if goal is not None and goal not in expanded:
+                expanded.append(goal)
+                out += ["- %s [postgres]: %s%s" % (rid, statement, end) for rid, statement, _w in goal["rows"]]
+                continue
+            if goal is None and n in compiled_at:
+                changed.append(n)
+        out.append(line)
+    return "\n".join(out), changed, expanded
+
+
+def apply_typed(text, companion):
+    """The requirements text the matcher reads (`typed_text`)."""
+    return typed_text(text, companion)[0]
+
+
+def changed_sentence(changed):
+    """The one sentence naming the requirement lines changed since they were compiled, or None."""
+    if not changed:
+        return None
+    if len(changed) == 1:
+        return ("1 requirement line changed since it was compiled; it is checked as written (line %d)." % changed[0])
+    return ("%d requirement lines changed since they were compiled; they are checked as written (lines %s)."
+            % (len(changed), ", ".join(str(n) for n in changed)))
+
+
+def rollup(goal, states):
+    """One goal's reading from its children's requirement states ({id: holds | disproven | not_established}):
+    `broken: <waypoints of the disproven children>`, else `holds for N of M checks[; K not decided yet]`."""
+    broken = [waypoint for rid, _statement, waypoint in goal["rows"] if states.get(rid) == "disproven"]
+    if broken:
+        return "broken: " + " ".join(broken)
+    held = sum(1 for rid, _statement, _w in goal["rows"] if states.get(rid) == "holds")
+    total = len(goal["rows"])
+    return "holds for %d of %d checks" % (held, total) + ("; %d not decided yet" % (total - held) if held < total else "")
 
 
 def requirements_draft(record, notes=()):
-    """A draft requirements.md: one sentence per proposed key, each marked for confirmation."""
+    """A draft requirements.md (issue #1186; coordination 7588 and its qualification): the goals a person would write,
+    one plain sentence each, for each goal with at least one obligation the drafted declaration decides; no role,
+    table or obligation names. The header and the flags line are Markdown headings, so the matcher reads only the
+    goals as requirements. The checks under each goal, the drafter's notes and provenance are in the companion
+    (`typed_companion`)."""
     lines = ["# Requirements (draft)", "",
-             "Proposed from the catalog snapshot. Each line is proposed — confirm before committing. "
-             "Only the committed raw/declaration.json is authority.", ""]
-    decl = record["declaration"]
-    for key in sorted(k for k in decl if "/" + _esc(k) in record["confirm"]):
-        sentence = SENTENCES.get(key, "%s: {v}." % key).format(v=_phrase(decl[key]))
-        lines.append("- %s (proposed — confirm before committing)" % sentence)
+             "## Proposed from the catalog snapshot: confirm each goal before committing. Only the committed "
+             "raw/declaration.json is authority. The checks under each goal, and where each came from, are in "
+             "assure-requirements-typed.json: commit it beside this file unchanged.", ""]
+    goals = drafted_goals(record)
+    lines += ["- " + goal["english"] for goal in goals] + ([""] if goals else [])
+    opened = [n["open"] for n in notes if isinstance(n.get("open"), str)]
+    if opened:
+        lines += opened[:OPEN_CAP] + ([] if len(opened) <= OPEN_CAP else [
+            "## To confirm: %d more tables are open to every row by their own policies; "
+            "assure-requirements-typed.json names them." % (len(opened) - OPEN_CAP)]) + [""]
     unread = sorted(p[1:] for p, v in record["sources"].items() if v == "unread")
     if unread:
-        lines += ["", "Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + "."]
-    left = [n["note"] for n in notes if "note" in n]
-    if left:
-        lines += ["", "Notes:"] + ["- " + n for n in left]
-    lines += ["", "execution_authorized false; hardware_authorized false; industrial_release_authorized false; "
+        lines += ["## Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + ".", ""]
+    if _left(record, notes):
+        lines += ["## Some of the proposal has no check here; assure-requirements-typed.json says what and why.", ""]
+    lines += ["###### execution_authorized false; hardware_authorized false; industrial_release_authorized false; "
               "release_allowed false; physical_validation false; simulation true; self_approved false.", ""]
     return "\n".join(lines)
 
@@ -553,6 +986,7 @@ def main(argv=None):
     parser.add_argument("--out", required=True, help="where to write the proposal record (JSON)")
     parser.add_argument("--major", type=int, help="server major (default: COLLECTION-SIDECAR.json beside raw/)")
     parser.add_argument("--requirements", help="also write a draft requirements.md here")
+    parser.add_argument("--typed", help="with --requirements: also write its typed companion here")
     args = parser.parse_args(argv)
     path = Path(args.snapshot)
     try:
@@ -575,7 +1009,12 @@ def main(argv=None):
         return 2
     Path(args.out).write_text(dump(record), encoding="utf-8")
     if args.requirements:
-        Path(args.requirements).write_text(requirements_draft(record, notes), encoding="utf-8")
+        text = requirements_draft(record, notes)
+        Path(args.requirements).write_text(text, encoding="utf-8")
+        if args.typed:
+            Path(args.typed).write_text(dump(typed_companion(
+                record, text, "catalog_snapshot.json sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(), notes)),
+                encoding="utf-8")
     print("declare_proposal: %d keys proposed, %d to confirm, %d unread; written to %s" % (
         len(record["declaration"]) - len(FLAGS) - 1, len(record["confirm"]),
         sum(1 for v in record["sources"].values() if v == "unread"), args.out))

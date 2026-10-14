@@ -43,7 +43,7 @@ You need:
 - Python 3.14 on the runner and, to collect over a connection, the PostgreSQL client (`psql`);
 - a collection role with read access to settings and statistics only, if you collect over a connection.
 
-There is no route to rotate or revoke a key and no login command: a GitHub sign-in key lasts at most an hour, and your Symbolia contact replaces or revokes a stored key.
+Rotate a stored key with `POST /v1/keys/rotate` during its rotation window; a GitHub sign-in key lasts at most an hour and never rotates, and your Symbolia contact revokes stored keys.
 
 The smallest job, for files you collected and committed in `collected/`; put it under `jobs:` in your workflow:
 
@@ -51,6 +51,7 @@ The smallest job, for files you collected and committed in `collected/`; put it 
     permissions:
       contents: read
       id-token: write
+      pull-requests: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@<full commit sha of the release you trust>
@@ -67,6 +68,8 @@ The smallest job, for files you collected and committed in `collected/`; put it 
 ```
 
 Keep `contents: read` beside `id-token: write`: naming one permission sets the others to none. Your Assure account is your GitHub owner, on the free plan the first time it signs in, and each run gets a key that lives for that run only.
+
+On a `pull_request` event the Action also posts the result as one comment on the pull request, "Assure: N rules broken by this change", with what is broken and the fix, what still holds, and what was not checked yet. It is rendered from the verdict, with no model. Each later run on the pull request updates the same comment. The Action posts it with the workflow's own token, so the job needs `pull-requests: write` under `permissions:` (keep `contents: read` beside it); the jobs on this page grant it. Without that permission the comment is not posted, the job log carries one notice naming the line to add, and the verdict, the job summary and the exit code are unchanged.
 
 With an API key instead, pass it from a secret. The declared profile reads collected files. Put the collector's output in a directory that holds `raw/`, add your declaration as `raw/declaration.json`, commit the directory, then add these steps. The checkout step puts the directory on the runner; for a directory made by an earlier job, fetch it with `actions/download-artifact` instead.
 
@@ -132,8 +135,9 @@ Two modes of the Action charge nothing. `mode: lint` collects and checks your fi
 ## Where the verdict goes
 
 - **The verdict file:** JSON at the `output` path, schema `assure.serve.verdict/v1`, with every reading and its premises. [VERDICTS.md](docs/VERDICTS.md) explains how to read it.
-- **The job summary:** the first line (colour, coverage, bounds, finding), one sentence on what it means, then counts by status and one line per obligation, on the run page.
+- **The job summary:** the first line (colour, coverage, bounds, finding), one sentence on what it means, then counts by status and one line per obligation (on `postgresql-observed-baseline`, an M6 `deviates` line is followed by the functions it read, one entry per function with its login roles), on the run page.
 - **Annotations:** the first line is the first notice; each `fails` reading is an error and each `deviates` reading is a warning, up to 50.
+- **The ignored line:** one notice, "N name(s) not read by profile P: ...", lists the names under `artefacts` the profile does not read. A file that matches only an optional input and is over that input's byte cap is left out of the bundle and listed there as "NAME: over CAP bytes (optional input)" (a sidecar beside `raw/` as "NAME beside raw/: ..."); the check then runs on the rest, and what comes back depends on the profile. `postgresql-observed-baseline`: a dropped `raw/pg_hba.conf` (cap 1 MiB) gives a verdict, charged, whose first line counts the refused machines; M2, M3 and M4 read `representation: pg_hba.conf absent from raw`, so nothing about authentication rules is established. `postgresql-declared-model`: after a dropped `raw/pg_hba.conf`, the check still runs on the rest against your declaration with no observed HBA rules; M4 and M8 name the missing source in their `source_not_visible` gaps and read `missing_premise`, while the final `verdict` or `no_verdict` and any charge follow the remaining inputs and normal outcome policy. `http-observed-baseline`: a dropped `raw/response-heads/endpoint-NNN.txt` (cap 64 KiB) that the sidecar still lists is refused as an input fault (`UNEXPECTED-ARTEFACT`), not read around. `python-auth-declared-model`: a supplied `raw/REPOSITORY.json` is kept unchanged. If it still lists a dropped repository file, the step stops with `profile_refused` (`input_pin_differs`: `file_absent`, naming the file; exit 3, not charged), and the ignored line is not printed because no verdict came back. Removing its file row without recomputing that supplied manifest's tree does not repair its pin. When no manifest is supplied in `mode: api`, the generated manifest lists only the retained files, so the checked repository excludes the dropped file; the remaining repository and declaration decide the outcome and exit under normal charge policy, and a returned verdict prints the ignored notice. Keep each repository file under the profile's cap (512 KiB for python-auth) or out of the repository you declare. `mysql-declared-model` has no optional input. A required input over its cap still stops the run with `oversize_input` (exit 2).
 
 When the Action cannot produce a verdict, it writes a failure file at the `output` path instead, with the outcome, the reason and what to do.
 
@@ -158,6 +162,7 @@ The text after `title=Assure::` in the notice and the `<output>` path in the lin
 ## Read more
 
 - [Beta tester brief: one page for your first run](docs/BETA-TESTER-BRIEF.md)
+- [One-page first run](docs/FIRST-RUN-ACTION.md)
 - [Full quickstart](docs/QUICKSTART-ACTION.md)
 - [What a verdict claims](docs/SCOPE.md)
 - [Reading a verdict](docs/VERDICTS.md)

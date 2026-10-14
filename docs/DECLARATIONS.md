@@ -24,6 +24,10 @@ The version is `"schema": "assure.postgresql.declaration/v1"`. The required fiel
 
 Declarations are UTF-8 JSON objects with distinct keys and finite numbers, at most 1,048,576 bytes. A role or object identifier starts with a letter or underscore, then uses letters, digits, underscores, dots or hyphens, at most 64 characters. Read the bundled schema for every optional field and nested shape. Existing legacy runtime declarations remain supported; add `schema` and `id` to use this public validation version.
 
+## Drafted declarations
+
+A declaration a drafter wrote for you may carry leaves you have not yet confirmed by hand. Mark them in an optional top-level object `declaration_state`: each key is the JSON pointer of one leaf (`/declared_predicate`, `/protected_tables/0`) and its value is `confirm` (still awaiting your confirmation) or `confirmed`. The bundled schema lists `declaration_state`, so `action.declare validate` accepts it, and refuses a key that is not a JSON pointer or a value other than these two. In a MySQL declaration (`symbolia.mysql-declaration.v0`) the same object's pointers name leaves of that declaration (`/declared_policy/...`, `/m3/...`), and the collector carries valid markers in `raw/submission.json` as a list of `{"pointer": "/declared_policy/require_current_password", "state": "confirm"}` records under `declaration_state`. Pointer text and the whole submission still pass the frozen sensitive-field filter; policy and M3 values are unchanged. The serving envelope also reads legacy marker objects; the verdict carries `declaration.confirm_leaves` with every leaf marked `confirm`, `declaration.confirmed` false while any is, and its first line ends "provisional: N leaves await confirmation". Each row whose witness depends on named leaves lists them as `depends_on_leaves` (today the M5 RLS rows), so a drafter-versus-hand disagreement can be read per leaf ([VERDICTS.md](VERDICTS.md#10-your-requirements)). Confirm a leaf by setting its marker to `confirmed` or removing it.
+
 ## Describe your intent
 
 These five groups explain the existing flat fields. They are not new nested keys:
@@ -70,6 +74,15 @@ collected/
 ```
 
 The checker performs no SQL of its own. Its readings describe what the declared configuration satisfies under a declared model over pinned documentation; they prove nothing about the database software and give no deployment approval. An empty declared domain reads vacuous, which is not holds. See [VERDICTS.md](VERDICTS.md) for the current Action policy.
+
+## The declared stack
+
+The served `python-auth-declared-model` declaration, schema `assure.python-auth.declaration/v1`, has no `stack` key: its stack is `language` `python` with `idiom` `flask-session-decorator`. A `stack` key in it (as an `assure.identity.declaration/v1` contract-form declaration carries) breaks that schema at `/stack`, and the refusal reads one of two kinds, whether `/stack` is its first fault or a later one:
+
+| Kind | Meaning |
+|---|---|
+| `stack_not_wired` | `profile_refused`, malformation field `stack`: the stack is registered but this build has no runner leg for it. `expected` reads "a stack with a runner leg on this build; STACK is registered but not wired (missing: LEG)", with the declared stack for STACK and the adapter's package for LEG, for example `go/gin` and `assure/checkers/identity/adapters/go_gin`. Send it again once the leg is served. Nothing is charged. |
+| `declaration_invalid` | The value is no registered stack, or is `python/flask`, this profile's own stack, which the served form declares by `language` and `idiom`: fix `raw/declaration.json` at `/stack`. |
 
 ## MySQL submissions
 
