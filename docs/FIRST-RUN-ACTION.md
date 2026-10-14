@@ -120,7 +120,7 @@ The summary lists every reading under its status, with its text. The verdict fil
 
 ## What is sent
 
-The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days.
+The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days.
 
 By default the Action also sends the text of `requirements.md` at your repository root, when it is there, plus your repository name and the commit. The server keeps them with the check for 30 days. To send no requirements text, add this under `with:` in step 4:
 

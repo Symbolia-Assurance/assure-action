@@ -21,7 +21,13 @@ Rules:
 - Delivery failures (refused or reset connection, DNS, TLS, timeout, a 5xx with no failure envelope, a body that is not
   bounded JSON or has no known schema, a body over 128 MiB: the server's 64 MiB stored-result bound and as much again for
   what serving adds to a stored verdict, issue #2595) are retried on the same route with bounded backoff (3
-  attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
+  attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). On the check's POST
+  and on the poll of a sent check, a connection-level failure or a 5xx without a failure envelope means the API is
+  unavailable (issues #2589 #2590 #2591 #2598 #2603, REG-045/046/047/054/059: the API away for twenty seconds while
+  the server kept the verdicts): past the attempts the Action keeps retrying with `UNAVAILABLE_WAIT_S` backoff while
+  those waits, summed over the check's send and all its polls, stay within `total_wait_s` (one budget per check, so a
+  later poll never opens a second window), the check's wall bound does not run during them, and the outcome names stay
+  as they are; the reason then names the attempts and the seconds waited. `server_busy` is
   retried the same way, except that a `Retry-After` of at most 60 s is waited in place of the backoff (issue #2298:
   a full queue names `check_timeout_s`), and so is a longer one while the call's server_busy waits stay within
   `total_wait_s` (issue #2475: a check wall bound above 60 s). On the check's POST a named server_busy wait of at least
@@ -33,7 +39,9 @@ Rules:
   this client does not know is `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
   poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `key_expired`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
-- A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`; that wait is
+- A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`; a poll that
+  could not reach the API (`api_unreachable` after its attempts) is polled again while that wait lasts, and raised once
+  it is spent (issue #2599, REG-055: a short outage while a sent check runs is not the run's end); that wait is
   counted from the submit, less the `rate_limited` and `server_busy` `Retry-After` waits the check's POST honoured
   (issue #2456, issue #2475: the waits that got the check admitted do not eat the time it is given to finish).
 - `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025's, carried by serve-035: lower case, no
@@ -94,6 +102,8 @@ LOOPBACK = frozenset({'127.0.0.1', '::1', 'localhost'})
 # re-decision, a free account's upgrade line), so the bound is twice the stored one
 MAX_RESPONSE = 2 * 64 * 2 ** 20
 RESPONSE_LIMITS = bundle.Limits(body_bytes=MAX_RESPONSE, file_bytes=MAX_RESPONSE, files=1, json_depth=128)
+UNAVAILABLE_WAIT_S = (1, 2, 4, 8, 15)                 # waits past the attempts while the API is unavailable (REG-045..059)
+UNAVAILABLE_ROUTES = frozenset({'check', 'poll'})     # the routes that wait: an unsent check (same idempotency key), a sent one
 MAX_KEY = 512
 MAX_RETRY_AFTER_S = 60
 RETRY_TYPED = frozenset({'server_busy'})
@@ -267,6 +277,8 @@ class Client:
         self.key_expires = None                     # issue #1262: the last answer's Assure-Key-Expires, when it had one
         self._rate_slept = 0.0                      # issue #2456: seconds the last `_call` slept in rate_limited waits
         self._busy_slept = 0.0                      # issue #2475: seconds it slept in honoured server_busy waits
+        self._unavailable_slept = 0.0               # REG-045..059: seconds it slept while the API was unavailable
+        self._unavailable_waited = 0                # REG-045..059: one budget of those waits per submitted check (<= total_wait_s)
         self.timeout_s = float(timeout_s)
         self.total_wait_s = float(total_wait_s)
         self.attempts = max(1, int(attempts))
@@ -374,6 +386,9 @@ class Client:
         self._rate_slept = 0.0  # issue #2456: the clock's seconds in those waits (submit moves its poll bound past them)
         busy_waited = 0         # issue #2475 (REG-037): seconds of server_busy Retry-After honoured
         self._busy_slept = 0.0  # issue #2475: the clock's seconds in those waits (submit moves its poll bound past them)
+        self._unavailable_slept = 0.0   # REG-045..059: the clock's seconds in unavailability waits (submit moves its bound)
+        unavailable_waits = 0   # the UNAVAILABLE_WAIT_S backoff spent past the attempts is one budget per check
+                                # (self._unavailable_waited, reset by submit), so a second poll never opens a second window
         attempt = 0
         last = None
         while True:
@@ -385,8 +400,9 @@ class Client:
                                   % status)
                 try:
                     doc = self._doc(data)
-                except _Delivery:
+                except _Delivery as d:
                     if status >= 500 or status in (200, 202):
+                        d.status = status           # a 5xx whose body is not the API's JSON: the API is unavailable
                         raise
                     raise Refusal('api_error', 'the API answered %d without a failure envelope' % status) from None
                 if isinstance(doc, dict) and doc.get('schema') == FAILURE_SCHEMA:
@@ -427,12 +443,26 @@ class Client:
             except _Delivery as d:
                 last = d
                 if attempt >= self.attempts:
-                    break
+                    # REG-045..059: the API is unavailable (a connection failure, or a 5xx without the API's JSON) on the
+                    # check's POST or a sent check's poll: keep retrying with backoff while the waits stay within total_wait_s
+                    unavailable = route in UNAVAILABLE_ROUTES \
+                        and (d.kind == 'unreachable' or getattr(d, 'status', 0) >= 500)
+                    wait = UNAVAILABLE_WAIT_S[min(unavailable_waits, len(UNAVAILABLE_WAIT_S) - 1)]
+                    if not unavailable or self._unavailable_waited + wait > self.total_wait_s:
+                        break
+                    self._unavailable_waited += wait
+                    unavailable_waits += 1
+                    before = self.clock()
+                    self.sleep(wait)
+                    self._unavailable_slept += self.clock() - before
+                    continue
                 self.sleep(self._backoff(attempt))
         if isinstance(last, Refusal):
             raise last
         outcome = 'api_unreachable' if last.kind == 'unreachable' else 'api_error'
-        raise Refusal(outcome, '%s, after %d attempts' % (last.reason, attempt), attempts=attempt)
+        waited = ' and %d s waiting for the API' % self._unavailable_waited if self._unavailable_waited else ''
+        raise Refusal(outcome, '%s, after %d attempts%s' % (last.reason, attempt, waited), attempts=attempt,
+                      **({'waited_s': self._unavailable_waited} if self._unavailable_waited else {}))
 
     def _backoff(self, attempt):
         return self.backoff_s[min(attempt - 1, len(self.backoff_s) - 1)]
@@ -506,9 +536,11 @@ class Client:
                              compile_requirements=compile_requirements)
         else:
             idem = secrets.token_hex(16)
+        self._unavailable_waited = 0                 # REG-045..059: one budget of unavailability waits for this check
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
         started += self._rate_slept                  # issue #2456: the check's wait starts after the rate_limited waits
         started += self._busy_slept                  # issue #2475: and after the server_busy waits that got it admitted
+        started += self._unavailable_slept           # REG-045..059: and after the waits while the API was unavailable
         polls = 0
         while status == 202:
             cid = doc.get('check_id')
@@ -522,7 +554,12 @@ class Client:
             polls += 1
             try:
                 status, doc = self._call('GET', '/v1/checks/' + cid + poll_query, route='poll')
+                started += self._unavailable_slept   # REG-045..059: the API's absence does not spend the check's bound
             except Refusal as e:
+                # issue #2599 (REG-055): the check was sent; a poll that could not reach the API is polled again
+                # while the check's wait stays within total_wait_s
+                if e.outcome == 'api_unreachable' and self.clock() - started < self.total_wait_s:
+                    continue
                 if e.detail.get('answered') == 'poll' and 'check_id' not in e.detail:
                     e.detail['sent_check_id'] = cid          # the poll was refused; the 202 named the check
                 raise

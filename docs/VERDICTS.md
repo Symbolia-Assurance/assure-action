@@ -196,6 +196,12 @@ Besides the 40 obligations, a verdict whose inputs the checker could read carrie
 | CVE-2023-5870 | 11 (11.22), 12 (12.17), 13 (13.13), 14 (14.10), 15 (15.5), 16 (16.1) | A role that is not a superuser is a member of pg_signal_backend, directly or through another role. |
 | CVE-2024-0985 | 12 (12.18), 13 (13.14), 14 (14.11), 15 (15.6), 16 (16.2) | A materialized view is owned by a non-superuser (a superuser or other higher-privileged role may refresh it concurrently). |
 | CVE-2024-10976 | 12 (12.21), 13 (13.17), 14 (14.14), 15 (15.9), 16 (16.5), 17 (17.1) | A row-level security policy is observed (the database has used CREATE POLICY). |
+| CVE-2025-8713 | 13 (13.22), 14 (14.19), 15 (15.14), 16 (16.10), 17 (17.6) | A table with row-level security is partitioned or in an inheritance hierarchy, or a view PUBLIC may not read reads a base table PUBLIC may not read. Column statistics are not collected; ANALYZE and autovacuum maintain them. |
+| CVE-2026-14666 | 14 (14.24), 15 (15.19), 16 (16.15), 17 (17.11), 18 (18.6) | A relation has row-level policy enforcement on (`relrowsecurity` is true). |
+| CVE-2026-14672 | 16 (16.15), 17 (17.11), 18 (18.6) | scram_iterations is not the default 4096 for some login: server-wide (configuration file, ALTER SYSTEM or command line) or for a role or database (`pg_db_role_setting`). A collected include target is read in place; an include the collector did not gather, or a line it withheld, reads `not_observed` unless a later source (ALTER SYSTEM or the command line) sets the value. |
+| CVE-2026-14673 | 14 (14.24), 15 (15.19), 16 (16.15), 18 (18.6) | The amcheck extension is installed (17 is not affected). |
+| CVE-2026-14681 | 17 (17.11), 18 (18.6) | pg_hba.conf has a `hostgssenc` record and `ssl` is on (a direct TLS connection may then match that record without GSSAPI encryption). A collected `include` target is read in place; with no `hostgssenc` record observed, an `include` the collector did not gather or a record it withheld reads `not_observed`. |
+| CVE-2026-6471 | 14 (14.24), 15 (15.19), 16 (16.15), 17 (17.11), 18 (18.6) | Logical decoding is on (`wal_level` is `logical`) and a non-superuser holds REPLICATION. |
 
 ## 6. An empty database
 

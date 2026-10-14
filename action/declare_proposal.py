@@ -221,6 +221,23 @@ def _outside_grammar(predicate, policies):
     return out
 
 
+#: issue #2551: the placeholder the withholding pass (action/withhold.py LITERAL_MARK) writes for a string literal
+_PLACEHOLDER = re.compile(r"'<withheld literal [0-9]+>'")
+_QUOTED = re.compile(r'"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\'')
+
+
+def _placeholders(predicate, source):
+    """Issue #2551: [{placeholder, source, literals}] for each withheld-literal placeholder a drafted predicate holds,
+    `literals` the 1-based places among the expression's string literals where it stands, so the customer restores each
+    from their own catalog; [] for a predicate drafted from an unwithheld snapshot."""
+    places = {}
+    quoted = [q for q in _QUOTED.findall(str(predicate)) if q.startswith("'")]
+    for place, literal in enumerate(quoted, 1):
+        if _PLACEHOLDER.fullmatch(literal):
+            places.setdefault(literal, []).append(place)
+    return [{"placeholder": k, "source": source, "literals": v} for k, v in places.items()]
+
+
 class _Draft:
     def __init__(self):
         self.decl, self.sources, self.confirm, self.notes = {}, {}, [], []
@@ -500,6 +517,17 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
             d.put("protected_tables", [row["relname"] for _, row, _ in chosen],
                   _list_sources([SNAP + "/objects/%d/relrowsecurity" % index for index, _, _ in chosen]))
             d.put("declared_predicate", predicate, SNAP + "/policies/%d/polqual" % chosen[0][2])
+            restore = _placeholders(predicate, SNAP + "/policies/%d/polqual" % chosen[0][2])
+            if restore:
+                d.notes.append({"key": "declared_predicate", "restore": restore, "note": (
+                    "declared_predicate holds %s, string literals the withholding pass replaced in policy %s USING (%s); "
+                    "before committing, replace %s with the string literal at that place in your own catalog (counting "
+                    "the expression's string literals from 1), or the upload withholds the placeholder as a new literal, "
+                    "the policy no longer equals the declared predicate and the row-security machine (M5) is refused"
+                    % (_and([e["placeholder"] for e in restore]),
+                       policies_sec[chosen[0][2]].get("polname"), restore[0]["source"],
+                       "; ".join("%s with literal %s" % (e["placeholder"], ", ".join(map(str, e["literals"])))
+                                 for e in restore)))})
             # access_paths_complete: the snapshot's grants, memberships and views are every route the derive step
             # reads; true states that no route outside them reaches the tables (the M5 machine is refused, A-G02,
             # until it is declared). It is the customer's judgement, so it is always confirmed; the derive step still

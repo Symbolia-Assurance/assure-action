@@ -113,7 +113,7 @@ sent." (`serve.render.check_line`). The key, the connection, its password and th
 and customer text reaches stdout only escaped as workflow-command data.
 
 Before anything is checked or sent, `action.withhold` withholds every configuration comment and every string literal in
-the policy expressions, in every mode and for a connection or an artefacts directory alike (the customer's directory is
+the policy expressions but a `current_setting(` setting name (issue #2551), in every mode and for a connection or an artefacts directory alike (the customer's directory is
 never changed); the counts are printed and added to the job summary. First, `action.withhold.apply` checks that the
 collector's REDACTION-MANIFEST.json (read beside raw/, never uploaded) binds its sidecar to the bytes as collected
 (refutation 005, WH-4). When the collector's sidecar records the session facts (the collector this Action ships
@@ -900,7 +900,7 @@ def _declaration_leaves(node):
 def draft_proposal(files):
     """Issue #1186 part 2: (proposal record, draft requirements.md text, drafter notes) drafted from `files`, the bundle as collected
     and withheld in the runner (`action.withhold.apply` has already replaced every SQL literal in the snapshot's policy
-    expressions, so the proposal holds only what the upload holds); None when there is no catalog snapshot or the
+    expressions but a `current_setting(` setting name, so the proposal holds only what the upload holds); None when there is no catalog snapshot or the
     collector's sidecar names no server major the drafter reads. Nothing here is sent anywhere."""
     snap, side = files.get(PROPOSAL_SNAPSHOT), files.get(PROPOSAL_SIDECAR)
     if snap is None or side is None:

@@ -85,7 +85,9 @@ whole-line marker for a withheld rule or setting is no longer a comment (tests/s
 SQL expressions (raw/catalog_snapshot.json `policies[].polqual` and `policies[].polwithcheck`, and
 raw/declaration.json `declared_predicate`, the one expression the declared profile compares them with): every quoted
 string literal (standard `'...'` with `''`, `E'...'` with backslash escapes, `U&'...'`, `B'...'`, `X'...'`, `N'...'`
-and dollar-quoted `$tag$...$tag$`) is replaced by `'<withheld literal N>'`. Double-quoted identifiers are kept. N numbers
+and dollar-quoted `$tag$...$tag$`) is replaced by `'<withheld literal N>'`, except a standard-quoted `'...'` setting name
+directly after `current_setting(` or `pg_catalog.current_setting(`, not qualified by another schema (a configuration setting name, not a customer value; issue #2551), which is kept; the
+values compared with it are still withheld. Double-quoted identifiers are kept. N numbers
 the distinct literals of one upload in order of first sight, compared as derive.py compares expressions (whitespace runs
 collapsed, lower case), so an expression equals the declared predicate after the pass exactly when it did before
 (derive.py build_m5 `term`); N says only that two literals of one upload were equal, never what they held. An
@@ -118,6 +120,8 @@ POLICY_FIELDS = ('polqual', 'polwithcheck')
 _BREAK = re.compile('([\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])')        # str.splitlines boundaries other than \n
 _DOLLAR = re.compile(r'\$(?:[^\W\d][\w]*)?\$')
 _WS = re.compile(r'\s+')
+_SETTING_CALL = re.compile(r'(?<![\w$."])(?:pg_catalog\s*\.\s*)?current_setting\s*\(\s*$',   # issue #2551
+                           re.IGNORECASE)
 COUNT_KEYS = ('comments', 'lines', 'literals', 'expressions', 'not_observed')
 # serve-013: `withhold_files` adds `files`, the number of files the pass covered (configuration files read with a
 # grammar, and the JSON files whose SQL expressions it reads); 0 for a bundle whose profile names no PostgreSQL input
@@ -476,9 +480,16 @@ class Literals:
         return LITERAL_MARK % self.numbers[key]
 
 
+def _setting_call(before):
+    """Whether `before` ends in an open `current_setting(` or `pg_catalog.current_setting(` call, not one qualified by
+    another schema: a qualifier dot written with spaces before it still names another schema (refutation r3 HIGH-1)."""
+    m = _SETTING_CALL.search(before)
+    return bool(m) and not before[:m.start()].rstrip().endswith('.')
+
+
 def withhold_sql(text, literals, counts):
-    """An SQL expression with every string literal withheld; the whole expression as one marker when it cannot be
-    tokenised safely. Never raises."""
+    """An SQL expression with every string literal but a `current_setting(` setting name withheld; the whole expression
+    as one marker when it cannot be tokenised safely. Never raises."""
     if not isinstance(text, str):
         counts['expressions'] += 1
         return literals.mark('value:' + json.dumps(text, sort_keys=True, default=repr))
@@ -489,7 +500,9 @@ def withhold_sql(text, literals, counts):
         return literals.mark('expr:' + _norm_sql(text))
     out = []
     for is_literal, piece in pieces:
-        if is_literal:
+        if is_literal and piece.startswith("'") and out and _setting_call(out[-1]):
+            out.append(piece)                     # issue #2551: a current_setting name is not a customer value
+        elif is_literal:
             counts['literals'] += 1
             out.append(literals.mark('lit:' + _WS.sub(' ', piece).lower()))
         else:
