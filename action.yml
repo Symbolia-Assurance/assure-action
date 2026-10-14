@@ -76,7 +76,7 @@ inputs:
     required: false
     default: pipe
   report:
-    description: The report is on by default in api mode, so the job summary carries the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; report false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
+    description: The report is opt-in (off unless set) because it sends the verdict record through OpenRouter to a third-party model; report true, in api mode, makes the job summary carry the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; empty or false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
     required: false
     default: ''
   allow-overage:
@@ -88,7 +88,7 @@ inputs:
     required: false
     default: ''
   requirements:
-    description: A requirements file to send with the check, api mode only (a path relative to the workspace). Empty sends the repository root's requirements.md when it can be sent; when it cannot (over 65536 bytes, 256 lines or 8192 bytes per line, a symbolic link, not a regular file or not UTF-8) nothing is sent and one notice says why. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements.
+    description: "A requirements file to send with the check, api mode only (a path relative to the workspace). The upload is opt-in: empty (the default) sends no requirements text and prints no notice, even with a requirements.md at the repository root; name it (requirements.md) to send it. A file is sendable within 65536 bytes, 256 lines and 8192 bytes per line, as a regular UTF-8 file that is not a symbolic link. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements."
     required: false
     default: ''
   compile-requirements:

@@ -586,30 +586,20 @@ def requirements_upload(env, cwd, goals=None):
     """serve-019 (coordination 2136): ({requirements?, repository?, commit?, provenance?}, notice or None). The text is
     the `requirements` input's file (relative to the working directory): one that is missing, unreadable, a link,
     not a regular file, beyond the bounds or not UTF-8 is `bad_input` before anything is collected or sent. The input
-    `none` (NONE_SENTINEL) sends no text and prints no notice; a file named `none` is then reached as `./none`. With the input empty, the
-    repository root's requirements.md (GITHUB_WORKSPACE) is sent when it can be; REFUTATION-034 F1: when it cannot,
-    no text is sent and the notice says why (`skipped_notice`), so a file the operator never selected never stops the
-    run. GITHUB_REPOSITORY and the head commit (`_head_commit`) go as repository and commit with `provenance:
-    runner`; the API reads them as metadata, never as authority. Issue #1186: a sent file with the draft's typed
-    companion beside it goes through `typed_requirements`, and the notice then names the lines changed since they
-    were compiled, if any; `goals`, a list when given, receives the goals sent."""
+    `none` (NONE_SENTINEL) sends no text and prints no notice; a file named `none` is then reached as `./none`. Issue
+    #2174: with the input empty no text is sent and no notice is printed, whatever the repository root holds; the
+    upload is opt-in (name the file, e.g. `requirements.md`). GITHUB_REPOSITORY and the head commit (`_head_commit`)
+    go as repository and commit with `provenance: runner`; the API reads them as metadata, never as authority.
+    Issue #1186: a sent file with the draft's typed companion beside it goes through `typed_requirements`, and the
+    notice then names the lines changed since they were compiled, if any; `goals`, a list when given, receives the
+    goals sent."""
     out, notice, sent = {}, None, []
     named = _plain(env, 'INPUT_REQUIREMENTS')
-    workspace = str(env.get('GITHUB_WORKSPACE') or '').strip()
     if named == NONE_SENTINEL:                       # REFUTATION-034-R2 N5: send no text, print no notice
         pass
     elif named:
         path = Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named
         out['requirements'], notice, sent = typed_requirements(_read_requirements(path), path.parent)
-    elif workspace and os.path.lexists(os.path.join(workspace, REQUIREMENTS_FILE)):
-        try:
-            out['requirements'], notice, sent = typed_requirements(
-                _read_requirements(Path(workspace) / REQUIREMENTS_FILE), Path(workspace))
-        except Refusal as e:
-            kind = e.detail.get('kind', 'bounds')
-            why = e.reason.replace('requirements are ', '', 1).replace('requirements ', '', 1) \
-                if kind == 'bounds' else None        # "400 lines; the limit is 256", "line 3 is longer than ..."
-            notice = skipped_notice(kind, why)
     repo, sha = str(env.get('GITHUB_REPOSITORY') or '').strip(), _head_commit(env)
     if repo and sha:
         out.update(bundle.upload_fields({'repository': repo, 'commit': sha, 'provenance': 'runner'}))
@@ -754,12 +744,11 @@ def parse_allow_partial(text):
 
 
 def parse_report(text, mode='api'):
-    """serve-014, DD-103: the `report` input: unset or '' is True in api mode and False in any other mode; 'false' or
-    '0' is False; 'true' or '1' is True (case-insensitive); else bad_input."""
+    """serve-014, DD-103: the `report` input: unset or '' is False in every mode (issue #2174: the report sends the
+    verdict record to a third-party model, so it is opt-in); 'false' or '0' is False; 'true' or '1' is True
+    (case-insensitive); else bad_input."""
     v = (text or '').strip().lower()
-    if v == '':
-        return mode == 'api'
-    if v in ('false', '0'):
+    if v in ('', 'false', '0'):
         return False
     if v in ('true', '1'):
         return True

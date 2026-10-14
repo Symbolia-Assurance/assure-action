@@ -122,18 +122,13 @@ The summary lists every reading under its status, with its text. The verdict fil
 
 The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days.
 
-By default the Action also sends the text of `requirements.md` at your repository root, when it is there, plus your repository name and the commit. The server keeps them with the check for 30 days. To send no requirements text, add this under `with:` in step 4:
+Both data-sending inputs are opt-in: with no inputs the Action asks for no report, so no verdict record goes to a third-party model, and uploads no `requirements.md`; set `report: true` to ask for the report, and name the file in the `requirements` input (for example `requirements: requirements.md`) to send its text. To turn either on, add it under `with:` in step 4:
 
 ```yaml
-          requirements: none
+          report: true
+          requirements: requirements.md
 ```
 
-That stops the requirements text only. The repository and the commit are still sent and kept for 30 days.
-
-The API also writes a plain-language report of the check, on by default. To skip it, add:
-
-```yaml
-          report: false
-```
+In `mode: api` the Action also sends your repository name and the commit; the server keeps them, and any requirements text you send, with the check for 30 days.
 
 For more detail, see [QUICKSTART-ACTION.md](QUICKSTART-ACTION.md), "What is sent, and what is never read", "6. Managed PostgreSQL and configuration files" (for managed servers, poolers and configuration files) and "7. The fail-on policy and exit codes".

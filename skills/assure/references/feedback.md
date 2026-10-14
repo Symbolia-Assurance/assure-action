@@ -25,7 +25,7 @@ Write that JSON to a file in the workflow's working directory and use its path u
 feedback: feedback.json
 ```
 
-A feedback error adds a typed outcome to the job summary; it never changes the check's exit, outputs or verdict file. Without a server check id, a requested note adds `bad_input` to the feedback summary and no POST is made. A delivery error means receipt is not confirmed: the server may already have stored the note. Known input secrets are refused before posting. The note's text is not echoed into commands or the summary. The report is on by default in `mode: api`. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld with `profile_unqualified`, without a model call. `report: false` stops the check record going to OpenRouter. Deliberate feedback is separate: it does not go to a model, and `report: false` does not turn it off.
+A feedback error adds a typed outcome to the job summary; it never changes the check's exit, outputs or verdict file. Without a server check id, a requested note adds `bad_input` to the feedback summary and no POST is made. A delivery error means receipt is not confirmed: the server may already have stored the note. Known input secrets are refused before posting. The note's text is not echoed into commands or the summary. The report is opt-in (`report: true`, `mode: api`). Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld with `profile_unqualified`, without a model call. `report: false` stops the check record going to OpenRouter. Deliberate feedback is separate: it does not go to a model, and `report: false` does not turn it off.
 
 ## Feedback API
 
