@@ -32,7 +32,7 @@ inputs:
     required: false
     default: ''
   declaration:
-    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim.
+    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim. Refused with a PostgreSQL connection; for postgresql-declared-model in api mode the Action reads .assure/declaration.json in the checkout (a link, a linked .assure/ directory, a non-regular or an unreadable file is refused bad_input), and when there is none it drafts one and proposes it in a pull request of its own on assure/declaration-proposal (no draft, and bad_input for the missing declaration, when the collector's sidecar names no server major from 14 to 18).
     required: false
     default: ''
   collection-role:
@@ -131,7 +131,7 @@ outputs:
     description: With a requirements file sent, how many of its requirements are disproven. Empty otherwise.
     value: ${{ steps.assure.outputs.requirements-disproven }}
   declaration:
-    description: "python-auth-declared-model: unaccepted-draft when the check ran on a declaration drafted from the repository, or on a pull request whose declaration is not yet on the base branch (the result is bounded by that draft until it is merged). Empty otherwise."
+    description: "python-auth-declared-model, and postgresql-declared-model with a connection: unaccepted-draft when the check ran on a declaration drafted from the repository or the database, or on a pull request whose declaration is not yet on the base branch (the result is bounded by that draft until it is merged). Empty otherwise."
     value: ${{ steps.assure.outputs.declaration }}
   lint-findings:
     description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a paid run). Empty otherwise."

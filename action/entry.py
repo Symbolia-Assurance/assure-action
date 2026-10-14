@@ -133,6 +133,18 @@ readable server major, or a major outside 14..18, nothing is drafted and nothing
 `::warning`. The verdict file, the outputs and the exit never change. The drafter is imported only there
 (`_proposal_module`): action/declare_proposal.py in the public tree, assure/declare_proposal.py in this checkout.
 
+Issue #2435: in api mode, with a PostgreSQL connection and profile `postgresql-declared-model`, the Action collects as
+for the observed baseline and places the checkout's `.assure/declaration.json` (under GITHUB_WORKSPACE; a link, a
+linked `.assure/`, a file that is not regular or cannot be read is `bad_input`) in the collector's raw/ as
+raw/declaration.json (`checkout_declaration`, `action.collect._gather` `declare`), before the bundle limits and the one
+withholding pass, so its `declared_predicate` literals are numbered with the snapshot's. With no such file it drafts
+one from the collected snapshot before that pass (`draft_proposal`; the draft holds the customer's own literals, so the
+merged draft reads as the draft did), checks on it, writes the proposal record (assure-declaration-proposal.json)
+beside the verdict file and proposes it in Assure's own pull request (`action.declaration_draft.propose`, as for
+python-auth): the run says `declaration=unaccepted-draft`. When nothing can be drafted the missing file is refused as
+before. On a pull request, a checkout declaration not yet on the base branch bounds the run the same way. The
+`declaration` input stays refused with a PostgreSQL connection.
+
 Issue #2189: on a pull_request event with GITHUB_TOKEN set, after the job summary is written, the verdict is also
 posted as one pull request comment (`post_pr_comment`, the body `serve.render.pr_comment_markdown`, decided from the
 summary's own red findings), found again by its marker and updated in place on each later run. A 403 (the job's token
@@ -197,6 +209,9 @@ MAX_LINT_LINES = 50
 # from the catalog snapshot it already collected and withheld (`draft_proposal`). serve/envelope.py PROPOSAL_FILE
 # names the same file.
 PROPOSAL_PROFILE = 'postgresql-observed-baseline'
+DECLARED_PROFILE = 'postgresql-declared-model'      # issue #2435: run on a connection with the checkout's declaration
+DECLARED_TITLE = 'Assure: proposed declaration for postgresql-declared-model \u2014 review and merge to accept'
+DECLARED_SOURCE = 'the collected catalog snapshot'
 PROPOSAL_FILE = 'assure-declaration-proposal.json'
 REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
 # Issue #1186 (coordination 7588): the draft's typed companion, written beside it; read beside the requirements file
@@ -207,7 +222,8 @@ PROPOSAL_SNAPSHOT = 'raw/catalog_snapshot.json'
 PROPOSAL_SIDECAR = 'raw/COLLECTION-SIDECAR.json'
 PROPOSAL_MAJOR_SOURCE = 'COLLECTION-SIDECAR.json#/server/server_version_num'
 PROPOSAL_LINE = ('Assure drafted a declaration from your database: %(leaves)d leaves proposed, '
-                 '%(confirm)d to confirm — commit it as raw/declaration.json and run postgresql-declared-model '
+                 '%(confirm)d to confirm — commit it as .assure/declaration.json (with a connection; '
+                 'raw/declaration.json in an artefacts directory) and run postgresql-declared-model '
                  'to decide %(rows)d rows that need intent.')
 PROPOSAL_FILES_LINE = ('The draft is %(proposal)s (commit its `declaration` object after you confirm each key its '
                        '`confirm` list names), with %(draft)s beside it. A proposal changes no reading.')
@@ -902,6 +918,41 @@ def draft_proposal(files):
     return record, dp.requirements_draft(record, notes), notes
 
 
+def checkout_declaration(top, cap):
+    """Issue #2435: the bytes of `.assure/declaration.json` under `top`, at most `cap` + 1 of them (the bundle limits
+    refuse more); None when it or `.assure/` is absent. `bad_input` for a link, a linked `.assure/`, a file that is not
+    regular, or one that cannot be read: a present declaration is never drafted over."""
+    rel = declaration_draft.CHECKOUT_PATH
+    parent = top / Path(rel).parent
+    target = top / rel
+    for p, kind in ((parent, stat.S_ISDIR), (target, stat.S_ISREG)):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise Refusal('bad_input', '%s could not be read' % rel) from None
+        if not kind(st.st_mode):                     # lstat: a link is neither a directory nor a regular file
+            raise Refusal('bad_input', '%s is a link or not a regular file' % rel)
+    try:
+        fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, 'rb') as f:
+            return f.read(cap + 1)
+    except OSError:
+        raise Refusal('bad_input', '%s could not be read' % rel) from None
+
+
+def _raw_bounded(raw, name, cap):
+    """`raw`/`name`'s bytes when it is a regular file of at most `cap` bytes, else None (the bundle refuses it)."""
+    try:
+        st = os.lstat(raw / name)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            return None
+        return (raw / name).read_bytes()
+    except OSError:
+        return None
+
+
 def proposal_counts(record, verdict):
     """{leaves, confirm, rows}: the proposed declaration's leaves (schema and the seven flags aside), the keys its
     `confirm` list names, and the verdict's rows with an id whose status is needs_intent."""
@@ -1083,7 +1134,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'compile_requirements': True, 'draft': None, 'files': None, 'goals': []}
+             'compile_requirements': True, 'draft': None, 'files': None, 'goals': [], 'pg_proposal': None,
+             'pg_checkout': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1231,9 +1283,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             say('Assure: %s written in the runner: %d repository file(s), commit %s, tree %s' % (
                 repository_manifest.NAME, len(written['files']), written['commit'], written['tree']))
 
-    def declaration(collected, where, target, checkout):
+    def declaration(collected, where, target, checkout, data=None):
         """serve-102 (DD-150, DD-156): python-auth with no declaration runs on a draft, bounded by it; on a pull
-        request, a checkout's declaration that is not yet on the base branch is the same unaccepted draft."""
+        request, a checkout's declaration that is not yet on the base branch is the same unaccepted draft. `data` is
+        the checkout's bytes when the bundle holds them withheld (issue #2435)."""
         top = declaration_draft.toplevel(where, env)
         rel = target.resolve().relative_to(top.resolve()).as_posix() if top is not None and \
             str(target.resolve()).startswith(str(top.resolve()) + os.sep) else declaration_draft.CHECKOUT_PATH
@@ -1248,7 +1301,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 declaration_draft.NAME, len(repo), len(record['confirm'])))
         elif checkout and declaration_draft.is_pull_request(env) and top is not None:
             # tri-state: True is a known match; False is a known absence; None is an unknown reading, bounded too
-            on_base = declaration_draft.on_base(top, rel, collected.files[declaration_draft.NAME], env)
+            on_base = declaration_draft.on_base(
+                top, rel, collected.files[declaration_draft.NAME] if data is None else data, env)
             if on_base is not True:
                 state['draft'] = {'record': None, 'data': None, 'top': top, 'rel': rel, 'unread': on_base is None}
 
@@ -1270,7 +1324,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     raise Refusal('bad_input', 'the artefacts directory is not inside a git checkout')
                 token = str(env.get('GITHUB_TOKEN') or '').strip()
                 github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token) if token else None
-                got = declaration_draft.propose(d['top'], d['rel'], d['data'], d['record'], env, tmp, github)
+                got = declaration_draft.propose(d['top'], d['rel'], d['data'], d['record'], env, tmp, github,
+                                                **d.get('words', {}))
                 told = 'proposed in pull request #%d (%s), from %s into the base branch (commit %s); merging it accepts it' % (
                     got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12])
             except Refusal as e:
@@ -1278,11 +1333,36 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 say('::warning title=Assure declaration::%s' % _cmd_data(told))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
-            md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'))
+            md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
+                                                    *(['the collected catalog snapshot'] if d.get('words') else []))
             if told.startswith('not proposed'):
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
         return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
                 declaration_draft.OUTPUT_BOUNDED + '\n')
+
+    def pg_declare(top, cap):
+        """Issue #2435: `declare` for `action.collect._gather` on postgresql-declared-model: the checkout's
+        declaration, else a draft from the collector's own (not yet withheld) snapshot and sidecar in `raw`, recorded
+        to be proposed; None when nothing can be drafted (the missing file is then refused as before)."""
+        def declare(raw):
+            data = checkout_declaration(top, cap)
+            if data is not None:
+                state['pg_checkout'] = data
+                return data
+            files = {n: b for n in (PROPOSAL_SNAPSHOT, PROPOSAL_SIDECAR)
+                     if (b := _raw_bounded(raw, n[len('raw/'):], cap)) is not None}
+            drafted = draft_proposal(files)
+            if drafted is None:
+                return None
+            record = state['pg_proposal'] = drafted[0]
+            data = declaration_draft.dumps(record['declaration'])
+            state['draft'] = {'record': record, 'data': data, 'top': declaration_draft.toplevel(top, env),
+                              'rel': declaration_draft.CHECKOUT_PATH,
+                              'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE}}
+            say('Assure: %s drafted in the runner from %s; %d field(s) to confirm' % (
+                declaration_draft.NAME, DECLARED_SOURCE, len(record['confirm'])))
+            return data
+        return declare
 
     def run_api():
         if out_error is not None:
@@ -1367,7 +1447,14 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             state['scratch'] = _scratch(env)
             work = state['scratch'] / 'collect'
             work.mkdir(mode=0o700)
-            collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs))
+            pg = inputs['profile'] == DECLARED_PROFILE        # issue #2435: the checkout's declaration, else a draft
+            top = Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd())
+            kw = {'declare': pg_declare(top, lim.file_bytes)} if pg else {}
+            collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs),
+                                        **kw)
+            if pg and state['pg_checkout'] is not None:
+                declaration(collected, top, top / declaration_draft.CHECKOUT_PATH, checkout=True,
+                            data=state['pg_checkout'])
         state['withheld'] = collected.withheld
         say(WITHHELD_LINE % {'withheld': withhold.describe(collected.withheld)})
         session(collected.files)
@@ -1489,6 +1576,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     except (OSError, ValueError) as w:
         return failed(Refusal('checker_error', 'the verdict file could not be written (%s)' % type(w).__name__))
     summary += write_proposal(verdict, state['files'], out_path.parent, say)      # issue #1186 part 2
+    if state['pg_proposal'] is not None:              # issue #2435: the drafted declaration's record, beside the verdict
+        try:
+            _write_file(out_path.parent / PROPOSAL_FILE, (json.dumps(
+                state['pg_proposal'], indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
+        except (OSError, ValueError) as w:
+            say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
+                                                         % type(w).__name__))
     try:
         _append(env.get('GITHUB_STEP_SUMMARY'), summary)
     except OSError as w:

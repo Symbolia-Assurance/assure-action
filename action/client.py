@@ -22,14 +22,17 @@ Rules:
   bounded JSON or has no known schema, a body over 16 MiB) are retried on the same route with bounded backoff (3
   attempts by default), then raised as `api_unreachable` (connection) or `api_error` (bad answer). `server_busy` is
   retried the same way, except that a `Retry-After` of at most 60 s is waited in place of the backoff (issue #2298:
-  a full queue names `check_timeout_s`). `rate_limited` waits for `Retry-After` when it is at most 60 s, and sends
+  a full queue names `check_timeout_s`), and so is a longer one while the call's server_busy waits stay within
+  `total_wait_s` (issue #2475: a check wall bound above 60 s). `rate_limited` waits for `Retry-After` when it is at most 60 s, and sends
   again while the waits it honoured stay within `total_wait_s` (each counted as at least 1 s; issue #2450: another job
   of the account can take the slot the first wait freed; issue #2465: a herd of them can outlast `attempts` waits).
   A typed failure envelope is raised as a Refusal with the server's outcome, reason and check id (an outcome name
   this client does not know is `api_error`), and `detail.answered` naming the request the API answered: 'profiles', 'check' or 'poll' (a refused
   poll also carries `detail.sent_check_id`, the id from the 202); `unauthenticated`, `key_expired`, `bad_input`, `oversize_input`, `unknown_profile`, `credit_exhausted`,
   `profile_not_servable` and every outcome of a check that ran are never retried.
-- A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`.
+- A 202 is polled with bounded backoff until a final envelope or `total_wait_s`, then `checker_timeout`; that wait is
+  counted from the submit, less the `rate_limited` and `server_busy` `Retry-After` waits the check's POST honoured
+  (issue #2456, issue #2475: the waits that got the check admitted do not eat the time it is given to finish).
 - `fail_on` is sent in its canonical form (`canonical_fail_on`, serve-025's, carried by serve-035: lower case, no
   spaces, each word once, sorted); the server checks it against the profile and decides the exit. The poll of a 202
   sends it too (`GET /v1/checks/{id}?fail_on=...`), so the verdict is decided under it.
@@ -256,6 +259,8 @@ class Client:
         else:
             self._auth = 'Bearer ' + api_key
         self.key_expires = None                     # issue #1262: the last answer's Assure-Key-Expires, when it had one
+        self._rate_slept = 0.0                      # issue #2456: seconds the last `_call` slept in rate_limited waits
+        self._busy_slept = 0.0                      # issue #2475: seconds it slept in honoured server_busy waits
         self.timeout_s = float(timeout_s)
         self.total_wait_s = float(total_wait_s)
         self.attempts = max(1, int(attempts))
@@ -360,6 +365,9 @@ class Client:
         """Send with retries on the same route (`route` names it for `_typed`). Returns (status, doc) for 200 and 202 with a parsed object; raises the
         typed Refusal for a failure envelope, `api_unreachable` or `api_error` once the attempts are spent."""
         rate_waited = 0         # issue #2465 (REG-027): seconds of rate_limited Retry-After honoured, at most `total_wait_s`
+        self._rate_slept = 0.0  # issue #2456: the clock's seconds in those waits (submit moves its poll bound past them)
+        busy_waited = 0         # issue #2475 (REG-037): seconds of server_busy Retry-After honoured
+        self._busy_slept = 0.0  # issue #2475: the clock's seconds in those waits (submit moves its poll bound past them)
         attempt = 0
         last = None
         while True:
@@ -382,13 +390,23 @@ class Client:
                         if wait is not None and wait <= MAX_RETRY_AFTER_S \
                                 and rate_waited + max(wait, 1) <= self.total_wait_s:
                             rate_waited += max(wait, 1)
+                            before = self.clock()
                             self.sleep(wait)
+                            self._rate_slept += self.clock() - before
                             attempt -= 1                 # the honoured wait is not a delivery attempt
                             continue
                     if refusal.outcome in RETRY_TYPED and attempt < self.attempts:
                         last = refusal
                         wait = _retry_after(retry_after)     # issue #2298: the server's wait, when it names one
-                        self.sleep(wait if wait is not None and wait <= MAX_RETRY_AFTER_S else self._backoff(attempt))
+                        # issue #2475 (REG-037): a wait past 60 s (a server whose check wall bound is above 60 s) is
+                        # waited while this call's server_busy waits stay within total_wait_s
+                        if wait is not None and (wait <= MAX_RETRY_AFTER_S or busy_waited + wait <= self.total_wait_s):
+                            busy_waited += wait
+                            before = self.clock()
+                            self.sleep(wait)
+                            self._busy_slept += self.clock() - before
+                        else:
+                            self.sleep(self._backoff(attempt))
                         continue
                     raise refusal
                 if status in (200, 202) and isinstance(doc, dict):
@@ -479,6 +497,8 @@ class Client:
         else:
             idem = secrets.token_hex(16)
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
+        started += self._rate_slept                  # issue #2456: the check's wait starts after the rate_limited waits
+        started += self._busy_slept                  # issue #2475: and after the server_busy waits that got it admitted
         polls = 0
         while status == 202:
             cid = doc.get('check_id')

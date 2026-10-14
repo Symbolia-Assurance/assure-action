@@ -11,7 +11,7 @@ The Action collects facts in your runner. The check runs on Symbolia's server at
 
 Assure returns information. What to change is your call; your agents can act on the result directly — every reading carries the obligation, the machine, the evidence and the reason.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory with your declaration in `raw/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts.
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts.
 
 PostgreSQL majors 14 to 18 are supported. Real-run evidence exists for PostgreSQL 17 and 18.
 
@@ -186,7 +186,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `key_expired` | 2 | The API key is past its expiry date. |
 | `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits the API's `Retry-After` when it is at most 60 seconds and sends the same request again, for up to 300 seconds of waits on each request. |
 | `credit_exhausted` | 3 | The account's free credit is spent. |
-| `server_busy` | 3 | The API's queue stayed full after three attempts; between them the Action waits the API's `Retry-After` when it is at most 60 s. |
+| `server_busy` | 3 | The API's queue stayed full after three attempts; between them the Action waits the API's `Retry-After` when it is at most 60 s, or a longer one while those waits add up to at most 300 s; the 300 s the Action waits for the check itself starts when the queue admits it. |
 | `api_unreachable` | 3 | The runner could not reach the API after three attempts. |
 | `api_error` | 3 | The API answered in a way the Action does not accept, after three attempts where a retry applies. |
 | `engine_digest_mismatch` | 3 | The server's engine does not match its pin, so it runs no check. |
@@ -197,7 +197,7 @@ When the Action cannot produce a verdict, it writes a failure file at the `outpu
 | `profile_not_servable` | 3 | The server holds no qualified checker for this profile, or the checker it holds cannot import a module the server tree lacks (`detail.rule: pipeline_import`; not charged). |
 | `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. |
 | `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. |
-| `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting. |
+| `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting; the `rate_limited` waits before the API admitted it are not counted. |
 | `checker_cpu_limit` | 3 | The check used more than its CPU time limit. |
 | `checker_memory_limit` | 3 | The check used more than its memory limit. |
 

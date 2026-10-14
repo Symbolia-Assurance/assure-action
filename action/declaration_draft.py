@@ -116,10 +116,11 @@ def _read_at(record, p):
                                              if k.startswith(p + '/')), 'unread')
 
 
-def pull_request_body(record, rel):
-    """The proposal pull request's body: what it is, how to accept it, each field to confirm and where it was read."""
-    lines = ['Assure drafted `%s` from this repository and checked your app against the draft. Until this pull '
-             'request is merged, every Assure result is bounded by the draft.' % rel, '',
+def pull_request_body(record, rel, source='this repository'):
+    """The proposal pull request's body: what it is, how to accept it, each field to confirm and where it was read.
+    `source` names what the draft was read from (issue #2435: the collected catalog snapshot)."""
+    lines = ['Assure drafted `%s` from %s and checked your app against the draft. Until this pull '
+             'request is merged, every Assure result is bounded by the draft.' % (rel, source), '',
              'Read the draft and edit any field that is wrong, on this branch. %s' % NEVER_COMMITS, '',
              'Fields to confirm:', '']
     lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
@@ -131,7 +132,7 @@ def _missing(why):
     return Refusal('bad_input', '%s; %s' % (why, PERMISSIONS_SENTENCE))
 
 
-def propose(top, rel, data, record, env, scratch, github):
+def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository'):
     """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
     default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
@@ -179,8 +180,7 @@ def propose(top, rel, data, record, env, scratch, github):
         tree = (_git(top, env, 'write-tree', extra=index) or b'').decode().strip()
     if not tree:
         raise Refusal('api_error', 'the proposal commit could not be built')
-    title = TITLE
-    body = pull_request_body(record, rel)
+    body = pull_request_body(record, rel, source)
     commit = existing
     same = existing and (_git(top, env, 'rev-parse', existing + '^{tree}', existing + '^') or b'').decode().split() \
         == [tree, parent]
@@ -209,10 +209,10 @@ def propose(top, rel, data, record, env, scratch, github):
             'created': True}
 
 
-def summary_markdown(record, rel, proposed):
+def summary_markdown(record, rel, proposed, source='the repository'):
     """The job summary's section for an unaccepted draft: what it is, where it was proposed, the fields to confirm."""
     out = ['', '### Declaration: %s' % BOUNDED, '',
-           'This check ran on a declaration drafted from the repository (`%s`). %s' % (rel, proposed), '',
+           'This check ran on a declaration drafted from %s (`%s`). %s' % (source, rel, proposed), '',
            '| Field to confirm | Read at |', '| --- | --- |']
     for p in record['confirm']:
         out.append('| `%s` | %s |' % (p, _read_at(record, p)))

@@ -198,6 +198,27 @@ def _is_true(sql):
     return re.sub(r"\s+", " ", strip_outer_parens(str(sql))).strip().lower() == "true"
 
 
+#: issue #2573: the declared derive step (declared-derive derive_lifted.build_m5 term) reads a policy expression as
+#: absent, `true`, `false` or the declared predicate by this normalised text; any other expression on the protected
+#: table refuses the whole M5 machine (SQL-GRAMMAR), so a table carrying one is never drafted
+GRAMMAR_REASON = "outside the declared model's tenant grammar (neither absent, true, false nor the row filter)"
+
+
+def _norm_sql(text):
+    return re.sub(r"\s+", " ", str(text).strip().strip("()")).strip().lower()
+
+
+def _outside_grammar(predicate, policies):
+    """The policy expressions on a table the declared derive step cannot read with `predicate` declared."""
+    out = []
+    for _index, policy in policies:
+        for field, clause in (("polqual", "USING"), ("polwithcheck", "WITH CHECK")):
+            sql = policy.get(field)
+            if sql is not None and _norm_sql(sql) not in ("true", "false", _norm_sql(predicate)):
+                out.append("policy %s %s" % (policy.get("polname"), clause))
+    return out
+
+
 class _Draft:
     def __init__(self):
         self.decl, self.sources, self.confirm, self.notes = {}, {}, [], []
@@ -438,7 +459,7 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         for index, row in enumerate(policies_sec):
             if isinstance(row, dict) and type(row.get("polrelid")) is str:
                 by_table.setdefault(row["polrelid"], []).append((index, row))
-        groups = {}
+        groups, off_grammar = {}, []
         for index, row in rls_tables:
             open_to_all = [str(policy.get("polname")) for _pindex, policy in by_table.get(row["relname"], [])
                            if policy.get("polpermissive", True) is not False
@@ -457,13 +478,20 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                     quals.setdefault(strip_outer_parens(qual), pindex)
             if len(quals) == 1:
                 (predicate, pindex), = quals.items()
+                outside = _outside_grammar(predicate, by_table.get(row["relname"], []))
+                if outside:
+                    off_grammar.append(row["relname"])
+                    d.notes.append({"key": "protected_tables", "note": "table %s has a policy expression %s (%s); "
+                                    "not drafted" % (row["relname"], GRAMMAR_REASON, "; ".join(outside))})
+                    continue
                 groups.setdefault(predicate, []).append((index, row, pindex))
             else:
                 d.notes.append({"key": "protected_tables", "note": "table %s has %d distinct row filters; not drafted"
                                 % (row["relname"], len(quals))})
         if not groups:
             for key in ("protected_tables", "declared_predicate", "required_policies"):
-                d.unread(key, "no row-security table with a single row filter was observed")
+                d.unread(key, "the row filter of %s is %s" % (_and(off_grammar), GRAMMAR_REASON) if off_grammar
+                         else "no row-security table with a single row filter was observed")
         else:
             predicate = max(groups, key=lambda p: (len(groups[p]), -groups[p][0][0]))
             chosen = groups[predicate]
