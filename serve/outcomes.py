@@ -457,6 +457,15 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 # names, and the action says the check exists so the agent does not re-check a fine id
                 ('not_found', 'report_not_requested'):
                 'POST /v1/checks/{id}/report to ask for the report, then read it here; the check exists.',
+                # issue #2896 (REFUTATION-r1 F1): a product read of a private model the account's data rule does not
+                # allow (hosted/adapters_local.py LocalModelStore); no qualification opens it, so the action names
+                # no wait
+                ('profile_not_servable', 'product_data_off'):
+                'Nothing to change in this request; the account\'s data rule does not allow its model to be used to '
+                'improve the product, and no wait or retry opens it. Read the model with purpose \'serve\' to serve '
+                'the account.',
+                ('bad_input', 'bad_purpose'):
+                "Send purpose 'serve' or 'product', then send the request again.",
                 # issue #841: the key is bound to the raw body bytes and the query (serve/api.py _known), so a body
                 # re-serialised with other whitespace is "a different request" though every file is allow-listed and
                 # well formed; the file action sent an agent to re-validate file names

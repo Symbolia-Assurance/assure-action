@@ -1,7 +1,7 @@
 # Assure: collects PostgreSQL facts in the customer's runner, sends them to the hosted Assure API over TLS with the
 # customer's key, and writes the verdict the API returns. The check runs on Symbolia's server. Inputs reach entry.py
-# through the environment only; no expression appears inside the run script. No third-party action is used. The API
-# key reaches entry.py by environment only, never on a command line.
+# through the environment only, the API key too (never on a command line); no expression appears inside the run
+# script. The one action used is GitHub's actions/upload-artifact, pinned to a full sha; it cannot fail the Action.
 name: Assure check
 description: Check a PostgreSQL server against an Assure profile. Collects in your runner, checks on the Assure API, writes a verdict file.
 author: Symbolia
@@ -32,7 +32,7 @@ inputs:
     required: false
     default: ''
   declaration:
-    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim. Refused with a PostgreSQL connection; for postgresql-declared-model in api mode the Action reads .assure/declaration.json in the checkout (a link, a linked .assure/ directory, a non-regular or an unreadable file is refused bad_input), and when there is none it drafts one and proposes it in a pull request of its own on assure/declaration-proposal (no draft, and bad_input for the missing declaration, when the collector's sidecar names no server major from 14 to 18).
+    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim. Refused with a PostgreSQL connection; for postgresql-declared-model in api mode the Action reads .assure/postgresql-declared-model.json, else .assure/declaration.json, in the checkout (a link, a linked .assure/ directory, a non-regular or an unreadable file is refused bad_input), and when there is none it drafts one and proposes it at .assure/postgresql-declared-model.json in a pull request of its own on assure/declaration-proposal (no draft, and bad_input for the missing declaration, when the collector's sidecar names no server major from 14 to 18).
     required: false
     default: ''
   collection-role:
@@ -151,6 +151,9 @@ outputs:
   report-allowance-remaining:
     description: With the report on, the report allowance left this month, in USD. Empty otherwise.
     value: ${{ steps.assure.outputs.report-allowance-remaining }}
+  requirements-draft:
+    description: "postgresql-observed-baseline: the path of assure-requirements-draft.md, the requirements draft written beside the verdict file, which the next step uploads as the assure-requirements-draft run artifact. Empty when nothing was drafted."
+    value: ${{ steps.assure.outputs.requirements-draft }}
 
 runs:
   using: composite
@@ -185,3 +188,13 @@ runs:
         ASSURE_PYTHON: ${{ inputs.python }}
         GITHUB_TOKEN: ${{ github.token }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'
+    - name: Upload the requirements draft
+      if: ${{ always() && steps.assure.outputs.requirements-draft != '' }}
+      continue-on-error: true
+      # actions/upload-artifact v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: assure-requirements-draft
+        path: ${{ steps.assure.outputs.requirements-draft }}
+        overwrite: true
+        if-no-files-found: warn

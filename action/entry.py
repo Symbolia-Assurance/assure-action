@@ -130,11 +130,14 @@ assure-requirements-draft.md (`requirements_draft`), with its typed companion as
 the keys to confirm and the rows that need intent (`proposal_markdown`). Nothing new is sent to the API: the drafter
 reads only the withheld bytes, so the proposal holds no literal the withholding pass replaced. With no snapshot, no
 readable server major, or a major outside 14..18, nothing is drafted and nothing is said; a write fault is one
-`::warning`. The verdict file, the outputs and the exit never change. The drafter is imported only there
-(`_proposal_module`): action/declare_proposal.py in the public tree, assure/declare_proposal.py in this checkout.
+`::warning`. The verdict file and the exit never change; the one output it adds is `requirements-draft`, the draft's
+path, which action.yml's next step uploads with `continue-on-error`, so a failed upload leaves the exit as it was. The
+drafter is imported only there (`_proposal_module`): action/declare_proposal.py in the public tree,
+assure/declare_proposal.py in this checkout.
 
 Issue #2435: in api mode, with a PostgreSQL connection and profile `postgresql-declared-model`, the Action collects as
-for the observed baseline and places the checkout's `.assure/declaration.json` (under GITHUB_WORKSPACE; a link, a
+for the observed baseline and places the checkout's `.assure/postgresql-declared-model.json`, else
+`.assure/declaration.json` (issue #2927; under GITHUB_WORKSPACE; a link, a
 linked `.assure/`, a file that is not regular or cannot be read is `bad_input`) in the collector's raw/ as
 raw/declaration.json (`checkout_declaration`, `action.collect._gather` `declare`), before the bundle limits and the one
 withholding pass, so its `declared_predicate` literals are numbered with the snapshot's. With no such file it drafts
@@ -210,7 +213,8 @@ MAX_LINT_LINES = 50
 # names the same file.
 PROPOSAL_PROFILE = 'postgresql-observed-baseline'
 DECLARED_PROFILE = 'postgresql-declared-model'      # issue #2435: run on a connection with the checkout's declaration
-DECLARED_TITLE = 'Assure: proposed declaration for postgresql-declared-model \u2014 review and merge to accept'
+DECLARED_TITLE = declaration_draft.TITLE        # issue #2927: one proposal pull request, one title for every profile
+DECLARED_CHECKOUT_PATH = '.assure/postgresql-declared-model.json'   # issue #2927: PostgreSQL's draft, at its own path
 DECLARED_SOURCE = 'the collected catalog snapshot'
 PROPOSAL_FILE = 'assure-declaration-proposal.json'
 REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
@@ -231,6 +235,12 @@ PROPOSAL_LINE = ('Assure drafted a declaration from your database: %(leaves)d le
                  'to decide %(rows)d rows that need intent.')
 PROPOSAL_FILES_LINE = ('The draft is %(proposal)s (commit its `declaration` object after you confirm each key its '
                        '`confirm` list names), with %(draft)s beside it. A proposal changes no reading.')
+# issue #2892: action.yml's upload-artifact step ships the draft under this name; the section links the run's artifacts
+REQUIREMENTS_DRAFT_ARTIFACT = 'assure-requirements-draft'
+PROPOSAL_ARTIFACT_LINE = 'This run uploads %(draft)s as its %(artifact)s artifact: <%(url)s>.'
+_RUN_SERVER = re.compile(r'https?://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?')
+_RUN_REPOSITORY = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}')
+_RUN_ID = re.compile(r'[0-9]{1,20}')
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 _FAIL_ON_SHAPE = re.compile(r'[A-Za-z0-9_, -]{0,100}')     # serve-016: '-' for unresolved-security
 _OUTCOME_SHAPE = re.compile(r'[a-z_]{1,40}')
@@ -947,10 +957,30 @@ def draft_proposal(files):
 
 
 def checkout_declaration(top, cap):
-    """Issue #2435: the bytes of `.assure/declaration.json` under `top`, at most `cap` + 1 of them (the bundle limits
-    refuse more); None when it or `.assure/` is absent. `bad_input` for a link, a linked `.assure/`, a file that is not
-    regular, or one that cannot be read: a present declaration is never drafted over."""
-    rel = declaration_draft.CHECKOUT_PATH
+    """Issue #2435: the bytes of the checkout's declaration under `top`, at most `cap` + 1 of them (the bundle limits
+    refuse more); None when it or `.assure/` is absent. Issue #2927: `.assure/postgresql-declared-model.json` is read
+    first and `.assure/declaration.json` (where a #2435 proposal was merged) second."""
+    got = checkout_declaration_at(top, cap)
+    return None if got is None else got[1]
+
+
+def checkout_declaration_at(top, cap):
+    """(rel, bytes) of the first of DECLARED_CHECKOUT_PATH and `.assure/declaration.json` present under `top`; None
+    when neither is. `bad_input` for a link, a linked `.assure/`, a file that is not regular, or one that cannot be
+    read: a present declaration is never drafted over."""
+    for rel in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH):
+        try:
+            data = _checkout_file(top, rel, cap)
+        except Refusal:
+            if rel == DECLARED_CHECKOUT_PATH and not stat.S_ISDIR(os.lstat(top / '.assure').st_mode):
+                continue                             # a linked `.assure/` is refused as #2435 named it, below
+            raise
+        if data is not None:
+            return rel, data
+    return None
+
+
+def _checkout_file(top, rel, cap):
     parent = top / Path(rel).parent
     target = top / rel
     for p, kind in ((parent, stat.S_ISDIR), (target, stat.S_ISREG)):
@@ -991,17 +1021,32 @@ def proposal_counts(record, verdict):
     return {'leaves': leaves, 'confirm': len(record.get('confirm') or ()), 'rows': rows}
 
 
-def proposal_markdown(counts):
-    """The job summary's short section for a written proposal: fixed words and three counts, no customer text."""
-    return '\n### Declaration proposal\n\n%s %s\n' % (
-        PROPOSAL_LINE % counts, PROPOSAL_FILES_LINE % {'proposal': PROPOSAL_FILE, 'draft': REQUIREMENTS_DRAFT_FILE})
+def run_artifacts_url(env):
+    """Issue #2892: `<server>/<repo>/actions/runs/<run id>#artifacts` when GITHUB_SERVER_URL, GITHUB_REPOSITORY and
+    GITHUB_RUN_ID each look like that URL part (an http(s) origin, owner/name, digits); None otherwise."""
+    server, repo, run_id = (str(env.get(k) or '').strip() for k in ('GITHUB_SERVER_URL', 'GITHUB_REPOSITORY',
+                                                                     'GITHUB_RUN_ID'))
+    if not (_RUN_SERVER.fullmatch(server.rstrip('/')) and _RUN_REPOSITORY.fullmatch(repo) and _RUN_ID.fullmatch(run_id)):
+        return None
+    return '%s/%s/actions/runs/%s#artifacts' % (server.rstrip('/'), repo, run_id)
 
 
-def write_proposal(verdict, files, directory, say):
+def proposal_markdown(counts, artifacts_url=None):
+    """The job summary's short section for a written proposal: fixed words and three counts, no customer text; with
+    `artifacts_url` (`run_artifacts_url`), one more line naming the run artifact the draft is uploaded as."""
+    files = PROPOSAL_FILES_LINE % {'proposal': PROPOSAL_FILE, 'draft': REQUIREMENTS_DRAFT_FILE}
+    if artifacts_url is not None:
+        files += '\n\n' + PROPOSAL_ARTIFACT_LINE % {'draft': REQUIREMENTS_DRAFT_FILE,
+                                                    'artifact': REQUIREMENTS_DRAFT_ARTIFACT, 'url': artifacts_url}
+    return '\n### Declaration proposal\n\n%s %s\n' % (PROPOSAL_LINE % counts, files)
+
+
+def write_proposal(verdict, files, directory, say, artifacts_url=None):
     """On a postgresql-observed-baseline verdict: PROPOSAL_FILE and REQUIREMENTS_DRAFT_FILE written in `directory`
-    (beside the verdict file) from `files`, and the summary section (`proposal_markdown`) returned; '' on any other
-    profile, when nothing could be drafted, or when a file could not be written (one `::warning`, class name only).
-    The verdict file, the outputs and the exit never change."""
+    (beside the verdict file) from `files`, and the summary section (`proposal_markdown`, with `artifacts_url`)
+    returned; '' on any other profile, when nothing could be drafted, or when a file could not be written (one
+    `::warning`, class name only). The verdict file and the exit never change; the caller adds the
+    `requirements-draft` output only when a section came back (issue #2892)."""
     if not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE or not isinstance(files, dict):
         return ''
     try:
@@ -1021,7 +1066,7 @@ def write_proposal(verdict, files, directory, say):
         say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
                                                      % type(w).__name__))
         return ''
-    return proposal_markdown(counts)
+    return proposal_markdown(counts, artifacts_url)
 
 
 def _scratch(env):
@@ -1163,7 +1208,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
              'compile_requirements': True, 'draft': None, 'files': None, 'goals': [], 'pg_proposal': None,
-             'pg_checkout': None, 'requirements_text': [], 'tree': None}
+             'pg_checkout': None, 'pg_checkout_rel': None, 'requirements_text': [], 'tree': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1373,10 +1418,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         declaration, else a draft from the collector's own (not yet withheld) snapshot and sidecar in `raw`, recorded
         to be proposed; None when nothing can be drafted (the missing file is then refused as before)."""
         def declare(raw):
-            data = checkout_declaration(top, cap)
-            if data is not None:
-                state['pg_checkout'] = data
-                return data
+            got = checkout_declaration_at(top, cap)
+            if got is not None:
+                state['pg_checkout_rel'], state['pg_checkout'] = got
+                return got[1]
             files = {n: b for n in (PROPOSAL_SNAPSHOT, PROPOSAL_SIDECAR)
                      if (b := _raw_bounded(raw, n[len('raw/'):], cap)) is not None}
             drafted = draft_proposal(files)
@@ -1385,7 +1430,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             record = state['pg_proposal'] = drafted[0]
             data = declaration_draft.dumps(record['declaration'])
             state['draft'] = {'record': record, 'data': data, 'top': declaration_draft.toplevel(top, env),
-                              'rel': declaration_draft.CHECKOUT_PATH,
+                              'rel': DECLARED_CHECKOUT_PATH,
                               'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE}}
             say('Assure: %s drafted in the runner from %s; %d field(s) to confirm' % (
                 declaration_draft.NAME, DECLARED_SOURCE, len(record['confirm'])))
@@ -1482,7 +1527,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs),
                                         **kw)
             if pg and state['pg_checkout'] is not None:
-                declaration(collected, top, top / declaration_draft.CHECKOUT_PATH, checkout=True,
+                declaration(collected, top, top / state['pg_checkout_rel'], checkout=True,
                             data=state['pg_checkout'])
         state['withheld'] = collected.withheld
         say(WITHHELD_LINE % {'withheld': withhold.describe(collected.withheld)})
@@ -1600,11 +1645,15 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
     decl_line, decl_md, decl_out = declaration_note()           # serve-102: the draft bounds this verdict
     summary += decl_md
+    summary += declaration_draft.intent_markdown(inputs_profile, drafted=state['draft'] is not None)   # issue #2926
     try:
         _write_file(out_path, bundle.dumps(verdict))
     except (OSError, ValueError) as w:
         return failed(Refusal('checker_error', 'the verdict file could not be written (%s)' % type(w).__name__))
-    summary += write_proposal(verdict, state['files'], out_path.parent, say)      # issue #1186 part 2
+    proposal_md = write_proposal(verdict, state['files'], out_path.parent, say, run_artifacts_url(env))  # #1186 part 2
+    summary += proposal_md
+    draft_out = ('requirements-draft=%s\n' % (Path(out_text).parent / REQUIREMENTS_DRAFT_FILE)  # issue #2892
+                 if proposal_md else '')
     try:                                               # issue #2651: never changes the verdict, its file or its exit
         repo_name = str(env.get('GITHUB_REPOSITORY') or '').strip()
         state['tree'] = write_proof_tree(verdict, out_path.parent, state['goals'],
@@ -1659,7 +1708,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     line = render.first_line(verdict) if line is None else line
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line, cap=None) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
-    outputs(verdict['outcome'], code, report_extra + decl_out, verdict)
+    outputs(verdict['outcome'], code, report_extra + decl_out + draft_out, verdict)
     finish_feedback()
     return code
 

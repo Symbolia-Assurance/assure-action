@@ -4,9 +4,10 @@ When the files sent for profile python-auth-declared-model hold no `raw/declarat
 the repository bytes it sends and runs the check on the draft. The verdict is then bounded by an unaccepted draft:
 the log, the job summary and the step output `declaration=unaccepted-draft` say so. Under the Director's rule of 11 Oct
 2026 (Assure never writes into the repository; it provides a pull request), the draft is proposed in a pull request
-of Assure's own: one commit on the base branch's tip that writes only the declaration file, pushed only to the branch
-`assure/declaration-proposal`, and a pull request from that branch into the base branch (the pull request's base, or
-the repository's default branch on any other event); an open one is updated, never duplicated. Merging it is the
+of Assure's own: one commit on the base branch's tip that writes only the drafts' files (issue #2927: each profile's
+at its own path, a second drafter's added beside the first's while the open pull request's body names it), pushed
+only to the branch `assure/declaration-proposal`, and a pull request from that branch into the base branch (the pull
+request's base, or the repository's default branch on any other event); an open one is updated, never duplicated. Merging it is the
 acceptance. A run on a pull request whose declaration is not yet on the base branch is bounded the same way.
 
 The Action delegates drafting to POST /v1/declaration-proposal, which calls the identity engine's
@@ -39,9 +40,10 @@ PROPOSAL_SCHEMA = 'assure.identity.declaration-proposal/v1'
 STACK = 'python/flask'
 SCHEMA = 'assure.python-auth.declaration/v1'
 PROPOSAL_BRANCH = 'assure/declaration-proposal'   # Assure's own branch; never the base, the head or the default
-TITLE = 'Assure: proposed declaration for python-auth \u2014 review and merge to accept'
-NEVER_COMMITS = ('Assure never commits to your branches; it opens one pull request proposing .assure/declaration.json; '
-                 'merging it is the acceptance.')
+TITLE = 'Assure: proposed intent \u2014 review and merge to accept'   # issue #2927: one title for every profile's draft
+NEVER_COMMITS = ('Assure never commits to your branches; it opens one pull request proposing each profile\'s draft at '
+                 'its own path under .assure/; merging it is the acceptance.')
+_SECTION = '<!-- assure-draft: %s -->'                 # issue #2927: where one file's section of the body starts
 PERMISSIONS_SENTENCE = ('to open the proposal, give the workflow `contents: write` and `pull-requests: write` under '
                         '`permissions:` (and let GitHub Actions create pull requests in the repository settings)')
 BOT = ('github-actions[bot]', '41898282+github-actions[bot]@users.noreply.github.com')
@@ -54,6 +56,25 @@ SHORTCUTS = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH', 'dele
 JUDGEMENT = ('/session_identity_key', '/guards', '/identity_writers', '/elevation_writers', '/signout_views',
              '/public_routes', '/registrations_complete', '/session_elevation_keys', '/second_factor_keys')
 _ID = re.compile(r'[^A-Za-z0-9_.-]+')
+# Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
+# refuse unknown keys (serve/profiles.py ROW_KEYS) and the public tree ships no profile row (action/build_dist.py).
+# A row names the profile whose run drafts intent, the drafter, and the checkout path the declared profile reads it at
+# (action.entry.checkout_declaration reads CHECKOUT_PATH). postgresql-declared-model drafts its own on a connection run
+# with no checkout declaration (issue #2435 pg_declare); postgresql-observed-baseline writes its proposal beside the
+# verdict (action.entry.write_proposal), not at a checkout path, so it has no row. Read by tests only until #2249's
+# other parts read it.
+INTENT_FLOWS = {
+    PROFILE: {'drafter': 'action.declaration_draft.draft', 'intent_path': CHECKOUT_PATH, 'declared_profile': PROFILE},
+    'postgresql-declared-model': {'drafter': 'action.entry.draft_proposal',          # via assure.declare_proposal
+                                  'intent_path': CHECKOUT_PATH, 'declared_profile': 'postgresql-declared-model'},
+}
+NO_DRAFTER = ('http-observed-baseline', 'mysql-declared-model')
+READS_INTENT = ('postgresql-declared-model',)      # drafts only on a connection run with no checkout declaration
+NO_DRAFTER_NOTE = '`%s` has no intent drafter yet; Assure drafts no declaration for it, so this check reads %s.'
+NO_DRAFTER_READS = {'http-observed-baseline': 'only what was observed',
+                    'mysql-declared-model': 'the declaration supplied with the run'}   # a declared model
+READS_INTENT_NOTE = ('`%s` reads the declaration supplied with the run; Assure drafts one only on its own connection '
+                     'run with no `' + CHECKOUT_PATH + '` in the checkout, and proposes it in its own pull request.')
 
 
 def draft(files, repository_id=None, *, client):
@@ -116,16 +137,43 @@ def _read_at(record, p):
                                              if k.startswith(p + '/')), 'unread')
 
 
-def pull_request_body(record, rel, source='this repository'):
-    """The proposal pull request's body: what it is, how to accept it, each field to confirm and where it was read.
-    `source` names what the draft was read from (issue #2435: the collected catalog snapshot)."""
-    lines = ['Assure drafted `%s` from %s and checked your app against the draft. Until this pull '
-             'request is merged, every Assure result is bounded by the draft.' % (rel, source), '',
-             'Read the draft and edit any field that is wrong, on this branch. %s' % NEVER_COMMITS, '',
-             'Fields to confirm:', '']
+def _section(record, rel, source):
+    lines = [_SECTION % rel, '', 'Assure drafted `%s` from %s and checked your app against the draft. Until this pull '
+             'request is merged, every Assure result is bounded by the draft.' % (rel, source), '', 'Fields to confirm:', '']
     lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
                                else 'read at ' + _read_at(record, p)) for p in record['confirm']]
+    notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
+    if notes:                                       # issue #2567: routes kept out of public_routes, in plain words
+        lines += ['', 'To confirm (routes Assure did not draft as public):', ''] + ['- %s' % n for n in notes]
     return '\n'.join(lines) + '\n'
+
+
+def _kept_sections(body, keep):
+    """Issue #2927: the sections of an open proposal's `body` for the files in `keep`, in their order there."""
+    parts = re.split(r'(?m)^(?=<!-- assure-draft: )', body if isinstance(body, str) else '')
+    return [p.rstrip('\n') + '\n' for p in parts[1:] if (m := re.match(r'<!-- assure-draft: (.+?) -->', p))
+            and m.group(1) in keep]
+
+
+def _named(body):
+    """Issue #2927: the files an open proposal's `body` has a section for."""
+    return set(re.findall(r'(?m)^<!-- assure-draft: (.+?) -->', body if isinstance(body, str) else ''))
+
+
+def _parent(top, env, commit):
+    """The first parent written in `commit`'s own object, or None. Read from the object, not as `commit^`: a commit
+    fetched one deep (the shallow checkout actions/checkout leaves) is a shallow boundary, and git resolves no `^` for
+    it (issue #2927, REFUTATION-r1 HIGH-1)."""
+    raw = (_git(top, env, 'cat-file', 'commit', commit) or b'').decode('utf-8', 'replace').split('\n\n', 1)[0]
+    return next((line[7:].strip() for line in raw.split('\n') if line.startswith('parent ')), None)
+
+
+def pull_request_body(record, rel, source='this repository', kept=()):
+    """The proposal pull request's body: what it is, how to accept it, and one section per proposed file naming each
+    field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
+    collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927)."""
+    head = ('Read each draft and edit any field that is wrong, on this branch. %s\n' % NEVER_COMMITS)
+    return '\n'.join([head] + list(kept) + [_section(record, rel, source)])
 
 
 def _missing(why):
@@ -172,18 +220,30 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     existing = None
     if _fetch(top, env, branch):
         existing = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip() or None
+    # issue #2927: the branch carries every profile's draft; one still on the current base tip is the seed, so a second
+    # drafter adds its file and keeps the first (a branch on an older base tip restarts from the base tip, and so does
+    # one carrying a file its open pull request's body does not name, as a #2435 proposal from before #2927 does)
+    seed, on_branch = parent, set()
+    if existing and _parent(top, env, existing) == parent:
+        on_branch = set((_git(top, env, 'diff', '--name-only', parent, existing) or b'').decode('utf-8', 'replace')
+                        .split('\n')) - {''}
+        if on_branch - {rel} <= _named(open_pr.get('body') if open_pr else None):
+            seed = existing
     blob = (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip()
     index = {'GIT_INDEX_FILE': str(Path(scratch) / 'assure-proposal.index')}
     tree = None
-    if blob and _git(top, env, 'read-tree', parent, extra=index) is not None and _git(
+    if blob and _git(top, env, 'read-tree', seed, extra=index) is not None and _git(
             top, env, 'update-index', '--add', '--cacheinfo', '100644,%s,%s' % (blob, rel), extra=index) is not None:
         tree = (_git(top, env, 'write-tree', extra=index) or b'').decode().strip()
     if not tree:
         raise Refusal('api_error', 'the proposal commit could not be built')
-    body = pull_request_body(record, rel, source)
+    kept = ()
+    if open_pr is not None and seed == existing:    # the other files' sections, while their files stay on the branch
+        kept = _kept_sections(open_pr.get('body'), on_branch - {rel})
+    body = pull_request_body(record, rel, source, kept)
     commit = existing
-    same = existing and (_git(top, env, 'rev-parse', existing + '^{tree}', existing + '^') or b'').decode().split() \
-        == [tree, parent]
+    same = existing and seed == existing and (_git(top, env, 'rev-parse', existing + '^{tree}') or b'').decode().strip() \
+        == tree
     if not same:                                    # a new or changed draft: one commit on the base tip
         who = {'GIT_AUTHOR_NAME': BOT[0], 'GIT_AUTHOR_EMAIL': BOT[1], 'GIT_COMMITTER_NAME': BOT[0],
                'GIT_COMMITTER_EMAIL': BOT[1]}
@@ -217,5 +277,19 @@ def summary_markdown(record, rel, proposed, source='the repository'):
     for p in record['confirm']:
         out.append('| `%s` | %s |' % (p, _read_at(record, p)))
     return '\n'.join(out) + '\n'
+
+
+def intent_markdown(profile, drafted=False):
+    """Issue #2926: the job summary's intent section for a profile in NO_DRAFTER or READS_INTENT (fixed words, no
+    customer text); '' for any other profile, and for a READS_INTENT run whose summary has a declaration section
+    (`drafted`: the run is bounded by a draft, drafted this run or not yet on the base branch, and that section says
+    so)."""
+    if profile in NO_DRAFTER:
+        line = NO_DRAFTER_NOTE % (profile, NO_DRAFTER_READS[profile])
+    elif profile in READS_INTENT and not drafted:
+        line = READS_INTENT_NOTE % profile
+    else:
+        return ''
+    return '\n### Intent\n\n%s\n' % line
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

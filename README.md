@@ -126,7 +126,7 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 
 The colour is green, red or yellow. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `fail-on: unresolved-security` is the strict preset; it is never the default, and while a profile marks no obligation it changes nothing ("strict: no obligations marked").
 
-The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with the report on also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`.
+The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with the report on also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`. On `postgresql-observed-baseline`, when the Action writes `assure-requirements-draft.md`, it also sets `requirements-draft`, that file's path (empty when nothing was drafted).
 
 ## What is never charged
 
