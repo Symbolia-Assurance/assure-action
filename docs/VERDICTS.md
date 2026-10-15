@@ -202,6 +202,7 @@ Besides the 40 obligations, a verdict whose inputs the checker could read carrie
 | CVE-2026-14673 | 14 (14.24), 15 (15.19), 16 (16.15), 18 (18.6) | The amcheck extension is installed (17 is not affected). |
 | CVE-2026-14681 | 17 (17.11), 18 (18.6) | pg_hba.conf has a `hostgssenc` record and `ssl` is on (a direct TLS connection may then match that record without GSSAPI encryption). A collected `include` target is read in place; with no `hostgssenc` record observed, an `include` the collector did not gather or a record it withheld reads `not_observed`. |
 | CVE-2026-6471 | 14 (14.24), 15 (15.19), 16 (16.15), 17 (17.11), 18 (18.6) | Logical decoding is on (`wal_level` is `logical`) and a non-superuser holds REPLICATION. |
+| CVE-2026-14676 | 18 (18.6) | The pg_stat_statements module is loaded (shared_preload_libraries lists it). |
 
 ## 6. An empty database
 
