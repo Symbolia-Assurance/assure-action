@@ -61,12 +61,19 @@ _ID = re.compile(r'[^A-Za-z0-9_.-]+')
 # A row names the profile whose run drafts intent, the drafter, and the checkout path the declared profile reads it at
 # (action.entry.checkout_declaration reads CHECKOUT_PATH). postgresql-declared-model drafts its own on a connection run
 # with no checkout declaration (issue #2435 pg_declare); postgresql-observed-baseline writes its proposal beside the
-# verdict (action.entry.write_proposal), not at a checkout path, so it has no row. Read by tests only until #2249's
-# other parts read it.
+# verdict (action.entry.write_proposal) and, inside a checkout where `checkout_declaration` finds nothing at either
+# path, proposes it at the declared profile's own path (issue #2934, action.entry.observed_draft). That run stats and,
+# when present, reads both checkout paths (`reads`, in `checkout_declaration`'s order) only to decide not to propose
+# over a committed declaration; its verdict reads neither, so it is not in READS_INTENT. Read by tests only until
+# #2249's other parts read it.
 INTENT_FLOWS = {
     PROFILE: {'drafter': 'action.declaration_draft.draft', 'intent_path': CHECKOUT_PATH, 'declared_profile': PROFILE},
     'postgresql-declared-model': {'drafter': 'action.entry.draft_proposal',          # via assure.declare_proposal
                                   'intent_path': CHECKOUT_PATH, 'declared_profile': 'postgresql-declared-model'},
+    'postgresql-observed-baseline': {'drafter': 'action.entry.draft_proposal',       # via action.entry.observed_draft
+                                     'intent_path': '.assure/postgresql-declared-model.json',   # DECLARED_CHECKOUT_PATH
+                                     'declared_profile': 'postgresql-declared-model',
+                                     'reads': ('.assure/postgresql-declared-model.json', CHECKOUT_PATH)},
 }
 NO_DRAFTER = ('http-observed-baseline', 'mysql-declared-model')
 READS_INTENT = ('postgresql-declared-model',)      # drafts only on a connection run with no checkout declaration
@@ -137,9 +144,12 @@ def _read_at(record, p):
                                              if k.startswith(p + '/')), 'unread')
 
 
-def _section(record, rel, source):
-    lines = [_SECTION % rel, '', 'Assure drafted `%s` from %s and checked your app against the draft. Until this pull '
-             'request is merged, every Assure result is bounded by the draft.' % (rel, source), '', 'Fields to confirm:', '']
+def _section(record, rel, source, lead=None):
+    """One file's section of the body; `lead`, when given, replaces its first sentence (issue #2934: an observed
+    verdict is not bounded by the draft)."""
+    lines = [_SECTION % rel, '', lead or 'Assure drafted `%s` from %s and checked your app against the draft. Until this '
+             'pull request is merged, every Assure result is bounded by the draft.' % (rel, source), '',
+             'Fields to confirm:', '']
     lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
                                else 'read at ' + _read_at(record, p)) for p in record['confirm']]
     notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
@@ -168,19 +178,23 @@ def _parent(top, env, commit):
     return next((line[7:].strip() for line in raw.split('\n') if line.startswith('parent ')), None)
 
 
-def pull_request_body(record, rel, source='this repository', kept=()):
+def pull_request_body(record, rel, source='this repository', kept=(), lead=None):
     """The proposal pull request's body: what it is, how to accept it, and one section per proposed file naming each
     field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
-    collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927)."""
+    collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927);
+    `lead` replaces the first sentence of `rel`'s section (issue #2934)."""
     head = ('Read each draft and edit any field that is wrong, on this branch. %s\n' % NEVER_COMMITS)
-    return '\n'.join([head] + list(kept) + [_section(record, rel, source)])
+    return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)])
+
+
+PUSH_REFUSED = 'the push to'      # issue #2934: the observed profile reads a refused push as `contents: read`
 
 
 def _missing(why):
     return Refusal('bad_input', '%s; %s' % (why, PERMISSIONS_SENTENCE))
 
 
-def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository'):
+def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository', lead=None):
     """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
     default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
@@ -240,7 +254,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     kept = ()
     if open_pr is not None and seed == existing:    # the other files' sections, while their files stay on the branch
         kept = _kept_sections(open_pr.get('body'), on_branch - {rel})
-    body = pull_request_body(record, rel, source, kept)
+    body = pull_request_body(record, rel, source, kept, lead)
     commit = existing
     same = existing and seed == existing and (_git(top, env, 'rev-parse', existing + '^{tree}') or b'').decode().strip() \
         == tree
@@ -252,7 +266,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         # the force is on Assure's own branch only: `branch` is never the base or the head (checked above)
         if not commit or _git(top, env, 'push', '--quiet', 'origin',
                               '+%s:refs/heads/%s' % (commit, branch)) is None:
-            raise _missing('the push to %s was refused' % branch)
+            raise _missing(PUSH_REFUSED + ' %s was refused' % branch)
     if open_pr is not None:
         status, doc = github.call('PATCH', '/repos/%s/pulls/%d' % (repo, open_pr['number']),
                                   {'title': title, 'body': body})

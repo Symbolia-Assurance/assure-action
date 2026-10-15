@@ -487,7 +487,7 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
             if open_to_all:
                 d.notes.append({"key": "protected_tables", "note": "table %s has a policy that admits every row (%s); "
                                 "its rows are open by its own policy, so it was not drafted as protected"
-                                % (row["relname"], "; ".join(open_to_all)),
+                                % (row["relname"], "; ".join(open_to_all)), "table": row["relname"],
                                 "open": _open_line(row["relname"], by_table.get(row["relname"], []))})
                 continue
             quals = {}
@@ -680,6 +680,12 @@ ENGLISH = {
     "LR-1-SCOPE": (("Logical replication publishes no table.", {"intended_tables": []}),
                    ("Logical replication publishes only {intended_tables}.", {})),
 }
+#: issue #2893: the fill-in lines the draft offers when no table was drafted as protected or one was left out as open,
+#: each the ENGLISH forms of its obligations joined by a space: RLS-1 + RLS-2 (row security on each user-data table,
+#: with a policy keyed on the caller) and RLS-3 (the ownership check). The snapshot carries no column names, so the
+#: tables and the caller predicate are the user's to fill in
+TEMPLATES = (("RLS-1", "RLS-2"), ("RLS-3",))
+_FILL = {"protected_tables": "<tables>", "declared_predicate": "`<caller predicate>`"}
 #: the goals a person would write, each over the obligation family it rolls up (key, sentence, obligations): a goal
 #: is drafted when at least one of its obligations is; its sentence names no role, table or obligation
 GOALS = (
@@ -821,6 +827,27 @@ def parse_english(sentence):
     return None
 
 
+def template_line(obligations):
+    """The fill-in line of a TEMPLATES entry: per obligation the first ENGLISH form that names only the protected
+    tables and the predicate, `<tables>` and `<caller predicate>` in place of the values."""
+    return " ".join(next(template.format(**_FILL) for template, _fixed in ENGLISH[o]
+                         if set(_PLACE.findall(template)) <= set(_FILL)) for o in obligations)
+
+
+def parse_template(sentence):
+    """Issue #2893: a filled TEMPLATES line read back (`parse_english`, one sentence per obligation) to its typed rows,
+    all over the same protected tables; None when the sentence is not one."""
+    for obligations in TEMPLATES:
+        cuts = [m.end() for m in re.finditer(r"\. ", sentence)] if len(obligations) == 2 else []
+        for parts in ([[sentence]] if len(obligations) == 1 else
+                      [[sentence[:cut - 1], sentence[cut:]] for cut in cuts]):
+            rows = [parse_english(part) for part in parts]
+            if None not in rows and [r["obligation"] for r in rows] == list(obligations) \
+                    and len({json.dumps(r["values"]["protected_tables"]) for r in rows}) == 1:
+                return rows
+    return None
+
+
 def _one_line(text, cap=LINE_CAP):
     return (isinstance(text, str) and len(text.encode("utf-8")) <= cap
             and not re.search(r"[\x00-\x1f\x7f-\x9f  ]", text))
@@ -916,13 +943,18 @@ def typed_companion(record, text, drafted_from=None, notes=()):
                  "drafted_from": drafted_from, "notes": _left(record, notes), "goals": goals}, **FLAGS)
 
 
+def _companion(companion):
+    """Whether `companion` is a typed companion: its schema and profile, and a list of goals (which may be empty)."""
+    return (isinstance(companion, dict) and companion.get("schema") == TYPED_SCHEMA
+            and companion.get("profile") == TYPED_PROFILE and isinstance(companion.get("goals"), list))
+
+
 def _goals(companion):
     """{sha256: {id, english, line, rows: [(id, statement, waypoint)]}} of the companion goals that check: the goal
     sentence is its key's, its sha256 is that sentence's, and every child is one of the goal's obligations with its
     obligation's statement, the waypoint its own values render, and the id G<n>.<k> in order. A goal with any child
     that does not check is ignored whole."""
-    if not isinstance(companion, dict) or companion.get("schema") != TYPED_SCHEMA \
-            or companion.get("profile") != TYPED_PROFILE or not isinstance(companion.get("goals"), list):
+    if not _companion(companion):
         return {}
     statements = {obligation: statement for obligation, _keys, statement in ROWS}
     family = {key: obligations for key, _sentence, obligations in GOALS}
@@ -961,12 +993,14 @@ def typed_text(text, companion):
     goal names becomes its children's typed lines (`- G1.1 [postgres]: <statement>`, one per line); every other line,
     and every line inside a code fence, is sent as written. `changed` lists the requirement lines with no match where a
     checked goal was compiled (its `line`): lines changed since they were compiled, checked as written. `expanded`
-    lists each goal sent as {id, english, rows: [(id, statement, waypoint)]}. A companion that does not check changes
-    nothing."""
+    lists each goal sent as {id, english, rows: [(id, statement, waypoint)]}. A filled TEMPLATES line is sent as its
+    obligations' typed lines under a G<n> id after the companion goals', also when the companion drafted no goal
+    (REFUTATION-r3 MEDIUM-1). A companion that is not one (`_companion`) changes nothing."""
     goals = _goals(companion)
-    if not goals:
+    if not goals and not _companion(companion):
         return text, [], []
     compiled_at = {goal["line"] for goal in goals.values() if goal["line"] is not None}
+    top = max((int(goal["id"][1:]) for goal in goals.values()), default=0)
     out, fenced, expanded, changed = [], False, [], []
     for n, line in enumerate(text.split("\n"), 1):
         end = "\r" if line.endswith("\r") else ""
@@ -975,7 +1009,14 @@ def typed_text(text, companion):
             fenced = not fenced
         elif not fenced and stripped and not re.match(r"#{1,6}(?:\s|$)", stripped):
             marker = _MARKER.match(stripped)
-            goal = compile_line(stripped[marker.end():] if marker else stripped, goals)
+            sentence = stripped[marker.end():] if marker else stripped
+            goal = compile_line(sentence, goals)
+            rows = parse_template(sentence) if goal is None else None
+            if rows:                       # REFUTATION-r2 HIGH-1: a G<n> id after every companion goal's, as check_goals reads
+                tid = "G%d" % (top + sum(1 for g in expanded if "values" in g) + 1)
+                goal = {"id": tid, "english": sentence, "line": n,
+                        "rows": [("%s.%d" % (tid, k), row["statement"], english(row)) for k, row in enumerate(rows, 1)],
+                        "values": {key: value for row in rows for key, value in row["values"].items()}}
             if goal is not None and goal not in expanded:
                 expanded.append(goal)
                 out += ["- %s [postgres]: %s%s" % (rid, statement, end) for rid, statement, _w in goal["rows"]]
@@ -1029,6 +1070,14 @@ def requirements_draft(record, notes=()):
         lines += opened[:OPEN_CAP] + ([] if len(opened) <= OPEN_CAP else [
             "## To confirm: %d more tables are open to every row by their own policies; "
             "assure-requirements-typed.json names them." % (len(opened) - OPEN_CAP)]) + [""]
+    if "protected_tables" not in record["declaration"] or opened:
+        tables = [n["table"] for n in notes if isinstance(n.get("open"), str) and isinstance(n.get("table"), str)]
+        lines += ["## Templates: fill in <tables>%s and <caller predicate> (the predicate that keys a row on its user, "
+                  "such as `auth.uid() = id`), then keep the line as a goal (\"- \" and the filled sentence) and "
+                  "state the same tables and predicate as `protected_tables` and `declared_predicate` in the "
+                  "declaration: without them the line's checks are not established."
+                  % (" (suggested: %s)" % _and(tables[:OPEN_CAP]) if tables else "")]
+        lines += ["## Template: " + template_line(obligations) for obligations in TEMPLATES] + [""]
     unread = sorted(p[1:] for p, v in record["sources"].items() if v == "unread")
     if unread:
         lines += ["## Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + ".", ""]

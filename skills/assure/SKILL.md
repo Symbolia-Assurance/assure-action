@@ -73,7 +73,7 @@ In your repository, open **Settings → Secrets and variables → Actions → Ne
 
 ## Route 1: a connection to the server
 
-- `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote.
+- `postgresql-observed-baseline`: your server against what is observed and pinned public baselines; you declare nothing. From a connection, or from an artefacts directory the collector wrote. When no table was proposed as protected, or one was left out because its own policy opens every row, a `## Templates` section offers two fill-in lines: row-level security on each user-data table with a policy keyed on the caller (RLS-1 and RLS-2) and the ownership check on inserts and updates (RLS-3), with `<tables>` (the open tables suggested) and `<caller predicate>` (for example `auth.uid() = id`) for you to fill in; the snapshot carries no column names, so Assure cannot pick the tables itself. Keep a filled line as a goal (`- ` and the sentence) and the Action sends it as those checks; state the same tables and predicate as `protected_tables` and `declared_predicate` in the declaration, or those checks are not established.
 
 Read [references/postgres.md](references/postgres.md).
 

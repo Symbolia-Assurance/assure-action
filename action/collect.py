@@ -671,11 +671,12 @@ def _refused(out, stdout_text, conn, rc, role=None):
     return Refusal('collector_refused', text, collector_exit=rc, collector_refusal=kind)
 
 
-def _gather(out, profile, limits, declare=None):
+def _gather(out, profile, limits, declare=None, observe=None):
     """The collector's output as the raw/ bundle: out/raw/* plus the sidecar and timing, moved into raw/. With
     `declare` (issue #2435), `declare(out/raw)` returns the declaration's bytes (or None for none), written as
     raw/declaration.json before the bundle limits and the one withholding pass, so its `declared_predicate` literals
-    are numbered with the snapshot's."""
+    are numbered with the snapshot's. With `observe` (issue #2934), `observe(out/raw)` reads the collector's own output
+    before the withholding pass and writes nothing."""
     out = Path(out)
     try:
         st = os.lstat(out)
@@ -695,6 +696,8 @@ def _gather(out, profile, limits, declare=None):
         if os.path.lexists(dst):
             raise Refusal('checker_error', 'the collector wrote raw/%s itself; the bundle name is taken' % name)
         os.rename(src, dst)
+    if observe is not None:
+        observe(out / 'raw')
     if declare is not None:
         dst = out / 'raw' / 'declaration.json'
         if os.path.lexists(dst):
@@ -709,9 +712,9 @@ def _gather(out, profile, limits, declare=None):
 
 def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_roots=(), collector_dir=None,
             frozen_sha256=FROZEN_COLLECTOR_SHA256, psql='psql', path=None, timeout=DEFAULT_TIMEOUT, python=None,
-            limits=LIMITS, declare=None):
+            limits=LIMITS, declare=None, observe=None):
     """Verify and run the collector into `scratch`; return the bundle (`bundle.Collected`). Every fault is a Refusal.
-    `declare` is `_gather`'s (issue #2435)."""
+    `declare` (issue #2435) and `observe` (issue #2934) are `_gather`'s."""
     d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
     generation = verify_collector(d, frozen_sha256)['generation']
     env = child_env(conn, path=path)
@@ -755,7 +758,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
                 proc.kill()
                 proc.wait()
     if rc in (0, 1):
-        return _gather(out, profile, limits, declare)
+        return _gather(out, profile, limits, declare, observe)
     if rc == 3:
         raise _refused(out, _read_bounded(stdout_p), conn, rc, role)
     printed = _refusal_doc(scratch / 'no-such-output', _read_bounded(stdout_p)).get('refusal')

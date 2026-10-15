@@ -569,7 +569,7 @@ def covers(profile):
     return any(rule.matches(name) for name in names for rule in rules)
 
 
-def withhold_files(files, covered=True):
+def withhold_files(files, covered=True, literals=None):
     """(files with comment text and SQL literals withheld, counts). The input mapping is not changed. `bad_input` when
     derive.py would read any configuration file differently after the pass, and `collector_refused` when a line the
     frozen collector withheld whole may hide a rule or setting (serve/faithful.py `check`, the server's own check, run
@@ -593,7 +593,7 @@ def withhold_files(files, covered=True):
         out = withhold_config(base, grammar, continuation=cont, counts=counts, marked=marked)
         _check_reading(name, reached, base, out, cont, marked, unknown=grammar == 'unknown')
         new[name] = out
-    new.update(_withhold_json(new, Literals(), counts))
+    new.update(_withhold_json(new, Literals() if literals is None else literals, counts))
     return new, counts
 
 
@@ -608,8 +608,24 @@ def apply(collected, profile=None):
     covered = True if profile is None else covers(profile)
     if covered:
         faithful.check_binding(collected.files, (collected.records or {}).get(faithful.MANIFEST))
-    collected.files, collected.withheld = withhold_files(collected.files, covered=covered)
+    collected.literals = Literals() if covered else None     # issue #2928: `with_declaration` numbers in this pass
+    collected.files, collected.withheld = withhold_files(collected.files, covered=covered, literals=collected.literals)
     return collected
+
+
+def with_declaration(collected, data):
+    """Issue #2928: (the files of `collected`, already through `apply`, plus raw/declaration.json = `data`, counts). The
+    declaration's `declared_predicate` literals are withheld continuing that pass's numbering, so a literal the
+    snapshot also holds reads the snapshot's own marker (as one pass over both gives, `action.collect._gather`); the
+    other files are not passed over again. With no numbering from that pass (a profile `covers` rejects, or a bundle
+    that never passed through `apply`) the literals are withheld in a fresh numbering, as `withhold_files` withholds
+    JSON whatever the profile: the declaration's bytes are never returned unwithheld. `collected` is not changed."""
+    counts = dict(empty_counts(), **(collected.withheld or {}))
+    files = dict(collected.files, **{DECLARATION: bytes(data)})
+    lits = getattr(collected, 'literals', None)
+    counts[FILES_KEY] = counts.get(FILES_KEY, 0) + 1
+    files.update(_withhold_json({DECLARATION: files[DECLARATION]}, Literals() if lits is None else lits, counts))
+    return files, counts
 
 
 def _n(count, one, many):

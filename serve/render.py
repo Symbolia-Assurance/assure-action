@@ -2941,6 +2941,7 @@ def pr_reading(envelope):
                 shown_reqs.add(item['requirement'])
             deviations.append((item, key in red_dev))
     holds, unchecked = [], []
+    spent_rows = _pr_spent_rows(env)
     for r in requirement_rows(env) or ():
         if r.get('id') in shown_reqs:
             continue
@@ -2949,8 +2950,10 @@ def pr_reading(envelope):
         if r.get('state') == 'holds':
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None)})
         else:
-            unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'),
-                              'words': _pr_unchecked_words(env, r.get('reason_class'))})
+            words = _pr_unchecked_words(env, r.get('reason_class'))
+            if spent_rows and _pr_unread_row(r):    # the Director, 14 Oct 2026: the spent balance left it unread
+                words += '; ' + PR_SPENT_ROW
+            unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'), 'words': words})
     for r in obligations:
         key = (r.get('machine'), r.get('id'))
         if key in shown_rows or r.get('id') in shown_ids:
@@ -3071,6 +3074,59 @@ def _pr_closing(env, commit):
         words, " It ran none of the app's code." if _pr_static(env) else '', profile, named)
 
 
+# The Director, 14 Oct 2026: "after the $1 ends the comment says please buy credits or upgrade". Free credits are not
+# purchasable (assure/pricing.py: paying begins at the USD 20 tier), so the line offers the Premium upgrade only.
+PR_SPENT_WORDS = ('Your free USD 1 for reading your requirements and writing reports is used up. '
+                  'The checks above still run.')
+PR_SPENT_UPGRADE = 'To keep Assure reading your own words, upgrade to Premium (USD 20 a month):'
+# a requirement line left unread because the shared free balance was spent (#2315's `requirements_compilation` block,
+# status `refused` with refusal `allowance_exhausted`, on a verdict carrying the spent notice): said on its "Not
+# checked yet" row
+PR_SPENT_ROW = 'not read: your free balance for reading requirements is used up'
+# serve/requirements_compiler.py CANDIDATE_CLASSES (issue #2544: never a grammar-refused row). render ships in the
+# Action, which imports no API-side module, so this is a copy; tests/serving/test_spent_pr_comment_accept.py pins it
+_PR_COMPILE_CANDIDATES = ('missing_method',)
+
+
+def _spent_notice(up):
+    """True when `upgrade` carries the server's spent notice (serve/api.py `_with_upgrade`, usage.SPENT_NOTICE) as one
+    plain sentence: the same test `upgrade_markdown` applies before it prints the notice."""
+    notice = up.get('notice') if isinstance(up, dict) else None
+    return (isinstance(notice, str) and bool(notice.strip()) and not _CONTROL.search(notice) and len(notice) <= CAP
+            and '://' not in notice and not _UPGRADE_URL.search(notice))
+
+
+def pr_spent_line(envelope):
+    """The comment's one line for a free account whose shared once-only USD 1 is spent (`upgrade.notice`), or None:
+    PR_SPENT_WORDS, then PR_SPENT_UPGRADE and `upgrade.url` as `<url>` only when that url is the server's own
+    buy.stripe.com payment link (`_UPGRADE_URL`). None when the verdict carries no `upgrade` (a paid account, or a
+    server with no payment link) or no notice (the balance is not spent)."""
+    up = envelope.get('upgrade') if isinstance(envelope, dict) else None
+    if not _spent_notice(up):
+        return None
+    url = up.get('url')
+    if isinstance(url, str) and _UPGRADE_URL.fullmatch(url):
+        return '%s %s <%s>' % (_esc_line(PR_SPENT_WORDS), _esc_line(PR_SPENT_UPGRADE), url)
+    return _esc_line(PR_SPENT_WORDS)
+
+
+def _pr_spent_rows(env):
+    """True when #2315's `requirements_compilation` block says the lines were not read because the free balance was
+    spent: status `refused`, refusal `allowance_exhausted`, and the verdict carries the server's spent notice
+    (`upgrade.notice`, a free account whose once-only balance is spent). False otherwise: the block absent or saying
+    anything else, a paid account's spent month (no `upgrade`), a server with no payment link, balance left."""
+    block = env.get('requirements_compilation')
+    return (isinstance(block, dict) and block.get('status') == 'refused'
+            and block.get('refusal') == 'allowance_exhausted' and _spent_notice(env.get('upgrade')))
+
+
+def _pr_unread_row(r):
+    """A requirement row the compiler would have read and did not (`requirements_compiler.candidates`, with no
+    `compiled` reading): not established, a candidate reason class, a sentence."""
+    return (r.get('state') == 'not_established' and r.get('reason_class') in _PR_COMPILE_CANDIDATES
+            and isinstance(r.get('sentence'), str) and bool(r['sentence'].strip()) and 'compiled' not in r)
+
+
 # Issue #2651: the footer's link to the check's proof tree, served by the API (`GET /v1/trees/{id}?exp=&sig=`). The
 # suffix is where layer 2 appends its formal-model status (" · formal model current"); layer 1 writes none.
 PR_TREE_LINE = 'Proof tree: %d of %d checks proven%s →'
@@ -3110,7 +3166,9 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     table: the rule, labelled by its requirement id, and what Assure checked for it), Not checked yet (one plain
     sentence per remaining rule for its reason class, "nothing for you to do" when the class is Symbolia's); then a
     rule, the proof tree's line when `tree` carries a validated tree_url (`pr_tree_line`, issue #2651), and one
-    closing line (`_pr_closing`) under it. Deterministic: closed templates over the envelope's own words,
+    closing line (`_pr_closing`) under it. A free account whose once-only USD 1 is spent (`upgrade.notice`) reads one
+    line above that rule (`pr_spent_line`), and a requirement row the spent balance left unread says so on its "Not
+    checked yet" row (PR_SPENT_ROW). Deterministic: closed templates over the envelope's own words,
     each escaped and bounded with `esc`; the one link is built from the validated repository, commit and locator."""
     env = envelope if isinstance(envelope, dict) else {}
     rd = pr_reading(env)
@@ -3146,6 +3204,9 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
                 rule = '**%s:**' % esc(u['name'] or u['label'])
             out.append('- %s %s.' % (rule, esc(u['words'])))
         out.append('')
+    spent = pr_spent_line(env)                   # the Director, 14 Oct 2026: the spent free balance, above the footer
+    if spent is not None:
+        out += [spent, '']
     out.append('---')
     line = pr_tree_line(tree, tree_bases)       # issue #2651: only for a verdict that carries a validated tree_url
     if line is not None:

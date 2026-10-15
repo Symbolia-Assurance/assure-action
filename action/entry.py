@@ -235,6 +235,17 @@ PROPOSAL_LINE = ('Assure drafted a declaration from your database: %(leaves)d le
                  'to decide %(rows)d rows that need intent.')
 PROPOSAL_FILES_LINE = ('The draft is %(proposal)s (commit its `declaration` object after you confirm each key its '
                        '`confirm` list names), with %(draft)s beside it. A proposal changes no reading.')
+# Issue #2934: once Assure's pull request is open; the observed run reads the merged file (issue #2928 declared_reading)
+PROPOSED_LINE = ('Assure drafted a declaration from your database: %(leaves)d leaves proposed, %(confirm)d to confirm '
+                 '— merge Assure\'s proposal pull request; the next check then also reads postgresql-declared-model '
+                 'beside this reading, to decide %(rows)d rows that need intent.')
+PROPOSAL_NO_READING = ' A proposal changes no reading.'    # PROPOSAL_FILES_LINE's end; issue #2934: dropped once
+# the pull request exists
+PROPOSAL_UNCHANGED = ' The verdict, its file and the exit never change; the pull request adds no output.'
+# Issue #2934: the observed profile's pull request body leads with what merging it decides, never "bounded by"
+OBSERVED_LEAD = ('Assure drafted `%(rel)s` from %(source)s. Merging it commits the declaration; the next check then '
+                 'also reads `postgresql-declared-model` beside this reading, to decide the %(rows)d rows that need '
+                 'intent.')
 # issue #2892: action.yml's upload-artifact step ships the draft under this name; the section links the run's artifacts
 REQUIREMENTS_DRAFT_ARTIFACT = 'assure-requirements-draft'
 PROPOSAL_ARTIFACT_LINE = 'This run uploads %(draft)s as its %(artifact)s artifact: <%(url)s>.'
@@ -1000,6 +1011,74 @@ def _checkout_file(top, rel, cap):
         raise Refusal('bad_input', '%s could not be read' % rel) from None
 
 
+# issue #2928: the declared profile an observed profile's run also checks when intent is committed in the checkout
+OBSERVED_DECLARED = {'postgresql-observed-baseline': DECLARED_PROFILE}
+DECIDED = ('holds', 'fails', 'deviates')
+BOTH_LINE = ('decided %(n)d of %(m)d rows across both readings (%(observed)s %(a)d of %(b)d; %(declared)s %(c)d of '
+             '%(d)d, with `%(intent)s`)')
+
+
+# REFUTATION-r3 HIGH-1: the fail-on words the declared profile accepts (`serve.envelope.listed_fail_on_words` of its row;
+# the public tree ships no profile row, so a test holds the two equal)
+DECLARED_FAIL_ON = ('fails', 'representation', 'missing_method', 'missing_premise', 'not_evaluated', 'not_collected',
+                    'unresolved-security', 'never')
+
+
+def declared_fail_on(text):
+    """The observed run's fail-on for the declared check: `never` alone as given, else only the words the declared
+    profile accepts (an observed-only word such as `deviates` is dropped, never sent to be refused); None (the default,
+    `fails`) when none is left or nothing was given. The declared reading's exit is informational either way."""
+    if not isinstance(text, str):
+        return None
+    words = [w.strip().lower() for w in text.split(',') if w.strip()]
+    if words == ['never']:
+        return 'never'
+    return ','.join(w for w in words if w in DECLARED_FAIL_ON and w != 'never') or None
+
+
+def _decided(verdict):
+    """{row id: decided} for the verdict's rows that carry an id; decided is holds, fails or deviates, and never a row
+    the checker kept on a machine it reports refused (`render.kept_on_refused`: every surface reads it not observed)."""
+    out = {}
+    for row in verdict.get('rows') or ():
+        if isinstance(row, dict) and isinstance(row.get('id'), str):
+            out[row['id']] = out.get(row['id'], False) or (row.get('status') in DECIDED
+                                                            and not render.kept_on_refused(verdict, row))
+    return out
+
+
+def both_readings_line(observed, declared, intent):
+    """Issue #2928: the first line of a run that read committed intent; N counts ids decided in either verdict, M the
+    union of ids, so N >= c."""
+    o, d = _decided(observed), _decided(declared)
+    union = set(o) | set(d)
+    return BOTH_LINE % {'n': sum(1 for k in union if o.get(k) or d.get(k)), 'm': len(union),
+                        'observed': _pid(observed), 'a': sum(o.values()), 'b': len(o),
+                        'declared': _pid(declared), 'c': sum(d.values()), 'd': len(d), 'intent': intent}
+
+
+def _pid(verdict):
+    pid = verdict.get('profile')
+    return pid if isinstance(pid, str) and re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,63}', pid) else 'an unnamed profile'
+
+
+def demote_headings(md):
+    """Each markdown heading one level deeper (`##` to `###`), no further."""
+    return re.sub(r'(?m)^(#{1,5}) ', r'#\1 ', md)
+
+
+def declared_markdown(declared, profile, intent, charged_two):
+    """Issue #2928: the "Declared reading" section; a Refusal is "not measured (<reason>)", never a count."""
+    head = '\n### Declared reading (%s, with `%s`)\n\n' % (profile, intent)
+    if isinstance(declared, Refusal):
+        return head + 'declared reading: not measured (%s).\n' % render.esc(declared.reason)
+    note = ('This reading is informational: the verdict file, the outputs and the exit stay the observed reading\'s '
+            'until you set `profile: %s`.' % profile)
+    if charged_two:
+        note += ' This run submitted two checks: two checks charged.'
+    return head + note + '\n\n' + demote_headings(render.summary_markdown(declared))
+
+
 def _raw_bounded(raw, name, cap):
     """`raw`/`name`'s bytes when it is a regular file of at most `cap` bytes, else None (the bundle refuses it)."""
     try:
@@ -1031,17 +1110,20 @@ def run_artifacts_url(env):
     return '%s/%s/actions/runs/%s#artifacts' % (server.rstrip('/'), repo, run_id)
 
 
-def proposal_markdown(counts, artifacts_url=None):
+def proposal_markdown(counts, artifacts_url=None, proposed=False):
     """The job summary's short section for a written proposal: fixed words and three counts, no customer text; with
-    `artifacts_url` (`run_artifacts_url`), one more line naming the run artifact the draft is uploaded as."""
+    `artifacts_url` (`run_artifacts_url`), one more line naming the run artifact the draft is uploaded as; with
+    `proposed` (issue #2934: the pull request exists) it no longer says a proposal changes no reading."""
     files = PROPOSAL_FILES_LINE % {'proposal': PROPOSAL_FILE, 'draft': REQUIREMENTS_DRAFT_FILE}
+    if proposed:
+        files = files[:-len(PROPOSAL_NO_READING)] + PROPOSAL_UNCHANGED
     if artifacts_url is not None:
         files += '\n\n' + PROPOSAL_ARTIFACT_LINE % {'draft': REQUIREMENTS_DRAFT_FILE,
                                                     'artifact': REQUIREMENTS_DRAFT_ARTIFACT, 'url': artifacts_url}
-    return '\n### Declaration proposal\n\n%s %s\n' % (PROPOSAL_LINE % counts, files)
+    return '\n### Declaration proposal\n\n%s %s\n' % ((PROPOSED_LINE if proposed else PROPOSAL_LINE) % counts, files)
 
 
-def write_proposal(verdict, files, directory, say, artifacts_url=None):
+def write_proposal(verdict, files, directory, say, artifacts_url=None, proposed=False):
     """On a postgresql-observed-baseline verdict: PROPOSAL_FILE and REQUIREMENTS_DRAFT_FILE written in `directory`
     (beside the verdict file) from `files`, and the summary section (`proposal_markdown`, with `artifacts_url`)
     returned; '' on any other profile, when nothing could be drafted, or when a file could not be written (one
@@ -1066,7 +1148,7 @@ def write_proposal(verdict, files, directory, say, artifacts_url=None):
         say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
                                                      % type(w).__name__))
         return ''
-    return proposal_markdown(counts, artifacts_url)
+    return proposal_markdown(counts, artifacts_url, proposed)
 
 
 def _scratch(env):
@@ -1207,8 +1289,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'compile_requirements': True, 'draft': None, 'files': None, 'goals': [], 'pg_proposal': None,
-             'pg_checkout': None, 'pg_checkout_rel': None, 'requirements_text': [], 'tree': None}
+             'compile_requirements': True, 'draft': None, 'proposed': False, 'files': None, 'goals': [],
+             'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
+             'requirements_text': [], 'tree': None, 'declared': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1343,13 +1426,57 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             ckw = None
         else:
             ckw = collect_kw(collect, inputs)
+        held = []
         verdict, ignored, state['withheld'] = local_mode.run(
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
             collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
             on_withheld=lambda counts: say(WITHHELD_LINE % {'withheld': withhold.describe(counts)}), on_collected=session,
-            is_mysql=is_mysql, root=root)       # issue #206: the identity producer's tree, as run_api gives it
+            is_mysql=is_mysql, root=root, on_bundle=held.append)   # issue #206: the identity producer's tree
+
+        def declared_check(pid, files, counts):  # issue #2928: the same withheld bundle, never a second pass
+            work = state['scratch'] / 'declared'
+            work.mkdir(mode=0o700)
+            got = bundle.Collected(files=files, ignored=list(held[0].ignored), withheld=counts, records=held[0].records)
+            return local_mode.run(
+                engine=engine, inputs=dict(inputs, profile=pid, scope=None, scope_binding=None),
+                fail_on_text=declared_fail_on(inputs['fail_on']), conn=None, allow_partial=inputs['allow_partial'],
+                collect_kw=None, scratch=work, cwd=cwd, check_id=check_id, load_checker=load_checker, check_timeout=check_timeout,
+                limits=limits, is_mysql=False, root=root, collected=got)[0]
+        declared_reading(inputs['profile'], held[0] if held else None, declared_check, limits, 'checker_error')
         return dict(verdict, charged=False), ignored             # issue #1103: no API was contacted; nothing charged
+
+    def declared_reading(profile, collected, check, lim, unexpected):
+        """Issue #2928: on an observed profile with intent committed in the checkout, `check(declared profile, the same
+        withheld files plus raw/declaration.json = the committed bytes with their literals withheld in the snapshot's
+        numbering, counts)` (`withhold.with_declaration`); `state['declared']` is (profile, verdict or Refusal, the
+        checkout path read), None when the profile has no declared one or nothing is committed. REFUTATION-r4 HIGH-1:
+        the path named is the one `checkout_declaration_at` read (#2927's own path first). Never raises: an unreadable
+        intent file or a refused or failed declared check is a typed Refusal shown in its section."""
+        pid = OBSERVED_DECLARED.get(profile)
+        if pid is None or collected is None:
+            return
+        rel = declaration_draft.CHECKOUT_PATH
+        try:
+            try:
+                at = checkout_declaration_at(Path(env.get('GITHUB_WORKSPACE') or cwd), (lim or bundle.LIMITS).file_bytes)
+            except Refusal as e:                  # the refused file is the one its reason names
+                rel = next((r for r in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH)
+                            if str(e.reason).startswith(r + ' ')), rel)
+                raise
+            if at is None:
+                return
+            rel, data = at
+            files, counts = withhold.with_declaration(collected, data)
+            say('Assure: declared check: %s' % withhold.describe(counts))
+            got = check(pid, files, counts)
+            if not isinstance(got, dict) or got.get('schema') != VERDICT_SCHEMA:
+                raise Refusal(unexpected, 'no verdict envelope')
+        except Refusal as e:
+            got = Refusal(e.outcome, scrub(e.reason))
+        except Exception as e:  # typed, never a traceback; the class name only
+            got = Refusal(unexpected, 'the declared check failed unexpectedly (%s)' % type(e).__name__)
+        state['declared'] = (pid, got, rel)
 
     def manifest_written(written):
         if written is not None:
@@ -1399,19 +1526,61 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token) if token else None
                 got = declaration_draft.propose(d['top'], d['rel'], d['data'], d['record'], env, tmp, github,
                                                 **d.get('words', {}))
-                told = 'proposed in pull request #%d (%s), from %s into the base branch (commit %s); merging it accepts it' % (
-                    got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12])
+                told = 'proposed in pull request #%d (%s), from %s into the base branch (commit %s); merging it %s' % (
+                    got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12],
+                    'commits the declaration' if d.get('observed') else 'accepts it')
+                state['proposed'] = True
             except Refusal as e:
+                if d.get('observed') and e.reason.startswith(declaration_draft.PUSH_REFUSED):
+                    # REFUTATION-r1 HIGH-2: a `contents: read` token (the documented observed jobs, a fork) is not
+                    # asked to propose; main's files and section beside the verdict stay, with no warning
+                    return 'Assure: declaration proposal: not proposed (%s)' % _cmd_data(scrub(e.reason)), '', ''
                 told = 'not proposed (%s); the draft is below' % scrub(e.reason)
                 say('::warning title=Assure declaration::%s' % _cmd_data(told))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
+            if d.get('observed'):                     # issue #2934: an observed verdict is not bounded by the draft
+                md = '\n### Declaration pull request\n\n%s.\n' % render.esc(told[:1].upper() + told[1:])
+                if not state['proposed'] and d.get('shown') is not None:   # REFUTATION-r6 MEDIUM-2: withheld only
+                    md += '\n```json\n%s```\n' % d['shown'].decode('utf-8')
+                return 'Assure: declaration proposal: %s' % _cmd_data(told), md, ''
             md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
                                                     *(['the collected catalog snapshot'] if d.get('words') else []))
             if told.startswith('not proposed'):
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
         return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
                 declaration_draft.OUTPUT_BOUNDED + '\n')
+
+    def observed_draft(verdict):
+        """Issue #2934: on PROPOSAL_PROFILE inside a git checkout with nothing committed at the intent path (neither
+        DECLARED_CHECKOUT_PATH nor `.assure/declaration.json`, `checkout_declaration`), the draft from the collector's own
+        snapshot and sidecar before withholding (`state['observed_raw']`, REFUTATION-r1 HIGH-3: the literals as written,
+        as `pg_declare` drafts), recorded to be proposed at DECLARED_CHECKOUT_PATH as `pg_declare` records its own."""
+        if state['draft'] is not None or not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE \
+                or not isinstance(state['observed_raw'], dict):
+            return
+        if not str(env.get('GITHUB_TOKEN') or '').strip():   # no workflow token: main's files and section, silently
+            return
+        top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd()), env)
+        try:
+            if top is None or checkout_declaration(top, 0) is not None:
+                return
+            drafted = draft_proposal(state['observed_raw'])
+        except Exception:  # a present but unreadable declaration is never drafted over; main's files and section stay
+            return
+        if drafted is None:
+            return
+        record = drafted[0]
+        try:            # REFUTATION-r6 MEDIUM-2: the summary shows only the withheld draft (write_proposal's), never `data`
+            withheld = draft_proposal(state['files']) if isinstance(state['files'], dict) else None
+        except Exception:  # nothing is shown; the file beside the verdict says the same
+            withheld = None
+        state['draft'] = {'record': record, 'data': declaration_draft.dumps(record['declaration']), 'top': top,
+                          'rel': DECLARED_CHECKOUT_PATH, 'observed': True,
+                          'shown': None if withheld is None else declaration_draft.dumps(withheld[0]['declaration']),
+                          'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE, 'lead': OBSERVED_LEAD % {
+                              'rel': DECLARED_CHECKOUT_PATH, 'source': DECLARED_SOURCE,
+                              'rows': proposal_counts(record, verdict)['rows']}}}
 
     def pg_declare(top, cap):
         """Issue #2435: `declare` for `action.collect._gather` on postgresql-declared-model: the checkout's
@@ -1436,6 +1605,24 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 declaration_draft.NAME, DECLARED_SOURCE, len(record['confirm'])))
             return data
         return declare
+
+    def observed_raw(files):
+        """Issue #2934: the snapshot and sidecar of `files` (not yet withheld) kept for `observed_draft`."""
+        state['observed_raw'] = {n: bytes(files[n]) for n in (PROPOSAL_SNAPSHOT, PROPOSAL_SIDECAR) if n in files}
+
+    def observed_bundle(collected, profile):
+        """`collected` unchanged; on PROPOSAL_PROFILE its raw snapshot and sidecar are kept first (`observed_raw`), so
+        the artefacts path still reads into `withhold.apply` on one line (tests/serving/test_faithful.py)."""
+        if profile == PROPOSAL_PROFILE:
+            observed_raw(collected.files)
+        return collected
+
+    def observed_collect(cap):
+        """`observe` for `action.collect._gather` on PROPOSAL_PROFILE: writes nothing, keeps the raw snapshot."""
+        def observe(raw):
+            observed_raw({n: b for n in (PROPOSAL_SNAPSHOT, PROPOSAL_SIDECAR)
+                          if (b := _raw_bounded(raw, n[len('raw/'):], cap)) is not None})
+        return observe
 
     def run_api():
         if out_error is not None:
@@ -1499,7 +1686,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             art = Path(inputs['artefacts'])
             art = art if art.is_absolute() else Path(cwd) / art
             try:
-                collected = withhold.apply(bundle.from_directory(art, allow, lim), allow)
+                collected = withhold.apply(observed_bundle(bundle.from_directory(art, allow, lim), inputs['profile']), allow)
             except Refusal as e:
                 raise _with_layout(e, allow, art) from None
             manifest_written(repository_manifest.complete(collected, inputs["profile"], art, env))
@@ -1523,7 +1710,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             work.mkdir(mode=0o700)
             pg = inputs['profile'] == DECLARED_PROFILE        # issue #2435: the checkout's declaration, else a draft
             top = Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd())
-            kw = {'declare': pg_declare(top, lim.file_bytes)} if pg else {}
+            kw = {'declare': pg_declare(top, lim.file_bytes)} if pg else \
+                {'observe': observed_collect(lim.file_bytes)} if inputs['profile'] == PROPOSAL_PROFILE else {}
             collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs),
                                         **kw)
             if pg and state['pg_checkout'] is not None:
@@ -1546,6 +1734,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if isinstance(verdict, dict):
             state['server_check_id'] = verdict.get('check_id')
         check_verdict(verdict)
+        declared_reading(inputs['profile'], collected, lambda pid, files, counts: client.submit(   # issue #2928
+            pid, files, declared_fail_on(inputs['fail_on']), limits=lim, key_from_bundle=not state['fresh_check'],
+            **extra), lim, 'api_error')
         if state['report_on']:                    # serve-014: never changes the verdict, its file or its exit
             state['report_url'] = client.base + '/v1/checks/%s/report.html' % verdict['check_id']
             try:
@@ -1643,14 +1834,32 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         summary = render.upgrade_markdown(verdict) + summary   # launch 2026-10-12: the server's upgrade line, first
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
+    observed_draft(verdict)                                     # issue #2934: proposed like the declared draft
     decl_line, decl_md, decl_out = declaration_note()           # serve-102: the draft bounds this verdict
     summary += decl_md
     summary += declaration_draft.intent_markdown(inputs_profile, drafted=state['draft'] is not None)   # issue #2926
+    both = None
+    if state['declared'] is not None:               # issue #2928: informational; never the verdict, its file or exit
+        pid, got, intent = state['declared']           # REFUTATION-r4 HIGH-1: the file read is the file named
+        before = summary
+        try:
+            summary += declared_markdown(got, pid, intent, state['mode'] == 'api' and isinstance(got, dict))
+            if isinstance(got, dict):
+                both = both_readings_line(verdict, got, intent)
+                head, _, rest = both.partition(' (')
+                up = render.upgrade_markdown(verdict)     # REFUTATION-r3 MEDIUM-3: the upgrade line stays at the top
+                body = summary[len(up):] if up and summary.startswith(up) else summary
+                summary = up + '**Assure: %s** (%s\n\n' % (head, rest) + body
+        except Exception as e:  # the class name only, never a value
+            both = None                        # REFUTATION-r4 LOW: the line sits in its section, under its head
+            summary = before + declared_markdown(Refusal('checker_error', 'the declared verdict could not be rendered '
+                                                         '(%s)' % type(e).__name__), pid, intent, False)
     try:
         _write_file(out_path, bundle.dumps(verdict))
     except (OSError, ValueError) as w:
         return failed(Refusal('checker_error', 'the verdict file could not be written (%s)' % type(w).__name__))
-    proposal_md = write_proposal(verdict, state['files'], out_path.parent, say, run_artifacts_url(env))  # #1186 part 2
+    proposal_md = write_proposal(verdict, state['files'], out_path.parent, say, run_artifacts_url(env),  # #1186 part 2
+                                 state['proposed'])                                                # issue #2934
     summary += proposal_md
     draft_out = ('requirements-draft=%s\n' % (Path(out_text).parent / REQUIREMENTS_DRAFT_FILE)  # issue #2892
                  if proposal_md else '')
@@ -1672,6 +1881,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         _append(env.get('GITHUB_STEP_SUMMARY'), summary)
     except OSError as w:
         say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
+    if both is not None:                               # issue #2928: the verdict's first notice reads both readings
+        say('::notice title=Assure::%s' % _cmd_data('Assure: ' + both, cap=None))
     if env.get('GITHUB_EVENT_NAME') in PR_EVENTS and str(env.get('GITHUB_TOKEN') or '').strip():
         try:                                           # issue #2189: never changes the verdict, its file or its exit
             client = state.get('client')
