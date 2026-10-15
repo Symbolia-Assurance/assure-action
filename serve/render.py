@@ -2832,16 +2832,27 @@ def _pr_locators(env, req, row):
     return seen[:MAX_PR_LOCATORS]
 
 
-def _pr_where(locator, repository=None, commit=None):
-    """A file:line locator as a link to the commit's blob on GitHub when the repository and commit are known and the
-    locator is a repository path and line ('[`app/x.py:7`](https://github.com/<repo>/blob/<commit>/app/x.py#L7)'),
-    else as a code span; any other locator is escaped text. The link is built only from validated parts."""
-    loc = str(locator)
-    m = _PR_LOCATOR.fullmatch(loc)
+def blob_url(locator, repository=None, commit=None):
+    """'https://github.com/<repo>/blob/<commit>/<path>#L<line>' for a repository path and line locator when the
+    repository and commit are known and every part validates; None otherwise. The one place a blob link is built
+    (the pull request comment and the proof tree, serve/proof_tree.py)."""
+    m = _PR_LOCATOR.fullmatch(str(locator))
     repo_ok = (isinstance(repository, str) and _PR_REPOSITORY.fullmatch(repository) is not None
                and '..' not in repository)
     if m and repo_ok and isinstance(commit, str) and _PR_COMMIT.fullmatch(commit):
-        return '[`%s`](https://github.com/%s/blob/%s/%s#L%s)' % (loc, repository, commit, m.group(1), m.group(2))
+        return 'https://github.com/%s/blob/%s/%s#L%s' % (repository, commit, m.group(1), m.group(2))
+    return None
+
+
+def _pr_where(locator, repository=None, commit=None):
+    """A file:line locator as a link to the commit's blob on GitHub when the repository and commit are known and the
+    locator is a repository path and line ('[`app/x.py:7`](https://github.com/<repo>/blob/<commit>/app/x.py#L7)',
+    `blob_url`), else as a code span; any other locator is escaped text. The link is built only from validated parts."""
+    loc = str(locator)
+    m = _PR_LOCATOR.fullmatch(loc)
+    url = blob_url(loc, repository, commit)
+    if url is not None:
+        return '[`%s`](%s)' % (loc, url)
     if m or REPO_PATH_RE.fullmatch(loc):
         return '`%s`' % loc
     return esc(loc)
@@ -3060,7 +3071,36 @@ def _pr_closing(env, commit):
         words, " It ran none of the app's code." if _pr_static(env) else '', profile, named)
 
 
-def pr_comment_markdown(envelope, commit=None, repository=None):
+# Issue #2651: the footer's link to the check's proof tree, served by the API (`GET /v1/trees/{id}?exp=&sig=`). The
+# suffix is where layer 2 appends its formal-model status (" · formal model current"); layer 1 writes none.
+PR_TREE_LINE = 'Proof tree: %d of %d checks proven%s →'
+TREE_URL_PATH = re.compile(r'/v1/trees/[0-9a-f]{32}\?exp=[1-9][0-9]{0,11}&sig=[0-9a-f]{64}')
+_TREE_BASE = re.compile(r'https://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?|http://(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?')
+
+
+def tree_url_ok(url, bases=()):
+    """True when `url` is '<base>/v1/trees/<32 hex>?exp=<unix>&sig=<64 hex>' for one of `bases` (each an https origin,
+    or http on a loopback host), nothing else in it; the only shape the comment links to."""
+    if not isinstance(url, str):
+        return False
+    for base in bases:
+        base = str(base or '').rstrip('/')
+        if _TREE_BASE.fullmatch(base) and url.startswith(base) and TREE_URL_PATH.fullmatch(url[len(base):]):
+            return True
+    return False
+
+
+def pr_tree_line(tree, bases=()):
+    """'[Proof tree: X of Y checks proven →](<url>)' for `tree` {url, proven, total[, suffix]} whose url passes
+    `tree_url_ok` for `bases` and whose counts are integers with 0 <= X <= Y; None otherwise (no line)."""
+    t = tree if isinstance(tree, dict) else {}
+    x, y = t.get('proven'), t.get('total')
+    if type(x) is not int or type(y) is not int or not 0 <= x <= y or not tree_url_ok(t.get('url'), bases):
+        return None
+    return '[%s](%s)' % (PR_TREE_LINE % (x, y, ''), t['url'])
+
+
+def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_bases=()):
     """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
     finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
     entries, each headed in words: one "Broken: <rule>" per broken rule (what the reading says the change does, each
@@ -3069,7 +3109,8 @@ def pr_comment_markdown(envelope, commit=None, repository=None):
     called broken), Other findings (not proven, not resolved under strict, stopped by your choice), Still holds (a
     table: the rule, labelled by its requirement id, and what Assure checked for it), Not checked yet (one plain
     sentence per remaining rule for its reason class, "nothing for you to do" when the class is Symbolia's); then a
-    rule and one closing line (`_pr_closing`) under it. Deterministic: closed templates over the envelope's own words,
+    rule, the proof tree's line when `tree` carries a validated tree_url (`pr_tree_line`, issue #2651), and one
+    closing line (`_pr_closing`) under it. Deterministic: closed templates over the envelope's own words,
     each escaped and bounded with `esc`; the one link is built from the validated repository, commit and locator."""
     env = envelope if isinstance(envelope, dict) else {}
     rd = pr_reading(env)
@@ -3105,7 +3146,11 @@ def pr_comment_markdown(envelope, commit=None, repository=None):
                 rule = '**%s:**' % esc(u['name'] or u['label'])
             out.append('- %s %s.' % (rule, esc(u['words'])))
         out.append('')
-    out += ['---', '<sub>%s</sub>' % _pr_closing(env, commit)]
+    out.append('---')
+    line = pr_tree_line(tree, tree_bases)       # issue #2651: only for a verdict that carries a validated tree_url
+    if line is not None:
+        out += [line, '']
+    out.append('<sub>%s</sub>' % _pr_closing(env, commit))
     return '\n'.join(out) + '\n'
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

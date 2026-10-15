@@ -175,7 +175,7 @@ if str(_ROOT) not in sys.path:
 
 from action import client as client_mod, declaration_draft, http_identity, repository_manifest, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, GitHub, allow_list, canonical_fail_on  # noqa: E402
-from serve import FLAGS, bundle, is_development, markers, render  # noqa: E402
+from serve import FLAGS, bundle, is_development, markers, proof_tree, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
@@ -217,6 +217,10 @@ REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
 # Issue #1186 (coordination 7588): the draft's typed companion, written beside it; read beside the requirements file
 # that is sent (`typed_requirements`)
 REQUIREMENTS_TYPED_FILE = 'assure-requirements-typed.json'
+# Issue #2651: the check's proof tree, written beside the verdict for every account (`write_proof_tree`); the pull
+# request comment links the API's page for it only when the verdict carries a `tree_url` (Premium and above)
+PROOF_TREE_HTML = 'assure-proof-tree.html'
+PROOF_TREE_JSON = 'assure-proof-tree.json'
 MAX_TYPED_BYTES = 256 * 1024
 PROPOSAL_SNAPSHOT = 'raw/catalog_snapshot.json'
 PROPOSAL_SIDECAR = 'raw/COLLECTION-SIDECAR.json'
@@ -549,18 +553,20 @@ def _pull_number(env):
     return n if type(n) is int and n > 0 else None
 
 
-def post_pr_comment(env, verdict, github):
+def post_pr_comment(env, verdict, github, tree=None, tree_bases=()):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
     looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
     A GitHub answer that is not 2xx is `api_error` naming its status, with `detail.status` (a 403 is the missing
-    `pull-requests: write`; `main` prints it as one notice)."""
+    `pull-requests: write`; `main` prints it as one notice). Issue #2651: `tree` ({url, proven, total}) adds the
+    footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`)."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
         return None
     repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or number is None:
         return None
-    body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo)
+    body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
+                                      tree_bases=tree_bases)
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
@@ -582,7 +588,29 @@ def post_pr_comment(env, verdict, github):
     return 'posted'
 
 
-def requirements_upload(env, cwd, goals=None):
+def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, commit=None):
+    """Issue #2651: the check's proof tree (`serve.proof_tree.build` over the verdict, the goals sent and the
+    requirements text as read) written beside the verdict as PROOF_TREE_JSON and PROOF_TREE_HTML, for every account;
+    returns the tree. The repository and commit make the tree's blob links only when they validate."""
+    tree = proof_tree.build(verdict, goals=list(goals or ()) or None, requirements_text=text,
+                            proposal=_proposal_module() if goals else None, repository=repository, commit=commit)
+    _write_file(Path(directory) / PROOF_TREE_JSON, (json.dumps(tree, indent=2, sort_keys=True, ensure_ascii=False)
+                                                    + '\n').encode('utf-8'))
+    _write_file(Path(directory) / PROOF_TREE_HTML, proof_tree.render_html(tree).encode('utf-8'))
+    return tree
+
+
+def pr_tree(verdict, tree):
+    """{url, proven, total} for the comment's proof tree line: the verdict's own `tree_url` (the API adds it on
+    Premium and above; a free account's verdict carries none, so no line) and the tree's counts; None without either."""
+    url = verdict.get('tree_url') if isinstance(verdict, dict) else None
+    if not isinstance(url, str) or not isinstance(tree, dict):
+        return None
+    x, y = proof_tree.proven(tree)
+    return {'url': url, 'proven': x, 'total': y}
+
+
+def requirements_upload(env, cwd, goals=None, source=None):
     """serve-019 (coordination 2136): ({requirements?, repository?, commit?, provenance?}, notice or None). The text is
     the `requirements` input's file (relative to the working directory): one that is missing, unreadable, a link,
     not a regular file, beyond the bounds or not UTF-8 is `bad_input` before anything is collected or sent. The input
@@ -592,19 +620,30 @@ def requirements_upload(env, cwd, goals=None):
     go as repository and commit with `provenance: runner`; the API reads them as metadata, never as authority.
     Issue #1186: a sent file with the draft's typed companion beside it goes through `typed_requirements`, and the
     notice then names the lines changed since they were compiled, if any; `goals`, a list when given, receives the
-    goals sent."""
-    out, notice, sent = {}, None, []
+    goals sent, and `source`, a list when given, the requirements text as read, before any goal was expanded (issue
+    #2651: the proof tree's goal lines). With goals sent, `requirement_goals` carries their goal map
+    (`proof_tree.goal_map`: each goal's sentence, its line in the text as read and its children's ids and plain
+    sentences), which the API keeps with the check for its proof tree."""
+    out, notice, sent, text = {}, None, [], None
     named = _plain(env, 'INPUT_REQUIREMENTS')
     if named == NONE_SENTINEL:                       # REFUTATION-034-R2 N5: send no text, print no notice
         pass
     elif named:
         path = Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named
-        out['requirements'], notice, sent = typed_requirements(_read_requirements(path), path.parent)
+        text = _read_requirements(path)
+        out['requirements'], notice, sent = typed_requirements(text, path.parent)
+    if sent and 'requirements' in out:       # issue #2651: the goal map, so the served proof tree shows the goals
+        try:                                 # a map beyond the bounds is not sent; the check runs as before
+            out['requirement_goals'] = bundle.check_goals(proof_tree.goal_map(sent, text), out['requirements'])
+        except Refusal:
+            pass
     repo, sha = str(env.get('GITHUB_REPOSITORY') or '').strip(), _head_commit(env)
     if repo and sha:
         out.update(bundle.upload_fields({'repository': repo, 'commit': sha, 'provenance': 'runner'}))
     if goals is not None:
         goals[:] = sent
+    if source is not None:
+        source[:] = [text] if isinstance(text, str) else []
     return out, notice
 
 
@@ -1124,7 +1163,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
              'compile_requirements': True, 'draft': None, 'files': None, 'goals': [], 'pg_proposal': None,
-             'pg_checkout': None}
+             'pg_checkout': None, 'requirements_text': [], 'tree': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1361,7 +1400,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         inputs = _inputs(env, conn, conn_error, collect, collector_dir, cwd, is_mysql=is_mysql)
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
-        upload, state['requirements_notice'] = requirements_upload(env, cwd, state['goals'])   # serve-019: before anything is sent
+        upload, state['requirements_notice'] = requirements_upload(env, cwd, state['goals'],
+                                                                   state['requirements_text'])   # serve-019: before anything is sent
         if 'requirements' in upload and not state['compile_requirements']:   # issue #2252: sent only when off
             upload['compile_requirements'] = False
         if state['requirements_notice']:
@@ -1565,6 +1605,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     except (OSError, ValueError) as w:
         return failed(Refusal('checker_error', 'the verdict file could not be written (%s)' % type(w).__name__))
     summary += write_proposal(verdict, state['files'], out_path.parent, say)      # issue #1186 part 2
+    try:                                               # issue #2651: never changes the verdict, its file or its exit
+        repo_name = str(env.get('GITHUB_REPOSITORY') or '').strip()
+        state['tree'] = write_proof_tree(verdict, out_path.parent, state['goals'],
+                                         (state['requirements_text'] or [None])[0], repo_name or None,
+                                         _head_commit(env))
+    except Exception as w:  # the class name only, never a value
+        say('::warning title=Assure::%s' % _cmd_data('the proof tree could not be written (%s)' % type(w).__name__))
     if state['pg_proposal'] is not None:              # issue #2435: the drafted declaration's record, beside the verdict
         try:
             _write_file(out_path.parent / PROPOSAL_FILE, (json.dumps(
@@ -1578,8 +1625,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
     if env.get('GITHUB_EVENT_NAME') in PR_EVENTS and str(env.get('GITHUB_TOKEN') or '').strip():
         try:                                           # issue #2189: never changes the verdict, its file or its exit
+            client = state.get('client')
             post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
-                                                 str(env.get('GITHUB_TOKEN')).strip()))
+                                                 str(env.get('GITHUB_TOKEN')).strip()),
+                            tree=pr_tree(verdict, state['tree']),
+                            tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()))
         except Refusal as e:
             if e.detail.get('status') == 403:          # the token cannot write comments: say the line to add, once
                 say('::notice title=Assure comment::%s' % _cmd_data(PR_COMMENT_NOTICE))

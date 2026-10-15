@@ -38,7 +38,7 @@ The collector never reads table contents, password hashes, key material or other
 
 The Action sends only files the profile reads. It fetches each profile's list of file names and size limits from the API first, and checks every file against that list in the runner. A file with another name, or over its limit, stays in the runner.
 
-The server deletes the collected facts when the check ends. It keeps the verdict for 30 days.
+The server deletes the collected facts when the check ends. On the Premium tier a sealed copy is kept for the formal shadow (see [DATA.md](DATA.md)). It keeps the verdict for 30 days.
 
 Both data-sending inputs are opt-in: with no inputs the Action asks for no report, so no verdict record goes to a third-party model, and uploads no `requirements.md`; set `report: true` to ask for the report, and name the file in the `requirements` input (for example `requirements: requirements.md`) to send its text. In `mode: api` the Action sends the text of the file you name (within 65536 bytes, 256 lines and 8192 bytes per line), your repository name and the commit (on a pull request, its head commit); the server keeps them with the check for 30 days. Setting `requirements` to `none` stops the requirements text only: the repository and the commit are still sent and kept with the check for 30 days. The Action reads the requirements text from the files your workflow checked out; the commit it sends is a label for the run, not the source of the text. On `pull_request` the checkout is the merge commit GitHub made, and on `pull_request_target` it is the base branch, while the commit sent is the pull request's head commit.
 

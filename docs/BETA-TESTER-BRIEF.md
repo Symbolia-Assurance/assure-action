@@ -45,7 +45,7 @@ Never send your configuration files, your connection string or your API key.
 
 ## What is kept
 
-Per [DATA.md](DATA.md): the collected facts are deleted when the check ends. The verdict is kept 30 days. Checker telemetry, with counts and statuses and no names or values from your system, is kept 12 months. On the free tier, using your facts to improve the checks is opt-in: nothing of yours is kept for it unless you opt in.
+Per [DATA.md](DATA.md): free-tier collected facts are deleted when the check ends. The verdict is kept 30 days. Checker telemetry, with counts and statuses and no names or values from your system, is kept 12 months. On the free tier, using your facts to improve the checks is opt-in: nothing of yours is kept for it unless you opt in.
 
 ## Contact
 

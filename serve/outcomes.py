@@ -194,7 +194,8 @@ FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', '
                     'server.server_version_num', 'policies', 'declared_predicate', 'collection.role', 'role',
                     'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
                     'provenance', 'sentence', 'kind', 'text', 'check_id', 'obligation', 'package', 'agent',
-                    'consent_follow_up', 'profile_wanted', 'stack', 'compile_requirements'})
+                    'consent_follow_up', 'profile_wanted', 'stack', 'compile_requirements',
+                    'requirement_goals'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',

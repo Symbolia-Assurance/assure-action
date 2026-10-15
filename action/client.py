@@ -163,7 +163,7 @@ def canonical_fail_on(text):
 
 
 def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requirements=None, repository=None,
-              commit=None, provenance=None, compile_requirements=None):
+              commit=None, provenance=None, compile_requirements=None, requirement_goals=None):
     """serve-023: the Idempotency-Key of one request, derived from its content: the first 32 hex of
     sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256,
     repository, commit, provenance, query}).
@@ -178,7 +178,7 @@ def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requi
     so a repeat under another fail-on is the same check, decided under the fail-on it sends. The key is a digest of the
     whole document, never the bundle digest itself. Issue #2252: `compile_requirements`, when sent, joins the document
     (absent otherwise, so every key made before it is unchanged): the same request with the reading off is another
-    check."""
+    check. Issue #2651: `requirement_goals_sha256` (`_digest_of` the goal map), when one is sent, joins it the same way."""
     manifest = [{'path': n, 'bytes': len(files[n]), 'sha256': hashlib.sha256(bytes(files[n])).hexdigest()}
                 for n in sorted(files)]
     req = None if requirements is None else hashlib.sha256(requirements.encode('utf-8')).hexdigest()
@@ -187,6 +187,8 @@ def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requi
            'commit': commit, 'provenance': provenance, 'query': query or ''}
     if compile_requirements is not None:
         doc['compile_requirements'] = compile_requirements
+    if requirement_goals is not None:
+        doc['requirement_goals_sha256'] = _digest_of(requirement_goals)
     return hashlib.sha256(bundle.canonical_json(doc)).hexdigest()[:32]
 
 
@@ -501,7 +503,8 @@ class Client:
 
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
                scope_binding=None, accepted_scope_ref=None, limits=None, requirements=None, repository=None,
-               commit=None, provenance=None, compile_requirements=None, key_from_bundle=False):
+               commit=None, provenance=None, compile_requirements=None, requirement_goals=None,
+               key_from_bundle=False):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
         built here under `limits` (default the serving limits) with the scope fields and the serve-019 requirements
@@ -515,9 +518,10 @@ class Client:
             body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                        scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                        requirements=requirements, repository=repository, commit=commit,
-                                       provenance=provenance, compile_requirements=compile_requirements)
+                                       provenance=provenance, compile_requirements=compile_requirements,
+                                       requirement_goals=requirement_goals)
         elif (scope, scope_binding, accepted_scope_ref, requirements, repository, commit,
-              provenance, compile_requirements) != (None,) * 8:
+              provenance, compile_requirements, requirement_goals) != (None,) * 9:
             raise ValueError('pass the scope fields or a built body, not both')
         path = '/v1/checks'
         query = {}
@@ -533,7 +537,7 @@ class Client:
             keyed = urllib.parse.urlencode({k: v for k, v in query.items() if k != 'fail_on'})
             idem = check_key(profile_id, files, keyed, scope=scope, scope_binding=scope_binding,
                              requirements=requirements, repository=repository, commit=commit, provenance=provenance,
-                             compile_requirements=compile_requirements)
+                             compile_requirements=compile_requirements, requirement_goals=requirement_goals)
         else:
             idem = secrets.token_hex(16)
         self._unavailable_waited = 0                 # REG-045..059: one budget of unavailability waits for this check
@@ -616,13 +620,14 @@ class Client:
 
     def lint(self, profile_id, files, fail_on=None, *, allow_partial=False, scope=None, scope_binding=None,
              accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None,
-             compile_requirements=None):
+             compile_requirements=None, requirement_goals=None):
         """serve-043: the free pre-flight of one upload (`POST /v1/lint`, serve/lint.py): the lint document (schema
         assure.serve.lint/v1) the API answers with. Nothing is charged and no check runs. Every other end is a Refusal."""
         body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                    scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                    requirements=requirements, repository=repository, commit=commit,
-                                   provenance=provenance, compile_requirements=compile_requirements)
+                                   provenance=provenance, compile_requirements=compile_requirements,
+                                   requirement_goals=requirement_goals)
         query = {}
         if fail_on:
             query['fail_on'] = canonical_fail_on(fail_on)

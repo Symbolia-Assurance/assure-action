@@ -58,7 +58,20 @@ SCOPE_FIELDS = (('scope', 'scope_missing'), ('scope_binding', 'scope_binding'), 
 # serve-019 (coordination 2136): the requirements upload fields, metadata beside the files and never a raw/ file. The
 # bounds are serve.requirements' own (a test holds them equal); this module never imports the matcher.
 # Issue #2252: `compile_requirements` (a boolean, only with `requirements`) false keeps the lines from Claude Haiku.
-REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance', 'compile_requirements')
+# Issue #2651 (layer 1 follow-up): `requirement_goals` (only with `requirements`) is the goal map of the typed rows the
+# text holds (serve.proof_tree `goal_map`): each goal's sentence, its requirements.md line and its children's ids and
+# plain sentences, each child a typed row of the text. Kept with the check for its proof tree, never matched.
+REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance', 'compile_requirements', 'requirement_goals')
+MAX_GOALS = 64
+MAX_GOAL_ROWS = 32
+
+
+def _goal_id(value):
+    """Whether `value` is a goal id: G and 1 to 6 digits, the first not 0."""
+    d = value[1:] if isinstance(value, str) and value.startswith('G') else ''
+    return 0 < len(d) <= 6 and d.isascii() and d.isdigit() and d[0] != '0'
+
+
 # issue #2126: the top-level keys from_request reads with `with_scope`, in the order its body-shape refusal names them;
 # the lint names the first 16 other keys a body holds as unknown_field findings and counts the rest (lint.py).
 BODY_FIELDS = ('profile', 'files') + tuple(k for k, _ in SCOPE_FIELDS) + REQUIREMENT_FIELDS
@@ -245,7 +258,7 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
                else '; it holds the key %s' % extra[0])
         raise Refusal('bad_input', 'the body must be an object with exactly the keys profile and files%s%s'
                       % (' (and optionally scope, scope_binding, accepted_scope_ref, requirements, repository, commit, '
-                         'provenance and compile_requirements)' if with_scope else '', why),
+                         'provenance, compile_requirements and requirement_goals)' if with_scope else '', why),
                       malformation=malformation('body_shape', pointer=at))
     profile_id, enc = doc['profile'], doc['files']
     if not isinstance(profile_id, str) or not isinstance(enc, dict):
@@ -360,6 +373,60 @@ def upload_fields(fields):
         if type(fields['compile_requirements']) is not bool:
             raise bad('compile_requirements must be true or false', 'compile_requirements')
         out['compile_requirements'] = fields['compile_requirements']
+    if 'requirement_goals' in fields:              # issue #2651: the proof tree's goals, kept with the check
+        if 'requirements' not in fields:
+            raise bad_goals('requirement_goals names goals of the requirements text; send it only with requirements')
+        out['requirement_goals'] = check_goals(fields['requirement_goals'], out['requirements'])
+    return out
+
+
+def bad_goals(why):
+    return Refusal('bad_input', why, malformation=malformation('requirements', field='requirement_goals',
+                                                               pointer=json_pointer('requirement_goals')))
+
+
+def _goal_text(value):
+    """Whether `value` is one line of UTF-8 text, trimmed, within the requirement line bound."""
+    if not isinstance(value, str) or value.strip() != value or any(c in value for c in '\r\n\x00'):
+        return False
+    try:
+        return 0 < len(value.encode('utf-8')) <= MAX_REQUIREMENT_LINE_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def check_goals(goals, text):
+    """Issue #2651: `goals`, the goal map of the typed rows `text` holds (serve.proof_tree `goal_map`), checked: a
+    list of 1..MAX_GOALS objects with exactly {id, english, line, rows}; `id` G<n>, each once; `english` one line of
+    text within the requirement line bound; `line` null or 1..MAX_REQUIREMENTS_LINES; `rows` 1..MAX_GOAL_ROWS pairs
+    [<id>.<k> in order, its plain sentence], each id once and each a typed row of `text` ('- <id> ['); the whole within
+    MAX_REQUIREMENTS_BYTES. `bad_input` (kind `requirements`, field `requirement_goals`) otherwise; its content is
+    never quoted."""
+    if not isinstance(goals, list) or not 0 < len(goals) <= MAX_GOALS:
+        raise bad_goals('requirement_goals must be a list of 1 to %d goals' % MAX_GOALS)
+    typed = set()                                   # the ids of the typed rows: '- G<n>.<k> [' at a line's start
+    for line in text.split('\n'):
+        rid = line[2:].split(' [', 1)[0] if line.startswith('- ') and ' [' in line else ''
+        gid, _, k = rid.partition('.')
+        if _goal_id(gid) and _goal_id('G' + k):
+            typed.add(rid)
+    seen, out = set(), []
+    for n, g in enumerate(goals, 1):
+        why = 'requirement_goals goal %d must be {id, english, line, rows} with id G<n>, english one line, line null ' \
+              'or 1 to %d, and rows of [<id>.<k>, sentence] naming typed rows of the requirements' % (n, MAX_REQUIREMENTS_LINES)
+        if not (isinstance(g, dict) and set(g) == {'id', 'english', 'line', 'rows'} and isinstance(g['id'], str)
+                and _goal_id(g['id']) and g['id'] not in seen and _goal_text(g['english'])
+                and (g['line'] is None or type(g['line']) is int and 0 < g['line'] <= MAX_REQUIREMENTS_LINES)
+                and isinstance(g['rows'], list) and 0 < len(g['rows']) <= MAX_GOAL_ROWS):
+            raise bad_goals(why)
+        seen.add(g['id'])
+        for k, row in enumerate(g['rows'], 1):
+            if not (isinstance(row, list) and len(row) == 2 and row[0] == '%s.%d' % (g['id'], k)
+                    and row[0] in typed and _goal_text(row[1])):
+                raise bad_goals(why)
+        out.append({'id': g['id'], 'english': g['english'], 'line': g['line'], 'rows': [list(r) for r in g['rows']]})
+    if len(canonical_json(out)) > MAX_REQUIREMENTS_BYTES:
+        raise bad_goals('requirement_goals are more than %d bytes' % MAX_REQUIREMENTS_BYTES)
     return out
 
 
@@ -627,16 +694,18 @@ def dumps(obj):
 
 
 def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None,
-                 requirements=None, repository=None, commit=None, provenance=None, compile_requirements=None):
+                 requirements=None, repository=None, commit=None, provenance=None, compile_requirements=None,
+                 requirement_goals=None):
     """The upload body `{profile, files: {name: base64}}`, plus each of `scope`, `scope_binding` and
     `accepted_scope_ref` (serve-006 gap 1), of `requirements`, `repository`, `commit` and `provenance` (serve-019)
-    and of `compile_requirements` (issue #2252) that is not None; `oversize_input` when the encoded body passes the
-    body cap."""
+    and of `compile_requirements` (issue #2252) and `requirement_goals` (issue #2651) that is not None;
+    `oversize_input` when the encoded body passes the body cap."""
     doc = {'profile': profile_id,
            'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}}
     for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref),
                        ('requirements', requirements), ('repository', repository), ('commit', commit),
-                       ('provenance', provenance), ('compile_requirements', compile_requirements)):
+                       ('provenance', provenance), ('compile_requirements', compile_requirements),
+                       ('requirement_goals', requirement_goals)):
         if value is not None:
             doc[key] = value
     body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')
