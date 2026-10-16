@@ -197,6 +197,18 @@ def _missing(why):
     return Refusal('bad_input', '%s; %s' % (why, PERMISSIONS_SENTENCE))
 
 
+def proposal_base(env, github, repo):
+    """The branch a proposal targets: the pull request's base, else the repository's default branch. Raises Refusal
+    when the repository cannot be read."""
+    if is_pull_request(env) and str(env.get('GITHUB_HEAD_REF') or '').strip():
+        return str(env.get('GITHUB_BASE_REF') or '').strip()
+    status, doc = github.call('GET', '/repos/%s' % repo)
+    base = doc.get('default_branch') if status == 200 and isinstance(doc, dict) else None
+    if not isinstance(base, str) or not base:
+        raise _missing('the repository could not be read (HTTP %d)' % status)
+    return base
+
+
 def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository', lead=None):
     """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
@@ -211,13 +223,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         raise Refusal('bad_input', 'GITHUB_REPOSITORY is not owner/name')
     owner = repo.split('/', 1)[0]
     head_ref = str(env.get('GITHUB_HEAD_REF') or '').strip() if is_pull_request(env) else ''
-    if head_ref:
-        base = str(env.get('GITHUB_BASE_REF') or '').strip()
-    else:
-        status, doc = github.call('GET', '/repos/%s' % repo)
-        base = doc.get('default_branch') if status == 200 and isinstance(doc, dict) else None
-        if not isinstance(base, str) or not base:
-            raise _missing('the repository could not be read (HTTP %d)' % status)
+    base = proposal_base(env, github, repo)
     branch = PROPOSAL_BRANCH
     if not base or branch in (base, head_ref):           # never the customer's branch, whatever the event names
         raise Refusal('bad_input', 'the proposal branch %s is the base or head branch' % branch)
@@ -284,6 +290,30 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         raise _missing('the pull request could not be opened (HTTP %d)' % status)
     return {'branch': branch, 'commit': commit, 'number': doc['number'], 'url': str(doc.get('html_url') or ''),
             'created': True}
+
+
+COMMIT_URL_MAX = 8000   # issue #2249: past this a prefilled new-file link is too long for a browser; the draft stays below
+
+
+def commit_link(env, branch, rel, data):
+    """Issue #2249: GitHub's prefilled new-file URL committing `data` at `rel` on `branch` (the one-click fallback when
+    the proposal pull request is refused), or None when the repository or branch is unknown or the URL is too long."""
+    repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
+    server = str(env.get('GITHUB_SERVER_URL') or '').strip().rstrip('/') or 'https://github.com'
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not branch or \
+            not re.fullmatch(r'https://[^\s/?#]+', server):
+        return None
+    url = '%s/%s/new/%s?filename=%s&value=%s' % (server, repo, quote(branch, safe='/'), quote(rel, safe='/'),
+                                                 quote(bytes(data), safe=''))
+    return url if len(url) <= COMMIT_URL_MAX else None
+
+
+def commit_markdown(env, branch, rel, data):
+    """Issue #2249: the summary's 'Commit this draft' line for a refused proposal; with no link, the path to commit."""
+    url = commit_link(env, branch, rel, data)
+    if url is None:
+        return '\nTo accept the draft, commit the file below at `%s`.\n' % rel
+    return '\n[Commit this draft](%s) at `%s` (GitHub opens its commit form with the file filled in).\n' % (url, rel)
 
 
 def summary_markdown(record, rel, proposed, source='the repository'):

@@ -1535,6 +1535,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             md = '\n### Declaration: bounded by an unaccepted declaration draft\n\n%s.\n' % render.esc(told)
         else:
             tmp = _scratch(env)
+            github = None
             try:
                 if d['top'] is None:
                     raise Refusal('bad_input', 'the artefacts directory is not inside a git checkout')
@@ -1563,6 +1564,14 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
                                                     *(['the collected catalog snapshot'] if d.get('words') else []))
             if told.startswith('not proposed'):
+                # issue #2249: a refused proposal leaves a one-click commit of the draft on the branch the proposal
+                # targets (the pull request's base, else the default branch); unknown, the summary names the path
+                try:
+                    branch = declaration_draft.proposal_base(env, github, _plain(env, 'GITHUB_REPOSITORY')) \
+                        if github is not None or declaration_draft.is_pull_request(env) else ''
+                except Exception:  # the link is optional: never changes the reading, its file or its exit
+                    branch = ''
+                md += declaration_draft.commit_markdown(env, branch, d['rel'], d['data'])
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
         return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
                 declaration_draft.OUTPUT_BOUNDED + '\n')
