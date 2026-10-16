@@ -56,6 +56,9 @@ SHORTCUTS = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH', 'dele
 JUDGEMENT = ('/session_identity_key', '/guards', '/identity_writers', '/elevation_writers', '/signout_views',
              '/public_routes', '/registrations_complete', '/session_elevation_keys', '/second_factor_keys')
 _ID = re.compile(r'[^A-Za-z0-9_.-]+')
+# The required declaration fields the drafter reads from the code; one it could not read is left out of the draft, and
+# the check refuses the draft (profile_refused, declaration_invalid, keyword required) until the customer adds it.
+READ_REQUIRED = ('app_roots', 'app_objects', 'session_identity_key', 'guards', 'identity_writers')
 # Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
 # refuse unknown keys (serve/profiles.py ROW_KEYS) and the public tree ships no profile row (action/build_dist.py).
 # A row names the profile whose run drafts intent, the drafter, and the checkout path the declared profile reads it at
@@ -291,6 +294,27 @@ def summary_markdown(record, rel, proposed, source='the repository'):
     for p in record['confirm']:
         out.append('| `%s` | %s |' % (p, _read_at(record, p)))
     return '\n'.join(out) + '\n'
+
+
+def unread_required(data):
+    """The required fields (READ_REQUIRED, in that order) a draft's bytes `data` leave out: the drafter did not read
+    them from the code. () when `data` is not a JSON object."""
+    try:
+        decl = json.loads(bytes(data))
+    except (TypeError, ValueError):
+        return ()
+    return tuple(f for f in READ_REQUIRED if f not in decl) if isinstance(decl, dict) else ()
+
+
+def next_step(unread, rel, proposed=True):
+    """The one plain next step for a check refused on a partial draft: the unread fields by name, the file to add
+    them to (`proposed`: in Assure's pull request, else the draft in full in the job summary), and that no rule was
+    checked yet."""
+    names = ['`%s`' % f for f in unread]
+    names = names[0] if len(names) == 1 else '%s and %s' % (', '.join(names[:-1]), names[-1])
+    where = 'proposed in Assure\'s pull request' if proposed else 'not proposed; it is in full in the job summary'
+    return ('No rule was checked yet: Assure did not read %s from the code. Add %s to `%s` (the drafted declaration, '
+            '%s), then run again.' % (names, 'it' if len(unread) == 1 else 'them', rel, where))
 
 
 def intent_markdown(profile, drafted=False):

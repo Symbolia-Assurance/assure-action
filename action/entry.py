@@ -1357,12 +1357,28 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             _write_file(out_path, bundle.dumps(doc))
         except (OSError, ValueError) as w:
             say('::error title=Assure::%s' % _cmd_data('the failure file could not be written (%s)' % type(w).__name__))
+        d = state['draft']                        # a check refused on a partial draft: propose it and name its gaps
+        unread = declaration_draft.unread_required(d['data']) if d is not None and d['record'] is not None and \
+            e.outcome == 'profile_refused' and e.detail.get('kind') == 'declaration_invalid' else ()
+        step, decl_line, decl_md, decl_out = '', '', '', ''
+        if unread:
+            try:
+                decl_line, decl_md, decl_out = declaration_note()
+            except Exception as w:  # the class name only, never a value; the refusal stands as it is
+                say('::warning title=Assure declaration::%s' % _cmd_data(
+                    'the draft could not be proposed (%s)' % type(w).__name__))
+            step = declaration_draft.next_step(unread, d['rel'],
+                                               proposed=bool(decl_line) and 'not proposed' not in decl_line)
         try:
-            _append(env.get('GITHUB_STEP_SUMMARY'), render.failure_markdown(doc))
+            _append(env.get('GITHUB_STEP_SUMMARY'), ('## Assure: next step\n\n%s\n\n' % step if step else '')
+                    + render.failure_markdown(doc) + decl_md)
         except OSError:
             pass
-        say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data('%s: %s' % (e.outcome, e.reason))))
-        outputs(e.outcome, code)
+        if decl_line:
+            say(decl_line)
+        say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data(
+            '%s: %s%s' % (e.outcome, e.reason, '. ' + step if step else ''), cap=None if step else 300)))
+        outputs(e.outcome, code, decl_out)
         finish_feedback()
         return code
 
