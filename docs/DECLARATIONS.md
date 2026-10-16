@@ -61,7 +61,7 @@ collected/
   REDACTION-MANIFEST.json
 ```
 
-`postgresql-declared-model` requires `raw/catalog_snapshot.json` (at most 4 MiB) and `raw/declaration.json` (at most 1 MiB). Optional `raw/clients.json` is at most 1 MiB. The Action's bundle limits are 64 files and 8 MiB total; consult [DATA.md](DATA.md) for collected data and [SCOPE.md](SCOPE.md) for the claim boundaries. Use `artefacts`, since the connection collector does not author a declaration:
+`postgresql-declared-model` requires `raw/catalog_snapshot.json` (at most 4 MiB) and `raw/declaration.json` (at most 1 MiB). Optional `raw/clients.json` is at most 1 MiB. The Action's bundle limits are 2048 files and an 8 MiB encoded request body; consult [DATA.md](DATA.md) for collected data and [SCOPE.md](SCOPE.md) for the claim boundaries. Use `artefacts`, since the connection collector does not author a declaration:
 
 ```yaml
       - name: Check declared database intent

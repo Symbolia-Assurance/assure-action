@@ -669,7 +669,7 @@ The last line of the summary says what left your runner:
 | Outcome | Exit | What it means | What to do |
 |---|---|---|---|
 | `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://` (plain `http://` only for a loopback host). | Read the reason and fix the input. |
-| `oversize_input` | 2 | A required file, a checkout source file, the file count or the total size is over the limit (for `artefacts` and local directory collection, a file matching only an optional input is dropped and listed on the ignored line instead). | Remove files the profile does not read. Limits: 4 MiB per file, 64 files, 8 MiB in total. |
+| `oversize_input` | 2 | A required file, a checkout source file, the file count or the total size is over the limit (for `artefacts` and local directory collection, a file matching only an optional input is dropped and listed on the ignored line instead). | Remove files the profile does not read. Limits: 4 MiB per file, 2048 files, 8 MiB for the encoded request body. |
 | `unknown_profile` | 2 | The API serves no profile with that name. | Use a profile the API lists. |
 | `unauthenticated` | 2 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
 | `key_expired` | 2 | The API key is past its expiry date. | Ask Symbolia for a new key and put it in the `ASSURE_API_KEY` secret. |
@@ -927,7 +927,7 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 64 files of 512 KiB each. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
+The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 2000 Python files of 512 KiB each, within 2048 upload entries including manifests and an 8 MiB encoded request body. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
 
 **The declaration arrives as a proposal.** The check reads your app against a declaration at `.assure/declaration.json`: your app objects, the session key that means "signed in", your guard decorators, the views that sign people in, raise privilege and sign out, and the routes that are public on purpose. On the first run there is none, so the Action sends the bounded repository bytes to the free declaration proposal route, whose drafter uses the checker's own readers, and runs the check on the returned draft. A field the bytes do not give remains unread in the proposal for you to review.
 

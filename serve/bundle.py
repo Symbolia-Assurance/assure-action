@@ -100,7 +100,7 @@ def commit_ok(value):
 class Limits:
     body_bytes: int = 8 * 2 ** 20
     file_bytes: int = 4 * 2 ** 20
-    files: int = 64
+    files: int = 2048
     json_depth: int = 32
 
 
