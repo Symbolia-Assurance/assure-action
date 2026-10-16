@@ -13,7 +13,9 @@ The record is ``{schema, stack, declaration, sources, confirm}``, the shape of t
 - ``sources`` maps a JSON pointer to where its value came from: ``catalog_snapshot.json#<pointer>`` (the snapshot
   row the value was read from), ``COLLECTION-SIDECAR.json#<pointer>`` or ``argument:major`` (the major), or
   ``default:<reason>`` (a strict value that grants nothing, needed beside a proposed key). A key the snapshot gives
-  no basis for is ``unread`` and is left out of ``declaration``: the drafter never invents an intent.
+  no basis for is ``unread`` and is left out of ``declaration``: the drafter never invents an intent. The server key
+  file's mode and owner (key_file_mode 0600, key_owner postgres; issue #2925) are file facts the snapshot cannot show:
+  they are drafted as ``default:`` server defaults the customer confirms (the Director's ruling, 16 Oct 2026).
 - ``confirm`` lists the keys whose value is a judgement the customer confirms before committing (every proposed key
   except the four observed facts: schema, major, collection_role, database_owner).
 
@@ -599,10 +601,11 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     else:
         d.unread("tls_floor", "the observed ssl_min_protocol_version is not a TLS version name (%s)"
                  % ", ".join(TLS_VERSIONS))
-    # key_file_mode, key_owner (TLS-1..TLS-5 after the floor): file facts the snapshot cannot show, so never drafted
-    for key in ("key_file_mode", "key_owner"):
-        d.unread(key, "the server key file's mode and owner are file facts the catalog snapshot does not show; "
-                      "TLS-1 to TLS-5 need them")
+    # key_file_mode, key_owner (TLS-1..TLS-5 after the floor; issue #2925): file facts the snapshot cannot show, so the
+    # server defaults are drafted for the customer to confirm (the Director's ruling, 16 Oct 2026)
+    d.put("key_file_mode", "0600",
+          "default:0600, owner read-write only, the mode PostgreSQL accepts for a key its own user owns")
+    d.put("key_owner", "postgres", "default:postgres, the server's own operating-system user owns the key file")
 
     for key in ALWAYS_UNREAD:
         d.unread(key, "the catalog snapshot gives no basis for it; the customer states it")
@@ -697,7 +700,11 @@ GOALS = (
 #: drafted keys no requirement row rests on, and why (the draft's notes name them)
 NO_ROW = {
     "id": "it names the declaration; no obligation reads it",
-    "tls_floor": "TLS-1 to TLS-5 also need key_file_mode and key_owner, which the catalog snapshot does not give",
+    "tls_floor": "TLS-1 to TLS-5 rest on it with key_file_mode and key_owner; the draft carries no TLS goal",
+    "key_file_mode": "a drafted server default: TLS-1 to TLS-5 rest on it with tls_floor and key_owner; the draft "
+                     "carries no TLS goal",
+    "key_owner": "a drafted server default: TLS-1 to TLS-5 rest on it with tls_floor and key_file_mode; the draft "
+                 "carries no TLS goal",
     "replication_roles": "HBA-4 also needs standby_addresses, which the catalog snapshot does not give",
     "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
                        "snapshot does not give",
