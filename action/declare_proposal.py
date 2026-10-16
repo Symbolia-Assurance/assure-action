@@ -427,6 +427,40 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     else:
         d.unread("sensitive_objects", "no table with row security switched on was observed")
 
+    # table_owners (GRANT-OPTION-POLICY; issue #2570): a customer role observed not to be a superuser that owns a
+    # drafted sensitive table holds that table's grant options by owning it; it is drafted for the customer to
+    # confirm, apart from administrators (the superuser set SU-1 compares). An owner observed to be a login with
+    # CREATEROLE or a membership is not drafted: derive keeps it out of M1's grant holders so PRIV-2 still reads its
+    # reach, and the draft says so. An owner whose login, CREATEROLE or memberships were not observed is not drafted
+    # either, and the draft says that those were not observed.
+    owned, held, unseen = {}, {}, {}
+    for index, row in rls_tables if roles_sec is not None and "sensitive_objects" in d.decl else ():
+        name = row.get("owner")
+        if name in roles and customer(name) and roles[name][1].get("rolsuper") is False:
+            role = roles[name][1]
+            member = None if members_sec is None else any(
+                isinstance(edge, dict) and edge.get("member") == name for edge in members_sec)
+            if role.get("rolcanlogin") is False or (
+                    role.get("rolcanlogin") is True and role.get("rolcreaterole") is False and member is False):
+                group = owned
+            elif role.get("rolcanlogin") is True and (role.get("rolcreaterole") is True or member is True):
+                group = held
+            else:
+                group = unseen
+            group.setdefault(name, []).append((row["relname"], SNAP + "/objects/%d/owner" % index))
+    if owned:
+        d.put("table_owners", list(owned), _list_sources([tables[0][1] for tables in owned.values()]))
+    for group, why in ((owned, ""), (held, " It is not drafted into table_owners: it is a login with CREATEROLE or a "
+                       "membership, so PRIV-2 checks what it can reach and GRANT-OPTION-POLICY reads its grant options "
+                       "as outside the declared holders."),
+                       (unseen, " It is not drafted into table_owners: whether it is a login with CREATEROLE or a "
+                        "membership was not observed, so GRANT-OPTION-POLICY reads its grant options as outside the "
+                        "declared holders.")):
+        for name, tables in group.items():
+            d.notes.append({"key": "table_owners", "owner": "## To confirm: %s owns %s and can grant access to %s.%s "
+                            "If that is not intended, change the owner."
+                            % (name, _and(sorted(t for t, _ in tables)), "it" if len(tables) == 1 else "them", why)})
+
     # default_acl_expectations (PRIV-5): each schema-scoped table default as observed (global defaults name no schema)
     if default_sec is None:
         d.unread("default_acl_expectations", "default privileges were not collected")
@@ -638,7 +672,9 @@ ROWS = (
     ("PRIV-5", ("default_acl_expectations",),
      "For each declared future creator/schema query, resolved global ACL union additive schema ACL equals declared "
      "expected ACL; existing objects remain separate."),
-    ("GRANT-OPTION-POLICY", ("sensitive_objects", "administrators"),
+    # the statement is M1's MACHINE.json statement verbatim; derive adds the declared table_owners (#2570) to M1's
+    # administrators, so "administrators" here is that set, and SU-1 (M7) still reads the declared administrators alone
+    ("GRANT-OPTION-POLICY", ("sensitive_objects", "administrators", "table_owners?"),
      "Additional declared policy: no sensitive-object grant option outside administrators, including owner implicit "
      "grant options independent of ordinary ACL contents. Not a vendor policy."),
     ("SU-1", ("administrators", "applications?"),
@@ -661,8 +697,10 @@ ENGLISH = {
     "PRIV-1": (("These table privileges are held as declared: {privilege_queries}.", {}),),
     "PRIV-4": (("PUBLIC holds no privilege on the sensitive tables {sensitive_objects}.", {}),),
     "PRIV-5": (("New tables get exactly these default privileges: {default_acl_expectations}.", {}),),
-    "GRANT-OPTION-POLICY": (("Only {administrators} may hold a grant option on the sensitive tables "
-                             "{sensitive_objects}.", {}),),
+    "GRANT-OPTION-POLICY": (("Only {administrators} and the table owners {table_owners} may hold a grant option on "
+                             "the sensitive tables {sensitive_objects}.", {}),
+                            ("Only {administrators} may hold a grant option on the sensitive tables "
+                             "{sensitive_objects}.", {})),
     "SU-1": (("Only {administrators} may hold superuser, and the application logins {applications} are not "
               "superusers.", {}),
              ("Only {administrators} may hold superuser.", {})),
@@ -1085,6 +1123,9 @@ def requirements_draft(record, notes=()):
                   "declaration: without them the line's checks are not established."
                   % (" (suggested: %s)" % _and(tables[:OPEN_CAP]) if tables else "")]
         lines += ["## Template: " + template_line(obligations) for obligations in TEMPLATES] + [""]
+    owners = [n["owner"] for n in notes if isinstance(n.get("owner"), str)]
+    if owners:
+        lines += owners + [""]
     unread = sorted(p[1:] for p, v in record["sources"].items() if v == "unread")
     if unread:
         lines += ["## Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + ".", ""]

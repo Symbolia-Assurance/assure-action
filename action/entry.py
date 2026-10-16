@@ -975,11 +975,22 @@ def checkout_declaration(top, cap):
     return None if got is None else got[1]
 
 
-def checkout_declaration_at(top, cap):
+def _same_json(data, value):
+    """Issue #3153: whether `data` (committed bytes) parses as UTF-8 JSON equal to `value`; False for anything else."""
+    try:
+        return json.loads(bytes(data).decode('utf-8')) == value
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+
+
+def checkout_declaration_at(top, cap, skip_links=False):
     """(rel, bytes) of the first of DECLARED_CHECKOUT_PATH and `.assure/declaration.json` present under `top`; None
     when neither is. `bad_input` for a link, a linked `.assure/`, a file that is not regular, or one that cannot be
-    read: a present declaration is never drafted over."""
+    read: a present declaration is never drafted over. Issue #3153 (#2249): with `skip_links` (the observed profile's
+    intent flow) a link at either path is not committed intent and is passed over, as if absent."""
     for rel in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH):
+        if skip_links and os.path.islink(top / rel):
+            continue
         try:
             data = _checkout_file(top, rel, cap)
         except Refusal:
@@ -1448,7 +1459,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
             on_withheld=lambda counts: say(WITHHELD_LINE % {'withheld': withhold.describe(counts)}), on_collected=session,
-            is_mysql=is_mysql, root=root, on_bundle=held.append)   # issue #206: the identity producer's tree
+            is_mysql=is_mysql, root=root, on_bundle=held.append,   # issue #206: the identity producer's tree
+            observe=lambda c: observed_bundle(c, inputs['profile']))   # issue #3153: proposed as in api mode
 
         def declared_check(pid, files, counts):  # issue #2928: the same withheld bundle, never a second pass
             work = state['scratch'] / 'declared'
@@ -1475,7 +1487,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         rel = declaration_draft.CHECKOUT_PATH
         try:
             try:
-                at = checkout_declaration_at(Path(env.get('GITHUB_WORKSPACE') or cwd), (lim or bundle.LIMITS).file_bytes)
+                at = checkout_declaration_at(Path(env.get('GITHUB_WORKSPACE') or cwd), (lim or bundle.LIMITS).file_bytes,
+                                             skip_links=True)       # issue #3153: a link is never the intent
             except Refusal as e:                  # the refused file is the one its reason names
                 rel = next((r for r in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH)
                             if str(e.reason).startswith(r + ' ')), rel)
@@ -1488,6 +1501,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             got = check(pid, files, counts)
             if not isinstance(got, dict) or got.get('schema') != VERDICT_SCHEMA:
                 raise Refusal(unexpected, 'no verdict envelope')
+            say('Assure: declared reading: %s, with %s' % (pid, rel))   # issue #3153: the log names it too
         except Refusal as e:
             got = Refusal(e.outcome, scrub(e.reason))
         except Exception as e:  # typed, never a traceback; the class name only
@@ -1560,27 +1574,34 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 md = '\n### Declaration pull request\n\n%s.\n' % render.esc(told[:1].upper() + told[1:])
                 if not state['proposed'] and d.get('shown') is not None:   # REFUTATION-r6 MEDIUM-2: withheld only
                     md += '\n```json\n%s```\n' % d['shown'].decode('utf-8')
+                    if d['shown'] == d['data']:   # issue #3153: a link commits the proposal's own bytes, never placeholders
+                        md += commit_line(github, d)
                 return 'Assure: declaration proposal: %s' % _cmd_data(told), md, ''
             md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
                                                     *(['the collected catalog snapshot'] if d.get('words') else []))
             if told.startswith('not proposed'):
-                # issue #2249: a refused proposal leaves a one-click commit of the draft on the branch the proposal
-                # targets (the pull request's base, else the default branch); unknown, the summary names the path
-                try:
-                    branch = declaration_draft.proposal_base(env, github, _plain(env, 'GITHUB_REPOSITORY')) \
-                        if github is not None or declaration_draft.is_pull_request(env) else ''
-                except Exception:  # the link is optional: never changes the reading, its file or its exit
-                    branch = ''
-                md += declaration_draft.commit_markdown(env, branch, d['rel'], d['data'])
+                md += commit_line(github, d)
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
         return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
                 declaration_draft.OUTPUT_BOUNDED + '\n')
+
+    def commit_line(github, d):
+        """Issue #2249: a refused proposal leaves a one-click commit of the draft on the branch the proposal targets
+        (the pull request's base, else the default branch); unknown, the summary names the path."""
+        try:
+            branch = declaration_draft.proposal_base(env, github, _plain(env, 'GITHUB_REPOSITORY')) \
+                if github is not None or declaration_draft.is_pull_request(env) else ''
+        except Exception:  # the link is optional: never changes the reading, its file or its exit
+            branch = ''
+        return declaration_draft.commit_markdown(env, branch, d['rel'], d['data'])
 
     def observed_draft(verdict):
         """Issue #2934: on PROPOSAL_PROFILE inside a git checkout with nothing committed at the intent path (neither
         DECLARED_CHECKOUT_PATH nor `.assure/declaration.json`, `checkout_declaration`), the draft from the collector's own
         snapshot and sidecar before withholding (`state['observed_raw']`, REFUTATION-r1 HIGH-3: the literals as written,
-        as `pg_declare` drafts), recorded to be proposed at DECLARED_CHECKOUT_PATH as `pg_declare` records its own."""
+        as `pg_declare` drafts), recorded to be proposed at DECLARED_CHECKOUT_PATH as `pg_declare` records its own.
+        Issue #3153 (#2249 "keep it current"): intent committed at DECLARED_CHECKOUT_PATH whose JSON differs from the
+        draft (or is not JSON) gets the draft proposed too; one equal to it, or one at `.assure/declaration.json`, none."""
         if state['draft'] is not None or not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE \
                 or not isinstance(state['observed_raw'], dict):
             return
@@ -1588,12 +1609,15 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             return
         top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd()), env)
         try:
-            if top is None or checkout_declaration(top, 0) is not None:
+            if top is None:
+                return
+            at = checkout_declaration_at(top, bundle.LIMITS.file_bytes, skip_links=True)   # #3153: links pass
+            if at is not None and at[0] != DECLARED_CHECKOUT_PATH:
                 return
             drafted = draft_proposal(state['observed_raw'])
         except Exception:  # a present but unreadable declaration is never drafted over; main's files and section stay
             return
-        if drafted is None:
+        if drafted is None or (at is not None and _same_json(at[1], drafted[0]['declaration'])):
             return
         record = drafted[0]
         try:            # REFUTATION-r6 MEDIUM-2: the summary shows only the withheld draft (write_proposal's), never `data`

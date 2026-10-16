@@ -146,7 +146,7 @@ A verdict never reads a premise that is not observed or that needs intent.
 | PRIV-4 | M1 | intent-bound | db | No sensitive object has a PUBLIC ACL entry. |
 | PRIV-5 | M1 | intent-bound | db | Default ACLs equal the expected ACLs. |
 | PRIV-6 | M1 | intent-bound | db | Declared revokes leave no dependent grant. |
-| GRANT-OPTION-POLICY | M1 | intent-bound | db | No sensitive-object grant option is held outside the administrators. |
+| GRANT-OPTION-POLICY | M1 | intent-bound | db | No sensitive-object grant option is held outside the administrators and the declared `table_owners` (issue #2570). |
 | HBA-1-OB | M2 | intent-free | cl | No non-host-local TCP tuple is decided by trust, or by password on a non-hostssl record. |
 | HBA-2 | M2 | intent-bound | cl | Every intended connection is accepted by its expected method and record. |
 | HBA-3-OB | M2 | intent-free | cl | No configured pg_hba record is fully shadowed over the configured tuple domain. |

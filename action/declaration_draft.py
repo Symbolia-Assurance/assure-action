@@ -173,6 +173,22 @@ def _named(body):
     return set(re.findall(r'(?m)^<!-- assure-draft: (.+?) -->', body if isinstance(body, str) else ''))
 
 
+def _carried(top, env, existing, parent, rel, named):
+    """Issue #3153 (#2249: the one pull request keeps another profile's draft): {path: blob} of the regular files under
+    `.assure/` on the proposal branch's tip `existing` that the base tip `parent` does not have, other than `rel`, and
+    that the open proposal's body has a section for (`named`, #2927): a file it does not name has no fields to confirm
+    and is left behind, as the rebuild from the base tip leaves it."""
+    listed = (_git(top, env, 'ls-tree', '-r', '--full-tree', existing, '--', '.assure/') or b'').decode('utf-8', 'replace')
+    out = {}
+    for line in listed.split('\n'):
+        meta, _, path = line.partition('\t')
+        parts = meta.split()
+        if len(parts) == 3 and parts[:2] == ['100644', 'blob'] and path != rel and path in named \
+                and _git(top, env, 'cat-file', '-e', '%s:%s' % (parent, path)) is None:
+            out[path] = parts[2]
+    return out
+
+
 def _parent(top, env, commit):
     """The first parent written in `commit`'s own object, or None. Read from the object, not as `commit^`: a commit
     fetched one deep (the shallow checkout actions/checkout leaves) is a shallow boundary, and git resolves no `^` for
@@ -186,7 +202,8 @@ def pull_request_body(record, rel, source='this repository', kept=(), lead=None)
     field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
     collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927);
     `lead` replaces the first sentence of `rel`'s section (issue #2934)."""
-    head = ('Read each draft and edit any field that is wrong, on this branch. %s\n' % NEVER_COMMITS)
+    head = ('Read each draft and edit any field that is wrong, on this branch. %s This run is proposing %s; merging the '
+            'pull request commits it.\n' % (NEVER_COMMITS, rel))         # issue #3153: this proposal's own path
     return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)])
 
 
@@ -252,17 +269,22 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
                         .split('\n')) - {''}
         if on_branch - {rel} <= _named(open_pr.get('body') if open_pr else None):
             seed = existing
+    named = {n for n in _named(open_pr.get('body') if open_pr else None) if n.startswith('.assure/')}
+    carry = _carried(top, env, existing, parent, rel, named) if existing and seed != existing and named else {}
     blob = (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip()
     index = {'GIT_INDEX_FILE': str(Path(scratch) / 'assure-proposal.index')}
     tree = None
-    if blob and _git(top, env, 'read-tree', seed, extra=index) is not None and _git(
-            top, env, 'update-index', '--add', '--cacheinfo', '100644,%s,%s' % (blob, rel), extra=index) is not None:
+    if blob and _git(top, env, 'read-tree', seed, extra=index) is not None and all(
+            _git(top, env, 'update-index', '--add', '--cacheinfo', '100644,%s,%s' % (b, path), extra=index) is not None
+            for path, b in [*sorted(carry.items()), (rel, blob)]):
         tree = (_git(top, env, 'write-tree', extra=index) or b'').decode().strip()
     if not tree:
         raise Refusal('api_error', 'the proposal commit could not be built')
     kept = ()
     if open_pr is not None and seed == existing:    # the other files' sections, while their files stay on the branch
         kept = _kept_sections(open_pr.get('body'), on_branch - {rel})
+    elif open_pr is not None and carry:             # issue #3153: and those of the drafts carried to the new tip
+        kept = _kept_sections(open_pr.get('body'), set(carry))
     body = pull_request_body(record, rel, source, kept, lead)
     commit = existing
     same = existing and seed == existing and (_git(top, env, 'rev-parse', existing + '^{tree}') or b'').decode().strip() \
