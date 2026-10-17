@@ -56,8 +56,10 @@ SHORTCUTS = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH', 'dele
 JUDGEMENT = ('/session_identity_key', '/guards', '/identity_writers', '/elevation_writers', '/signout_views',
              '/public_routes', '/registrations_complete', '/session_elevation_keys', '/second_factor_keys')
 _ID = re.compile(r'[^A-Za-z0-9_.-]+')
-# The required declaration fields the drafter reads from the code; one it could not read is left out of the draft, and
-# the check refuses the draft (profile_refused, declaration_invalid, keyword required) until the customer adds it.
+# The declaration fields the drafter reads from the code; one it could not read is left out of the draft. The checker
+# checks such a draft (issue #3899): an absent app_roots reads the repository root, and the obligations that read any
+# other absent field read not established naming it. A server before #3899 refuses the draft (profile_refused,
+# declaration_invalid, keyword required) until the customer adds the field.
 READ_REQUIRED = ('app_roots', 'app_objects', 'session_identity_key', 'guards', 'identity_writers')
 # Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
 # refuse unknown keys (serve/profiles.py ROW_KEYS) and the public tree ships no profile row (action/build_dist.py).

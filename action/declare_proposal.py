@@ -969,7 +969,8 @@ def typed_companion(record, text, drafted_from=None, notes=()):
     (G1..), key, sentence, the sentence's sha256 and 1-based `line` in `text`, `status` (proposed: committing the file
     is the acceptance, DD-150) and its child rows: id (G1.1..), obligation, canonical statement (the typed row the
     matcher establishes), waypoint sentence (`english`), declaration keys and values, and the snapshot rows each key
-    was drafted from. The customer never edits it; `typed_text` reads it."""
+    was drafted from. The customer never edits it; `typed_text` reads it. Issue #3269: it is committed beside
+    requirements.md, so it carries no internal flags; a companion committed with them reads the same."""
     lines = text.split("\n")
     goals = []
     for g, goal in enumerate(drafted_goals(record), 1):
@@ -984,8 +985,8 @@ def typed_companion(record, text, drafted_from=None, notes=()):
         goals.append({"id": "G%d" % g, "key": goal["key"], "english": goal["english"], "sha256": _sha(goal["english"]),
                       "line": lines.index("- " + goal["english"]) + 1 if "- " + goal["english"] in lines else None,
                       "status": "proposed", "rows": children})
-    return dict({"schema": TYPED_SCHEMA, "profile": TYPED_PROFILE, "source_sha256": _sha(text),
-                 "drafted_from": drafted_from, "notes": _left(record, notes), "goals": goals}, **FLAGS)
+    return {"schema": TYPED_SCHEMA, "profile": TYPED_PROFILE, "source_sha256": _sha(text),
+            "drafted_from": drafted_from, "notes": _left(record, notes), "goals": goals}
 
 
 def _companion(companion):
@@ -1101,9 +1102,10 @@ def rollup(goal, states):
 def requirements_draft(record, notes=()):
     """A draft requirements.md (issue #1186; coordination 7588 and its qualification): the goals a person would write,
     one plain sentence each, for each goal with at least one obligation the drafted declaration decides; no role,
-    table or obligation names. The header and the flags line are Markdown headings, so the matcher reads only the
-    goals as requirements. The checks under each goal, the drafter's notes and provenance are in the companion
-    (`typed_companion`)."""
+    table or obligation names. The header is a Markdown heading, so the matcher reads only the goals as requirements.
+    The checks under each goal, the drafter's notes and provenance are in the companion (`typed_companion`). Issue
+    #3269: the file is committed unchanged as requirements.md, so it carries no internal flags line; a requirements.md
+    committed with that line (a Markdown heading) still parses the same."""
     lines = ["# Requirements (draft)", "",
              "## Proposed from the catalog snapshot: confirm each goal before committing. Only the committed "
              "raw/declaration.json is authority. The checks under each goal, and where each came from, are in "
@@ -1131,8 +1133,6 @@ def requirements_draft(record, notes=()):
         lines += ["## Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + ".", ""]
     if _left(record, notes):
         lines += ["## Some of the proposal has no check here; assure-requirements-typed.json says what and why.", ""]
-    lines += ["###### execution_authorized false; hardware_authorized false; industrial_release_authorized false; "
-              "release_allowed false; physical_validation false; simulation true; self_approved false.", ""]
     return "\n".join(lines)
 
 

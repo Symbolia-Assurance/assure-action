@@ -425,5 +425,16 @@
       "sql": "SELECT coalesce(json_agg(json_build_object('datname', d.datname::text, 'owner', pg_catalog.pg_get_userbyid(d.datdba), 'datallowconn', d.datallowconn, 'datistemplate', d.datistemplate, 'datacl', d.datacl::text[], 'is_current', d.datname = current_database()) ORDER BY d.datname), '[]'::json) FROM pg_catalog.pg_database d",
       "purpose": "databases (is_current marks the database the catalog reads were made in)"
     }
-  ]
+  ],
+  "other_databases": {
+    "queries": [
+      "objects",
+      "functions"
+    ],
+    "databases": "each databases row with datallowconn true and is_current false",
+    "connect": "the same psql argv plus -d \"dbname='<datname>'\" (a conninfo naming only the database: ' and \\ escaped, so the name never sets the host, the role or the session), the same read-only session, never as another role, never retried",
+    "sidecar_id": "<query id>@<datname>, or <query id>@<withheld: structured value>#<its databases index> for a datname withheld as a structured value",
+    "output": "catalog_snapshot.json#other_databases: [{datname, objects, functions} or {datname, gap}]; a database read carries no gap key; a database whose connection or either query fails carries gap (the error text, the server host and address replaced) and no objects or functions keys",
+    "budget": "the pass stops after 60 s: a database not begun by then is a gap and is not read (one begun in time runs each query); a database whose objects and functions do not fit the section's 1048576 bytes (or the room catalog_snapshot.json has left under its 4194304-byte cap, room kept first for every database's gap) is a gap with no objects or functions keys; a database is left out only when the gaps alone do not fit, and none of its sidecar rows is then observed; the per-database sidecar rows stop at 1048576 bytes of COLLECTION-SIDECAR.json: a database past them is a gap and is not read, and one sidecar row other_databases counts those databases"
+  }
 }

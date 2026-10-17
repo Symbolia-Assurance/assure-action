@@ -621,12 +621,15 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
     return 'posted'
 
 
-def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, commit=None):
+def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, commit=None, **layer2):
     """Issue #2651: the check's proof tree (`serve.proof_tree.build` over the verdict, the goals sent and the
     requirements text as read) written beside the verdict as PROOF_TREE_JSON and PROOF_TREE_HTML, for every account;
-    returns the tree. The repository and commit make the tree's blob links only when they validate."""
+    returns the tree. The repository and commit make the tree's blob links only when they validate. `layer2` (tier,
+    model, repository_files, budget, remodel_quote_usd, remodel_parts) is passed to `build` as given: the formal-model
+    layer, absent while the caller names no tier."""
     tree = proof_tree.build(verdict, goals=list(goals or ()) or None, requirements_text=text,
-                            proposal=_proposal_module() if goals else None, repository=repository, commit=commit)
+                            proposal=_proposal_module() if goals else None, repository=repository, commit=commit,
+                            **layer2)
     _write_file(Path(directory) / PROOF_TREE_JSON, (json.dumps(tree, indent=2, sort_keys=True, ensure_ascii=False)
                                                     + '\n').encode('utf-8'))
     _write_file(Path(directory) / PROOF_TREE_HTML, proof_tree.render_html(tree).encode('utf-8'))
@@ -1399,6 +1402,15 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             pass
         if decl_line:
             say(decl_line)
+        if state['mode'] != 'lint':      # assure-on-itself-001 (requirements.md A2): the refusal on the pull request too
+            try:                         # never changes the failure file or the exit; pr_comment types its own faults
+                named = str(env.get('INPUT_REQUIREMENTS') or '').strip() not in ('', NONE_SENTINEL)
+                body = render.pr_refusal_markdown(doc, (state['requirements_text'] or [None])[0], step or None,
+                                                  _head_commit(env), named=named)
+                pr_comment(None, body=body.split('\n', 1)[1].rstrip('\n'))
+            except Exception as w:  # the class name only, never a value (a refusal before the comment step exists)
+                say('::warning title=Assure comment::%s' % _cmd_data(
+                    'the pull request comment failed unexpectedly (%s)' % type(w).__name__))
         say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data(
             '%s: %s%s' % (e.outcome, e.reason, '. ' + step if step else ''), cap=None if step else 300)))
         outputs(e.outcome, code, decl_out)
@@ -1730,8 +1742,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             state['scratch'] = _scratch(env)
             # resolved: the producer and the collector open every component with no-follow, and a runner's temporary
             # directory may sit behind a link (macOS /var)
-            produced, binding = http_identity.produce_and_collect(
-                root, (art if art.is_absolute() else Path(cwd) / art).resolve(), state['scratch'].resolve(), scope=scope)
+            manifest_dir = (art if art.is_absolute() else Path(cwd) / art).resolve()
+            produced, binding = http_identity.produce_and_collect(root, manifest_dir, state['scratch'].resolve(),
+                                                                  scope=scope)
+            http_identity.send_intent(manifest_dir, produced)      # issue #2381: the customer's declared HTTP intent
             scope = sorted(binding['endpoint_tokens'])
             collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
         elif inputs.get('checkout'):              # serve-102: python-auth from the checkout, in one step

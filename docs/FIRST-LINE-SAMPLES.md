@@ -4,15 +4,15 @@ The first line of the job summary, word for word, as the serving path writes it 
 
 ## Green: nothing disproven
 
-The observed profile on the official PostgreSQL 18 image (the successor build's recorded readings), `fail-on: fails`. Every machine was read; four obligations hold; two readings deviate from vendor guidance and are counted on their own; 21 obligations could not be established, and the top action names what would establish most of them.
+The observed profile on the official PostgreSQL 18 image (the successor build's recorded readings, which predate RLS-5-OB; it is read vacuous there, as a run of this build reads that image), `fail-on: fails`. Every machine was read; four obligations hold; two readings deviate from vendor guidance and are counted on their own; 21 obligations could not be established, and the top action names what would establish most of them.
 
 ```text
-green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 40; deviations: 2; vacuous: 13; not established: 21 — top action: state it in requirements.md
+green: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 4 of 41; deviations: 2; vacuous: 14; not established: 21 — top action: state it in requirements.md
 ```
 
 The top action stays "state it in requirements.md". In the summary under the line, each row that depends on what the system is for gives a second way: "operator: merge the Assure proposal pull request if it opened one, else commit assure-declaration-proposal.json as .assure/postgresql-declared-model.json (raw/declaration.json in artefacts) and run postgresql-declared-model, or state it in requirements.md". On this profile the Action writes `assure-declaration-proposal.json` beside the verdict file, a declaration drafted from the same catalog snapshot, with `assure-requirements-draft.md`, the goals that proposal lets Assure check, as plain sentences to confirm, and `assure-requirements-typed.json`, which pins each goal to the checks under it. The summary's section "Declaration proposal" counts the leaves it proposes, the keys to confirm and the rows a committed declaration would decide. The Action uploads `assure-requirements-draft.md` as the `assure-requirements-draft` artifact of your workflow run and sets the `requirements-draft` output to its path; on GitHub Actions that section links the run's artifacts.
 
-With a declaration committed at `.assure/declaration.json` in the checkout (or at `.assure/postgresql-declared-model.json`, read first and then named on the line), the observed run also checks `postgresql-declared-model` on the same bundle, and the first line (on the free plan, the line under the upgrade line) reads both (D-g's snapshot with the drafter's own declaration, on this tree): ``**Assure: decided 26 of 68 rows across both readings** (postgresql-observed-baseline 18 of 54; postgresql-declared-model 8 of 26, with `.assure/declaration.json`)``. The observed reading's own line follows as the summary's heading; the verdict file, the outputs and the exit stay the observed reading's.
+With a declaration committed at `.assure/declaration.json` in the checkout (or at `.assure/postgresql-declared-model.json`, read first and then named on the line), the observed run also checks `postgresql-declared-model` on the same bundle, and the first line (on the free plan, the line under the upgrade line) reads both (D-g's snapshot with the drafter's own declaration, on this tree): ``**Assure: decided 27 of 69 rows across both readings** (postgresql-observed-baseline 19 of 55; postgresql-declared-model 8 of 26, with `.assure/declaration.json`)``. The observed reading's own line follows as the summary's heading; the verdict file, the outputs and the exit stay the observed reading's.
 
 ## Red: something disproven
 
@@ -32,10 +32,10 @@ yellow: could not look: the input could not be represented; re-collect with the 
 
 ## Strict
 
-The successor build's readings with `fail-on: unresolved-security`. The observed profile marks 36 of its 40 obligations `security: true`. Fourteen of them are intent-bound: they depend on what the system is for, which no collector can observe, so the count "19 of 22" leaves them out; it counts observability only. Of the other 22, the collector pin observes 19; HBA-6, TLS-1-OB and LR-3-OB are listed as not observable at the collector pin. All security obligations without a verdict bind under strict, including one the pin cannot observe; the report names each and why: 19 here, the 14 intent-bound ones, HBA-1-OB, REP-1-OB and the three the pin cannot observe. The job stops (exit 1, `unresolved_strict`), and the line gives the count and names the first in reading order, PRIV-1, with what would resolve it.
+The successor build's readings with `fail-on: unresolved-security`. The observed profile marks 37 of its 41 obligations `security: true`. Fourteen of them are intent-bound: they depend on what the system is for, which no collector can observe, so the count "20 of 23" leaves them out; it counts observability only. Of the other 23, the collector pin observes 20; HBA-6, TLS-1-OB and LR-3-OB are listed as not observable at the collector pin. All security obligations without a verdict bind under strict, including one the pin cannot observe; the report names each and why: 19 here, the 14 intent-bound ones, HBA-1-OB, REP-1-OB and the three the pin cannot observe. The job stops (exit 1, `unresolved_strict`), and the line gives the count and names the first in reading order, PRIV-1, with what would resolve it.
 
 ```text
-red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; strict: 19 of 22 security obligations observable at this pin; deviations: 2; unresolved by your choice (strict): 19, first PRIV-1 — depends on what the system is for; state it in requirements.md
+red: 8 of 8 machines read; declared premises: none (observed profile); version pins: major 18; strict: 20 of 23 security obligations observable at this pin; deviations: 2; unresolved by your choice (strict): 19, first PRIV-1 — depends on what the system is for; state it in requirements.md
 ```
 
 ## Every obligation not established
@@ -52,12 +52,12 @@ The sentence under the first line comes from a fixed template for each colour. A
 
 ### PostgreSQL observed
 
-The successor build's recorded readings: green with `fail-on: fails`, red with `fail-on: fails,deviates`, yellow with the input-integrity gate set. The observed profile states each obligation's consequence, so the red sentence opens with HBA-5-OB's own.
+The successor build's recorded readings, with RLS-5-OB read vacuous as above: green with `fail-on: fails`, red with `fail-on: fails,deviates`, yellow with the input-integrity gate set. The observed profile states each obligation's consequence, so the red sentence opens with HBA-5-OB's own.
 
 Green:
 
 ```text
-Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 40 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it.
+Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 41 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it.
 ```
 
 Red:

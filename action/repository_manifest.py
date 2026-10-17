@@ -2,7 +2,9 @@
 
 For profile python-auth-declared-model the bundle carries `raw/REPOSITORY.json`: `schema`
 (assure.codeauth.repository/v1), `commit` (40 hex), `tree` (the git tree id of the exact file set sent), one
-`{path, bytes, sha256, mode}` row per `raw/repository/<path>` file sent, and the seven flags. Everything in it is
+`{path, bytes, sha256, mode}` row per `raw/repository/<path>` file sent, and the seven flags; with a declaration of
+schema assure.identity.declaration/v1 naming its `stack` in raw/declaration.json, also `declaration_sha256`, that file's
+SHA-256 (#3840). Everything in it is
 mechanical, so when the customer's artefacts do not hold one the Action writes it here, after the files are read and
 the withholding pass has run, over exactly the bytes that will be uploaded. No customer input and no acceptance step.
 A supplied `raw/REPOSITORY.json` is kept byte for byte; the server checks it as it checks any upload.
@@ -41,6 +43,8 @@ PROFILE = 'python-auth-declared-model'
 NAME = 'raw/REPOSITORY.json'
 PREFIX = 'raw/repository/'
 SCHEMA = 'assure.codeauth.repository/v1'
+DECLARATION = 'raw/declaration.json'
+IDENTITY_SCHEMA = 'assure.identity.declaration/v1'
 _HEX40 = re.compile(r'[0-9a-f]{40}')
 GIT_TIMEOUT_S = 30
 
@@ -124,8 +128,24 @@ def complete(collected, profile, root, env, modes=None):
                       'before this step so the artefacts directory is inside the git checkout, or send %s yourself'
                       % (NAME, NAME), path=NAME)
     doc = manifest(collected.files, root, commit, modes)
+    decl = collected.files.get(DECLARATION)
+    if decl is not None and _declared_stack(decl) is not None:
+        doc['declaration_sha256'] = hashlib.sha256(bytes(decl)).hexdigest()
     collected.files[NAME] = (json.dumps(doc, indent=1, sort_keys=True) + '\n').encode('utf-8')
     return doc
+
+
+def _declared_stack(data):
+    """#3840: the `stack` of a raw/declaration.json of schema assure.identity.declaration/v1 (FastAPI, Django,
+    standard-library http.server), else None. That form's raw/REPOSITORY.json carries the declaration's sha256 as
+    `declaration_sha256` (QUICKSTART-API section 15), one derived value; a Flask declaration's manifest is unchanged."""
+    try:
+        doc = json.loads(bytes(data).decode('utf-8'))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get('schema') != IDENTITY_SCHEMA or not isinstance(doc.get('stack'), str):
+        return None
+    return doc['stack']
 
 def from_checkout(top, allow, limits, env):
     """serve-102 (DD-156 item 3, one step): the repository read from the checkout itself, when profile python-auth is

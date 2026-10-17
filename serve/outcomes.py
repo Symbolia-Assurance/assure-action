@@ -238,7 +238,8 @@ DERIVE_EXPECTED = MappingProxyType({
     'ARTEFACT-DIGEST-MISMATCH': 'the file as collected: re-run the producer and collector with a new key and send the '
                                 'bundle as collected, without editing any file',
     'UNEXPECTED-ARTEFACT': 'exactly the files raw/COLLECTION-SIDECAR.json lists under sanitized_sha256, plus the '
-                           'sidecar: send every raw/response-heads/<id>.txt the sidecar lists and no other file',
+                           'sidecar: send every raw/response-heads/<id>.txt the sidecar lists and no other file but an '
+                           'optional raw/HTTP-INTENT.json',
     'JSON-INVALID': 'a JSON object; re-copy raw/HTTP-FACTS.json and raw/COLLECTION-SIDECAR.json from the collector\'s '
                     'bundle',
     'FLAGS-INVALID': 'the seven standing flags as the collector wrote them; re-copy raw/HTTP-FACTS.json and '
@@ -451,11 +452,19 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 # (another profile, a retry, allow_overage, a top-up) would succeed, so the action names none
                 # serve-089 (#266): a declaration whose stack this profile does not read names the served stacks
                 ('profile_refused', 'stack'):
-                'Declare a stack this profile serves: python/flask, python/fastapi or python/django (the `stacks` list '
-                'of the profile row in GET /v1/profiles); nothing ran and nothing was charged.',
+                'Declare a stack this profile serves: python/flask, python/fastapi, python/django or python/stdlib-http '
+                '(the `stacks` list of the profile row in GET /v1/profiles); nothing ran and nothing was charged.',
                 ('profile_not_servable', 'runner_unbound'):
                 'Nothing to change on your side; the paid formalisation runner is not bound on this server yet, and '
                 'the free quote beside each requirement row stands until Symbolia binds it.',
+                # issue #3084: the bound runner serves Premium on python-auth-declared-model; another paid plan or
+                # profile is refused before any hold, and no step of the customer's opens it today
+                ('profile_not_servable', 'tier_not_bound'):
+                'Nothing to change on your side; paid formalisation runs on the Premium plan today, nothing was held '
+                'or charged, and the free quote beside each requirement row stands.',
+                ('profile_not_servable', 'profile_not_bound'):
+                'Nothing to change on your side; paid formalisation runs on the python-auth-declared-model profile '
+                'today, nothing was held or charged, and the free quote beside each requirement row stands.',
                 # issues #595 and #697: GET /v1/checks/{id}/report before any POST, on a check the account holds: the
                 # check exists, so "check the check id" contradicts the reason; the next step is the POST the reason
                 # names, and the action says the check exists so the agent does not re-check a fine id
@@ -546,6 +555,11 @@ _CODE_GROUPS = (
       'MARKER-BIJECTION'),
      'the redaction markers and fact locators recorded in {file} do not match the facts, the sidecar and the heads '
      'one for one; re-run the collector and send its facts, sidecar and heads together.'),
+    # issue #2381: the customer writes raw/HTTP-INTENT.json, not the collector
+    (('INTENT-SCHEMA',),
+     '{file} is not the declared HTTP intent: the seven standing flags and one or more of redirects {allow: '
+     'same_origin, same_site or any; forbid_secure_to_insecure: true or false}, response_headers {require: '
+     '[header names]} and cookies {require: {httponly, secure, samesite}}; fix it or leave it out.'),
 )
 CODE_ACTIONS = {code: text for codes, text in _CODE_GROUPS for code in codes}
 REQUEST_ACTION = ('Fix what the reason names so it has the shape detail.malformation.expected gives, then send the '
@@ -586,8 +600,8 @@ FREE_ACTIONS = {
                                       'then send again.',
     ('stack_not_wired', None): 'Send this declaration once its stack has a runner leg on this build (the reason names '
                                'the missing leg), or send a repository of a stack python-auth-declared-model serves: '
-                               'python/flask, python/fastapi or python/django (the `stacks` list of its row in GET '
-                               '/v1/profiles); nothing was charged.',
+                               'python/flask, python/fastapi, python/django or python/stdlib-http (the `stacks` list '
+                               'of its row in GET /v1/profiles); nothing was charged.',
 }
 FLAGS_ACTION = ('Add the seven flags at their standing values to raw/REPOSITORY.json (execution_authorized, '
                 'hardware_authorized, industrial_release_authorized, release_allowed and physical_validation false; '

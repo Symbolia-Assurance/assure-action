@@ -151,6 +151,18 @@ def new_key():
     return bytearray(secrets.token_bytes(KEY_BYTES))
 
 
+# Issue #2381: an HTTP-INTENT.json beside manifest.json is sent as raw/HTTP-INTENT.json; the collector does not read it.
+INTENT_NAME = 'HTTP-INTENT.json'
+
+
+def send_intent(manifest_dir, produced):
+    """Copy a regular, non-link HTTP-INTENT.json beside manifest.json into the produced bundle as raw/HTTP-INTENT.json
+    (issue #2381); both `mode: api` and `mode: local` call it after `produce_and_collect`."""
+    intent = Path(manifest_dir) / INTENT_NAME
+    if intent.is_file() and not intent.is_symlink():
+        (Path(produced) / 'raw' / INTENT_NAME).write_bytes(intent.read_bytes())
+
+
 def produce_and_collect(root, manifest_dir, scratch, *, scope=None, run=None):
     """Steps 1-3 of the module docstring: (bundle directory, wrapped scope_binding). `manifest_dir` holds the caller's
     manifest.json and the response heads it names; `scratch` is this job's 0700 directory. A `scope` input (a list of

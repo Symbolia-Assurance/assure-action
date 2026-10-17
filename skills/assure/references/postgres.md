@@ -191,7 +191,7 @@ The runner must reach your database and `api.symbolia.ai`. For a database on a p
 
 Some facts live in configuration files: `postgresql.conf` and the files it includes, `postgresql.auto.conf`, `pg_hba.conf`, `pg_ident.conf` and `postmaster.opts`. The collector finds them through the server's own settings and reads them from the runner's filesystem.
 
-With a connection and no data directory, the runner cannot read those files. This is the usual case for managed PostgreSQL. A reading that needs a fact from a file then reads **not observed**. Where the checker cannot represent the input without the file, as with a missing `pg_hba.conf` or `postgresql.conf`, the readings that use it read **representation**. The client-authentication and TLS obligations are the ones most affected.
+With a connection and no data directory, the runner cannot read those files. This is the usual case for managed PostgreSQL. A reading that needs a fact from a file then reads **not observed**. Where the checker cannot represent the input without the file, as with a missing `pg_hba.conf` or `postgresql.conf`, the readings that use it read **representation**. When `pg_hba.conf` was not collected but the collection role can read `pg_hba_file_rules` (the server's own parse of the file), the checker reads the client-authentication rules from that view and cites `raw/catalog_snapshot.json#pg_hba_file_rules`; a collected `pg_hba.conf` wins over the view. The client-authentication and TLS obligations are the ones most affected.
 
 To read the files, run the Action on a self-hosted runner that can read them:
 

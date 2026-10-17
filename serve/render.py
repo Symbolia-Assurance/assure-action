@@ -533,6 +533,8 @@ def first_line(envelope):
 HTTP_PROFILE = 'http-observed-baseline'
 HTTP_NO_REQUIREMENT_TAIL = '; no HTTP requirement can hold in this release'
 HTTP_PLAIN_ACTION = ('no HTTP requirement can be stated in this release; the reading informs and asks nothing of you')
+HTTP_INTENT_GROUP_ACTION = ('declare in raw/HTTP-INTENT.json the key each row names (docs/customer/VERDICTS.md); '
+                            'requirements.md cannot state an HTTP requirement in this release')     # issue #2381
 DEAD_END_ACTIONS = ('state it in requirements.md', 'Supply a trusted adapter binding')   # never on an HTTP row
 
 
@@ -564,6 +566,15 @@ def warning_locator(entry):
     return path, line
 
 
+def _shown_warning(entry):
+    """Whether a `warnings` entry is shown to a reader: a dict with non-empty `text`, other than a `declared_ignored`
+    entry for one of the seven standing flags (issue #3269: an older drafted declaration carries them, the observed
+    derive drops them as it drops any key, and they are internal record flags, never a customer's declaration; the
+    envelope keeps the entry as served)."""
+    return isinstance(entry, dict) and isinstance(entry.get('text'), str) and bool(entry['text']) and not (
+        entry.get('kind') == 'declared_ignored' and entry.get('key') in _FLAG_KEYS)
+
+
 def warning_text(entry):
     """issue #900: one warning's shown text: its `text`, then " (<path>:<line>)" when it carries a locator."""
     loc = warning_locator(entry)
@@ -575,8 +586,7 @@ def warning_texts(envelope):
     an entry with a `locator` shows it after the text as "(<path>:<line>)"."""
     env = envelope if isinstance(envelope, dict) else {}
     w = env.get('warnings')
-    return [warning_text(w_) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str) and w_['text']] \
-        if isinstance(w, list) else []
+    return [warning_text(w_) for w_ in w if _shown_warning(w_)] if isinstance(w, list) else []
 
 
 WARNING_TITLES = {'endpoint_non_success': 'Assure endpoint', 'known_limit': 'Assure known limit',
@@ -588,8 +598,7 @@ def warning_items(envelope):
     """serve-048: (kind, text) of each entry of the verdict's `warnings` list, in order, for the annotation titles."""
     env = envelope if isinstance(envelope, dict) else {}
     w = env.get('warnings')
-    return [(w_.get('kind'), warning_text(w_)) for w_ in w if isinstance(w_, dict) and isinstance(w_.get('text'), str)
-            and w_['text']] if isinstance(w, list) else []
+    return [(w_.get('kind'), warning_text(w_)) for w_ in w if _shown_warning(w_)] if isinstance(w, list) else []
 
 
 # ---------- serve-016: the policy's tests and the verdict line (module docstring) ----------
@@ -1076,7 +1085,8 @@ def undecided_by_cause(entries, profile_id=None):
     """Issue #1193: the not-established entries grouped by `reason_class`, one {class, rows, action, owner, ids} per
     class, ordered by row count (descending, ties by class name). `action` is the action all the group's entries share,
     for every class (the HTTP profile's needs_intent wording, a single locator, a row's own representation reason);
-    when they differ, the class's fixed action: for representation `representation_action(profile_id)` without a row's
+    when they differ, the class's fixed action: HTTP_INTENT_GROUP_ACTION for the HTTP profile's needs_intent, for
+    representation `representation_action(profile_id)` without a row's
     reason, except on python-auth-declared-model, whose fallback is _PYTHON_INPUT_ACTION (its pointer is the
     dynamic-registration wording, which only a row naming that cause carries; REFUTATION-r4 HIGH-1); for every other
     class its CLASS_ACTIONS text, else NOT_OBSERVED_GROUP_ACTION."""
@@ -1089,6 +1099,8 @@ def undecided_by_cause(entries, profile_id=None):
         first = group[0].get('action')
         if isinstance(first, str) and all(e.get('action') == first for e in group):
             action = first
+        elif cls == 'needs_intent' and profile_id == HTTP_PROFILE:       # issue #2381: each row names its own key
+            action = HTTP_INTENT_GROUP_ACTION
         elif cls == 'representation':
             action = (_PYTHON_INPUT_ACTION if profile_id == 'python-auth-declared-model'
                       else representation_action(profile_id))
@@ -2496,6 +2508,11 @@ _INPUT_STEPS = (
                 r'|connection)\b|set exactly one of connection and artefacts|the user in the connection'
                 r'|local mode is not available'),
      'Fix the workflow step input the reason names, then run again.'),
+    # assure-on-itself-001: no api-key and no id-token permission (action/entry.py oidc_sign_in), the first run of a
+    # repository whose key secret is not set yet
+    (re.compile(r"Assure needs this workflow's GitHub identity or an api-key"),
+     'Set the repository secret ASSURE_API_KEY (gh secret set ASSURE_API_KEY, the value pasted at the prompt) and pass '
+     'it to the Assure step as api-key, or add id-token: write to the job\'s permissions; then run again.'),
 )
 
 
@@ -2858,6 +2875,62 @@ def _pr_where(locator, repository=None, commit=None):
     return esc(loc)
 
 
+# Issue #3148: a broken sign-out rule says what is wrong with the declared sign-out view, from the reading's premise
+# record for it (python-auth-declared-model extract_premises.py: 'premise signout-view:<module.view> (signout_view,
+# declared): fault: <fault>[; <fault>]', with the view's locator), and gives the concrete fix. Each fault the checker
+# writes (grade.py `signout_faults`, extract_premises.py) maps to (what the change does, the fix), '{v}' the view's
+# name; a fault with no entry leaves the profile's words in place.
+_PR_SIGNOUT = re.compile(r'premise signout-view:([A-Za-z_][A-Za-z0-9_.]{0,200}) \(signout_view, declared\): fault: (.+)')
+_PR_SIGNOUT_WORDS = {
+    'first statement is not the clearing write': ('your sign-out view {v} does not clear the session first',
+                                                  'Make {c} the first line of {v}'),
+    'the statements after the clearing write are not straight-line': (
+        'your sign-out view {v} branches after it clears the session',
+        'Keep {v} to plain steps after {c}, with no branch or loop'),
+    'guarded': ('your sign-out view {v} is behind a guard', 'Remove the guard from {v}, so every signed-in user can '
+                                                            'sign out'),
+    'not registered as a route': ('your sign-out view {v} is not registered as a route', 'Register {v} as a route')}
+_PR_SIGNOUT_PROFILE, _PR_SIGNOUT_OB = 'python-auth-declared-model', 'AUTH-4'
+
+
+def _pr_signout(env, rows):
+    """[(view, locator or None, (what, fix))] for a broken sign-out obligation among `rows`: one per declared sign-out
+    view whose premise record carries a fault with words in _PR_SIGNOUT_WORDS (the first such fault), its locator
+    'path:line' when the record gives one; [] otherwise (another profile, no fault, a fault with no words)."""
+    if env.get('profile') != _PR_SIGNOUT_PROFILE or not any(
+            isinstance(r, dict) and r.get('id') == _PR_SIGNOUT_OB for r in rows):
+        return []
+    rd = (env.get('readings') or {}) if isinstance(env.get('readings'), dict) else {}
+    out = []
+    for reading in rd.values():
+        for w in (reading.get('warnings') if isinstance(reading, dict) else None) or ():
+            m = _PR_SIGNOUT.fullmatch(w.get('text') or '') if isinstance(w, dict) and isinstance(
+                w.get('text'), str) else None
+            if m is None:
+                continue
+            words = next((_PR_SIGNOUT_WORDS[f.split(' (')[0].strip()] for f in m.group(2).split('; ')
+                          if f.split(' (')[0].strip() in _PR_SIGNOUT_WORDS), None)
+            if words is None:
+                continue
+            loc = next(('%s:%s' % (x.get('path'), x.get('line')) for x in w.get('locators') or ()
+                        if isinstance(x, dict) and _PR_LOCATOR.fullmatch('%s:%s' % (x.get('path'), x.get('line')))),
+                       None)
+            out.append((m.group(1).rsplit('.', 1)[-1], loc, words))
+    return out[:MAX_PR_LOCATORS]
+
+
+def _pr_signout_text(signout, part, code=False, where=None):
+    """The `part` (0 what, 1 fix) of each sign-out fault, joined: names in code spans when `code`, and for the fix
+    each view's locator in brackets rendered by `where` (plain when None)."""
+    out = []
+    for view, loc, words in signout:
+        t = words[part].format(v='`%s`' % view if code else view, c='`session.clear()`' if code else 'session.clear()')
+        if part == 1 and loc is not None:
+            t += ' (%s)' % (where(loc) if where else loc)
+        out.append(t)
+    return '; '.join(out)
+
+
 def _pr_item(env, finding, by_id, by_ob):
     """{label, name, text, what, where, locators, fix, requirement, sentence, escaped} for one red finding: for a
     requirement row (or an obligation a requirement row is matched to) its id and sentence, what the change does (the
@@ -2880,9 +2953,14 @@ def _pr_item(env, finding, by_id, by_ob):
         if what is None:
             what = next((_pr_own_words(r, r.get('reason')) for r in _pr_matched_rows(env, req)
                          if _pr_own_words(r, r.get('reason'))), None) or witness_words(env, row)
+        signout = _pr_signout(env, obs)              # issue #3148: the sign-out view's own fault, line and fix
+        if signout:
+            what, fix = _pr_signout_text(signout, 0), _pr_signout_text(signout, 1)
+            locators = [loc for _, loc, _ in signout if loc] or locators
         return {'label': lab, 'name': name, 'text': format_space(req.get('sentence') or req.get('id')),
                 'what': what, 'where': locators[0] if locators else None, 'locators': locators, 'fix': fix,
-                'requirement': req.get('id'), 'sentence': format_space(req.get('sentence') or ''), 'escaped': None}
+                'requirement': req.get('id'), 'sentence': format_space(req.get('sentence') or ''), 'escaped': None,
+                'signout': signout}
     text = _pr_obligation_text(env, row) if row.get('id') is not None else _clip(ob_id)
     plain = _pr_fill(env, row, 'plain_broken') if row.get('id') is not None else None
     return {'label': lab, 'name': name, 'text': text,
@@ -2893,12 +2971,63 @@ def _pr_item(env, finding, by_id, by_ob):
             'escaped': None if plain else (_row_extra(env, row) if row else None)}
 
 
+# Issue #3146: a refusal that names the line Assure could not read (the checker's incomplete-reading reason
+# `<class> (<module>, <line>, <what>)`, grade.py `_REASON_RE`); several are joined with '; '.
+_PR_UNREAD = re.compile(r'([a-z][a-z0-9_]+) \(([^,()\r\n]{1,200}), ([1-9][0-9]{0,6}), ([^;\r\n]{0,200}?)\)(?=;|\s*$)')
+_PR_UNREAD_WHAT = re.compile(r'[A-Za-z_][A-Za-z0-9_.]{0,79}')
+MAX_PR_UNREAD = 3
+
+
+def _pr_unread(env):
+    """[(what, 'path:line')] for the lines a refused check names as unread (`machines.refused` reasons, then the rows'
+    reasons), each module resolved to the one repository file the manifest holds for it (`source_candidates`; none or
+    several: that line is skipped, never guessed); `what` is the source text when it is a plain dotted name, else
+    None. At most MAX_PR_UNREAD + 1 (the comment says how many more), deduplicated, in order."""
+    m = _machines(env)
+    reasons = [r.get('reason') for r in (m['refused'] if m is not None else ()) if isinstance(r, dict)]
+    reasons += [r.get('reason') for r in _rows(env)]
+    files = (env.get('input') or {}).get('files') if isinstance(env.get('input'), dict) else None
+    out = []
+    for reason in reasons:
+        if not isinstance(reason, str):
+            continue
+        for x in _PR_UNREAD.finditer(reason[:_STRUCTURAL_REASON_CLIP]):
+            _, source, line, what = (g.strip() for g in x.groups())
+            if '/' in source:
+                path = source if REPO_PATH_RE.fullmatch(source) else None
+            else:
+                found = source_candidates(source, files)
+                path = next(iter(found)) if len(found) == 1 else None
+            if path is None or not _PR_LOCATOR.fullmatch('%s:%s' % (path, line)):
+                continue
+            item = (what if _PR_UNREAD_WHAT.fullmatch(what) else None, '%s:%s' % (path, line))
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _pr_unread_words(unread, where=None):
+    """'Assure could not read <what> at <where>[, ... and ...], so it checked nothing in this change.': plain text
+    (the proof tree) when `where` is None, else Markdown with each `what` a code span (`_PR_UNREAD_WHAT` admits no
+    character Markdown reads) and each locator rendered by `where` (a link or code span, `_pr_where`)."""
+    code = where is not None
+    where = where or (lambda loc: loc)
+    parts = [('%s at %s' % ('`%s`' % w if code else w, where(loc)) if w else where(loc))
+             for w, loc in unread[:MAX_PR_UNREAD]]
+    if len(unread) > MAX_PR_UNREAD:
+        parts.append(_plural(len(unread) - MAX_PR_UNREAD, 'more line', 'more lines'))
+    joined = parts[0] if len(parts) == 1 else '%s and %s' % (', '.join(parts[:-1]), parts[-1])
+    return 'Assure could not read %s, so it checked nothing in this change.' % joined
+
+
 def pr_reading(envelope):
     """The comment's reading (issue #2189), decided from the sets the job summary decides from: `red_findings` (the
     obligation readings on machines that were read, then the requirement rows), the read set, `could_not_look`, `a0`
     and `outcome`. Returns {no_reading, red, broken, deviations, others, holds, unchecked}:
     - no_reading: None, or the summary's words for why there is no reading (`a0`: "No reading: input integrity";
-      an outcome that is not `verdict`: "No verdicts"; nothing could be read: "Could not look");
+      an outcome that is not `verdict`: the lines a refusal names as unread when it names any (issue #3146,
+      `_pr_unread`), else "No verdicts"; nothing could be read: "Could not look");
+    - unread: those lines, [(what, 'path:line')], for the comment to link; empty otherwise;
     - red: `red_findings(envelope)`, unchanged; every red finding is in exactly one of broken, deviations (those
       marked red) and others, so their counts add up to len(red);
     - broken: the 'disproven' findings whose reading is not `deviates` (a deviation is never called broken);
@@ -2908,7 +3037,7 @@ def pr_reading(envelope):
       {label, name, checked} (`_pr_label`, `_pr_checked`);
     - unchecked: every other requirement row and reading, vacuous ones included (never shown as holds), and a reading
       the checker kept on a refused machine as not observed, each {label, name, requirement, words}: the plain
-      sentence for its reason class (`_pr_unchecked_words`)."""
+      sentence for its reason class (`_pr_unchecked_words`), None when `unread` is the reason for all of them."""
     env = envelope if isinstance(envelope, dict) else {}
     by_id, by_ob = _pr_requirements(env)
     red = red_findings(env)
@@ -2942,6 +3071,9 @@ def pr_reading(envelope):
             deviations.append((item, key in red_dev))
     holds, unchecked = [], []
     spent_rows = _pr_spent_rows(env)
+    # issue #3146: when the check could not read a named line, that line is the reason for every rule; no rule's
+    # wording is blamed
+    unread = _pr_unread(env) if env.get('a0') is None and env.get('outcome') != 'verdict' else []
     for r in requirement_rows(env) or ():
         if r.get('id') in shown_reqs:
             continue
@@ -2950,9 +3082,9 @@ def pr_reading(envelope):
         if r.get('state') == 'holds':
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None)})
         else:
-            words = _pr_unchecked_words(env, r.get('reason_class'))
+            words = None if unread else _pr_unchecked_words(env, r.get('reason_class'))
             if spent_rows and _pr_unread_row(r):    # the Director, 14 Oct 2026: the spent balance left it unread
-                words += '; ' + PR_SPENT_ROW
+                words = PR_SPENT_ROW if words is None else words + '; ' + PR_SPENT_ROW
             unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'), 'words': words})
     for r in obligations:
         key = (r.get('machine'), r.get('id'))
@@ -2972,10 +3104,12 @@ def pr_reading(envelope):
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, None, r)})
         else:
             unchecked.append({'label': lab, 'name': name, 'requirement': None,
-                              'words': _pr_unchecked_words(env, _pr_reason_class(env, r))})
+                              'words': None if unread else _pr_unchecked_words(env, _pr_reason_class(env, r))})
     if env.get('a0') is not None:
         no_reading = ('No reading: input integrity. The input integrity gate stopped the check, so no rule was read: '
                       '%s' % _clip(env.get('a0')))
+    elif env.get('outcome') != 'verdict' and unread:
+        no_reading = _pr_unread_words(unread)       # issue #3146: the line it could not read
     elif env.get('outcome') != 'verdict':
         no_reading = ('No verdicts: none of the readings is a verdict that checked something, so no rule was read; '
                       'a vacuous reading only says a domain was empty.')
@@ -2984,7 +3118,7 @@ def pr_reading(envelope):
     else:
         no_reading = None
     return {'no_reading': no_reading, 'red': red, 'broken': broken, 'deviations': deviations, 'others': others,
-            'holds': holds, 'unchecked': unchecked}
+            'holds': holds, 'unchecked': unchecked, 'unread': unread}
 
 
 def pr_heading(reading):
@@ -3028,7 +3162,9 @@ def _pr_broken(item, repository, commit):
     out = ['### Broken: %s' % head, '']
     where = ', '.join(_pr_where(x, repository, commit) for x in item['locators'])
     parts = []
-    if item['what']:
+    if item.get('signout'):
+        parts.append('What this change does: %s.' % _pr_signout_text(item['signout'], 0, code=True))
+    elif item['what']:
         parts.append('What this change does: %s.' % esc(str(item['what']).rstrip('.')))
     if where:
         parts.append('Where: %s.' % where)
@@ -3038,7 +3174,10 @@ def _pr_broken(item, repository, commit):
         out += [' '.join(parts), '']
     if item['requirement'] is not None and item['sentence']:
         out += ['> **%s** (`requirements.md`): %s' % (esc(item['requirement']), esc(item['sentence'])), '']
-    if item['fix']:
+    if item.get('signout'):
+        out += ['**Fix:** %s.' % _pr_signout_text(item['signout'], 1, code=True,
+                                                 where=lambda loc: _pr_where(loc, repository, commit)), '']
+    elif item['fix']:
         out += ['**Fix:** %s' % esc(item['fix']), '']
     return out
 
@@ -3156,6 +3295,20 @@ def pr_tree_line(tree, bases=()):
     return '[%s](%s)' % (PR_TREE_LINE % (x, y, ''), t['url'])
 
 
+# ---------- assure-on-itself-001 (the Director, 17 Oct 2026; night read of #3843, H1) ----------
+# The comment states no model provenance until a verdict carries it (#3870's served remodel data): `engine` names the
+# engine that ran the check, so a Premium or Pro comment (one carrying the proof-tree link the server adds for those
+# plans, serve/api.py `_with_tree`) names that engine and nothing more. A free comment is unchanged.
+_PR_ENGINE = re.compile(r'[0-9a-f]{40}')
+
+
+def pr_engine_line(env):
+    """'Checked by Assure engine `<7 hex>`.' from the verdict's `engine.commit` (40 hex), else None."""
+    eng = env.get('engine') if isinstance(env, dict) else None
+    c = eng.get('commit') if isinstance(eng, dict) else None
+    return 'Checked by Assure engine `%s`.' % c[:7] if isinstance(c, str) and _PR_ENGINE.fullmatch(c) else None
+
+
 def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_bases=()):
     """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
     finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
@@ -3173,7 +3326,9 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     env = envelope if isinstance(envelope, dict) else {}
     rd = pr_reading(env)
     out = [PR_COMMENT_MARKER, '## %s' % _esc_line(pr_heading(rd)), '']
-    if rd['no_reading'] is not None:
+    if rd['unread']:                          # issue #3146: the lines it could not read, linked
+        out += [_pr_unread_words(rd['unread'], lambda loc: _pr_where(loc, repository, commit)), '']
+    elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']
     for item in rd['broken'][:MAX_ANNOTATIONS]:
         out += _pr_broken(item, repository, commit)
@@ -3198,12 +3353,19 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     if rd['unchecked']:
         out += ['### Not checked yet', '']
         for u in rd['unchecked'][:MAX_ANNOTATIONS]:
+            if u['words'] is None:                  # issue #3146: the reason is the unread line, said once above
+                out.append('- %s' % (_pr_rule(u['label'], u['name']) if u['requirement'] is not None
+                                     else '**%s**' % esc(u['name'] or u['label'])))
+                continue
             if u['requirement'] is not None:
                 rule = '%s:' % _pr_rule(u['label'], u['name'])
             else:
                 rule = '**%s:**' % esc(u['name'] or u['label'])
             out.append('- %s %s.' % (rule, esc(u['words'])))
         out.append('')
+    engine = pr_engine_line(env) if pr_tree_line(tree, tree_bases) is not None else None   # Premium and Pro only
+    if engine is not None:
+        out += [engine, '']
     spent = pr_spent_line(env)                   # the Director, 14 Oct 2026: the spent free balance, above the footer
     if spent is not None:
         out += [spent, '']
@@ -3212,6 +3374,62 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     if line is not None:
         out += [line, '']
     out.append('<sub>%s</sub>' % _pr_closing(env, commit))
+    return '\n'.join(out) + '\n'
+
+
+# ---------- assure-on-itself-001 (the Director, 17 Oct 2026; requirements.md A2): the comment for a refused run ----------
+PR_REFUSED_HEADING = 'Assure could not check this pull request'
+PR_MAX_PROMISES = 100       # within GitHub's comment size at the requirements bounds' line length
+PR_PROMISES_HEADING = 'Your requirements.md, promise by promise'
+PR_UNREAD_PROMISES = ('The requirements file the Assure step names was not read: this run was refused before it, so no '
+                      'promise is listed.')
+PR_NO_PROMISES = ('No requirements file was sent, so no promise is listed. Add `requirements: requirements.md` to the '
+                  'Assure step to send yours.')
+PR_REFUSED_TREE = ('Proof tree: none for this run. A proof tree comes with a verdict, on the Premium and Pro plans; '
+                   'this run was refused before a verdict.')
+#: a promise line as serve/requirements.py `_parse` reads one: an optional list marker, an id holding a digit, an
+#: optional [scope] tag, a colon, the sentence. For listing only: the server alone decides a promise.
+_PR_PROMISE = re.compile(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)?([A-Za-z][A-Za-z0-9_.-]{0,63})\s*(?:\[[^\]\n]*\])?\s*:\s*(\S.*?)\s*$')
+_PR_OUTCOME = re.compile(r'[a-z][a-z_]{0,40}')
+
+
+def pr_promises(text):
+    """[(id, sentence)] for each line of requirements text that names a promise id (one holding a digit, as the server's
+    parser requires), in file order; [] for no text."""
+    out = []
+    for line in (text or '').split('\n'):
+        m = _PR_PROMISE.match(line)
+        if m and re.search(r'[0-9]', m.group(1)):
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None, named=False):
+    """The one pull request comment for a refused run (a failure envelope): the marker; the heading; the refusal's
+    outcome and reason; one next step (`step` when the Action has one, else `next_step`); each promise of the
+    requirements text sent (`pr_promises`) reading `not established` with the refusal as its reason, or the line that
+    names the input to send one; the proof tree's line (none for this run); and the commit. Deterministic; every
+    customer-facing value is escaped with `esc`."""
+    f = failure if isinstance(failure, dict) else {}
+    outcome = f.get('outcome')
+    word = '`%s`' % outcome if isinstance(outcome, str) and _PR_OUTCOME.fullmatch(outcome) else esc(outcome)
+    out = [PR_COMMENT_MARKER, '## %s' % PR_REFUSED_HEADING, '',
+           'This run was refused (%s): %s' % (word, esc(f.get('reason'))), '',
+           '**Next step:** %s' % esc(step or next_step(f)), '']
+    promises = pr_promises(requirements_text)
+    if promises:
+        why = 'nothing was checked: this run was refused (%s) before any promise was read' % word
+        out += ['### %s' % PR_PROMISES_HEADING, '', 'Assure decides 0 of %d promises on this run.' % len(promises), '',
+                '| Promise | Reading | Why |', '| --- | --- | --- |']
+        out += ['| **%s** %s | not established | %s |' % (esc(pid), esc(sentence), why)
+                for pid, sentence in promises[:PR_MAX_PROMISES]]
+        if len(promises) > PR_MAX_PROMISES:
+            out += ['', 'And %d more, each not established for the same reason.' % (len(promises) - PR_MAX_PROMISES)]
+        out.append('')
+    else:
+        out += [PR_UNREAD_PROMISES if named else PR_NO_PROMISES, '']   # night read L1: named, refused before the read
+    named = '`%s`' % commit[:7] if isinstance(commit, str) and _PR_COMMIT.fullmatch(commit) else 'not named'
+    out += ['---', PR_REFUSED_TREE, '', '<sub>Assure reached no verdict on this run. Commit %s.</sub>' % named]
     return '\n'.join(out) + '\n'
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

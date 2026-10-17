@@ -4,7 +4,7 @@
 
 You administer one self-hosted PostgreSQL server, major 14 to 18, and you can run a GitHub Actions workflow that reaches it.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI and Django repositories with your declaration through the API.
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI, Django and standard-library http.server repositories with your declaration.
 
 **Checking HTTP endpoints.** `http-observed-baseline` reads the response heads you captured for the endpoints you select, offline: give the Action an artefacts folder holding an endpoint manifest and the heads, and it produces the scope binding itself. The steps below are for PostgreSQL.
 
@@ -45,7 +45,7 @@ Never send your configuration files, your connection string or your API key.
 
 ## What is kept
 
-Per [DATA.md](DATA.md): free-tier collected facts are deleted when the check ends. The verdict is kept 30 days. Checker telemetry, with counts and statuses and no names or values from your system, is kept 12 months. On the free tier, using your facts to improve the checks is opt-in: nothing of yours is kept for it unless you opt in.
+Per [DATA.md](DATA.md): free-tier collected facts are deleted when the check ends. The verdict is kept 30 days. Checker telemetry, with counts and statuses and no names or values from your system, is kept 12 months. On the free tier, `product_data` (improving the checks with your data) is on by default; ask your contact to turn it off. Paid plans: off unless you opt in.
 
 ## Contact
 

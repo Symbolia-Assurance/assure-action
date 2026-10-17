@@ -27,15 +27,17 @@ a progress file and then replaces itself with psql, so on a wall-clock expiry th
 still on its first query (cannot connect) or later (timeout).
 
 The collector generation. COLLECTOR-PIN.json names it (`generation`), and the name is bound to the collector's digest
-(`COLLECTOR_GENERATIONS`; refutation 009, G1): `rf32` exactly when the pinned `collect_pg.py` is the RF-32 gen-3 digest,
-`rf31` exactly when it is the RF-31 gen-2 digest and `rf28` exactly when it is the RF-28 digest, where the field is
+(`COLLECTOR_GENERATIONS`; refutation 009, G1): `rf33` exactly when the pinned `collect_pg.py` is the RF-33 candidate
+digest, `rf32` exactly when it is the RF-32 gen-3 digest, `rf31` exactly when it is the RF-31 gen-2 digest and `rf28` exactly when it is the RF-28 digest, where the field is
 mandatory, and `rf19` exactly when it is the RF-19 digest, where a pin without the field is `rf19` (the collector
 shipped up to the RF-28 swap). Any other combination, a digest of no known generation included, is
 `engine_digest_mismatch` before anything runs, so an edited pin cannot select the RF-19 path for later bytes. `rf28` is
 the collector that writes a withheld rule or setting as a marker line, takes `--login-user` and records the session's
 read-only and TLS facts; `rf31` is `rf28` plus one query, table inheritance and partitions (`inherits`, from
 pg_inherits); `rf32` is `rf31` plus one query, which functions an extension maintains (`extension_members`, from
-pg_depend), and is the one this tree ships. The pin's `previous` block records the digests of the collector it replaced
+pg_depend); `rf33` is `rf32` plus the `objects` and `functions` queries read again in each other database
+`databases` lists with datallowconn (`other_databases`, the same login and read-only session with `-d <datname>`), and
+is the one this tree ships, as a candidate until its gate record lands. The pin's `previous` block records the digests of the collector it replaced
 (a record only; nothing is verified against it).
 
 The login name and the collection role. `collection-role` is the role's name inside the database: the collector checks
@@ -122,17 +124,18 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'      # rf32
-RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'        # the pin's `previous`
+FROZEN_COLLECTOR_SHA256 = '1676817a3e0d01118ed15f196c6fd764dd9e5b6c252fccac5f98fe56c3141c49'      # rf33 (candidate)
+RF32_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'        # the pin's `previous`
+RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'
 RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'
 RF19_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'
-RF19, RF28, RF31, RF32 = 'rf19', 'rf28', 'rf31', 'rf32'
-GENERATIONS = (RF19, RF28, RF31, RF32)
+RF19, RF28, RF31, RF32, RF33 = 'rf19', 'rf28', 'rf31', 'rf32', 'rf33'
+GENERATIONS = (RF19, RF28, RF31, RF32, RF33)
 # The generations whose collector takes --login-user and accepts only the two least-privilege roles.
-LEAST_PRIVILEGE_GENERATIONS = frozenset({RF28, RF31, RF32})
+LEAST_PRIVILEGE_GENERATIONS = frozenset({RF28, RF31, RF32, RF33})
 # The generation each collector digest is (refutation 009, G1): the pin's `generation` must name it.
-COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF32, RF31_COLLECTOR_SHA256: RF31, RF28_COLLECTOR_SHA256: RF28,
-                         RF19_COLLECTOR_SHA256: RF19}
+COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF33, RF32_COLLECTOR_SHA256: RF32, RF31_COLLECTOR_SHA256: RF31,
+                         RF28_COLLECTOR_SHA256: RF28, RF19_COLLECTOR_SHA256: RF19}
 COLLECTOR_DIR = Path(__file__).resolve().parent / 'collector'
 COLLECTOR = 'collect_pg.py'
 PIN_NAME = 'COLLECTOR-PIN.json'
@@ -147,9 +150,9 @@ DEFAULT_CONNECT_TIMEOUT = '10'
 APP_NAME = 'assure-action'
 DEFAULT_PRIVILEGES = 'pg_read_all_settings,pg_read_all_stats'
 READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')   # rf19
-LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28 to rf32
+LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28 to rf33
 ROLES_BY_GENERATION = {RF19: READ_ONLY_ROLES, RF28: LEAST_PRIVILEGE_ROLES, RF31: LEAST_PRIVILEGE_ROLES,
-                       RF32: LEAST_PRIVILEGE_ROLES}
+                       RF32: LEAST_PRIVILEGE_ROLES, RF33: LEAST_PRIVILEGE_ROLES}
 # A collector refusal with a fixed next step (no customer text in it).
 NEXT_STEPS = {'collection_role_not_least_privilege': 'grant the collection role only pg_read_all_settings and '
                                                      'pg_read_all_stats, and revoke the broader role'}
@@ -445,12 +448,12 @@ def _bound_generation(doc):
 
 def pin_generation(collector_dir=None):
     """The verified generation of the collector directory (`verify_collector`, without the frozen-digest test). A pin
-    that cannot be verified gives `rf32`, the strictest rule for the inputs (the least-privilege roles); `collect`
+    that cannot be verified gives `rf33`, the strictest rule for the inputs (the least-privilege roles); `collect`
     refuses that pin before anything runs."""
     try:
         return verify_collector(collector_dir, frozen_sha256=None)['generation']
     except Refusal:
-        return RF32
+        return RF33
 
 
 def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
@@ -520,7 +523,7 @@ def login_args(conn, role):
     return [] if user is None else ['--login-user', user]
 
 
-def check_privileges(text, generation=RF32):
+def check_privileges(text, generation=RF33):
     """The `collection-privileges` input for the collector `generation`; `bad_input` for a repeat or a name that
     collector does not accept."""
     roles = ROLES_BY_GENERATION.get(generation, LEAST_PRIVILEGE_ROLES)

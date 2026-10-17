@@ -327,6 +327,20 @@ QUERIES = [
        'databases (is_current marks the database the catalog reads were made in)'),
 ]
 CATALOG_KEYS = list(dict.fromkeys(q['key'] for q in QUERIES if q['key']))
+# rf33: the queries read again in each other database `databases` lists with datallowconn (same login, same
+# read-only session, the same argv plus `-d <datname>`); written to catalog_snapshot.json#other_databases
+OTHER_DATABASES_KEY = 'other_databases'
+OTHER_DATABASE_QUERIES = ('objects', 'functions')
+OTHER_DATABASES_SECONDS = 60      # the whole pass; a database not reached in time is a gap, never read late
+OTHER_DATABASES_MAX_BYTES = 1048576   # the section's share of catalog_snapshot.json
+SNAPSHOT_MAX_BYTES = 4194304      # serve/profiles/postgresql-observed-baseline.json caps raw/catalog_snapshot.json
+SNAPSHOT_MARGIN = 65536           # room left for redaction markers past the measured size
+OTHER_DATABASES_SIDECAR_MAX_BYTES = 1048576   # the pass's share of COLLECTION-SIDECAR.json (the profile caps it at
+OTHER_DATABASES_SIDECAR_RESERVE = 16384       # 4194304 bytes); room kept for one database's two rows
+OTHER_DATABASES_CUT = ('not recorded: its objects and functions are past the other_databases size budget of '
+                       'catalog_snapshot.json')
+CLOCK = time.monotonic
+SIDECAR_LABEL = 'sidecar_label'   # read_other_databases -> fit_other_databases only: a withheld name's row ids
 
 
 def render_queries():
@@ -334,12 +348,37 @@ def render_queries():
                output_contract='each query returns exactly one JSON value on stdout (psql -At)',
                read_only='every query is a single SELECT; the default runner session sets '
                          'default_transaction_read_only=on; nothing is retried, never as another role',
-               secret_keywords='SECRET-KEYWORDS.json', queries=QUERIES)
+               secret_keywords='SECRET-KEYWORDS.json', queries=QUERIES,
+               other_databases={'queries': list(OTHER_DATABASE_QUERIES),
+                                'databases': 'each databases row with datallowconn true and is_current false',
+                                'connect': "the same psql argv plus -d \"dbname='<datname>'\" (a conninfo naming only "
+                                           "the database: ' and \\ escaped, so the name never sets the host, "
+                                           "the role or the session), the same read-only session, never as "
+                                           "another role, never retried",
+                                'sidecar_id': '<query id>@<datname>, or <query id>@<withheld: structured value>#<its '
+                                              'databases index> for a datname withheld as a structured value',
+                                'output': 'catalog_snapshot.json#other_databases: [{datname, objects, functions} or '
+                                          '{datname, gap}]; a database read carries no gap key; '
+                                          'a database whose connection or either query fails carries gap (the error '
+                                          'text, the server host and address replaced) and no objects or functions '
+                                          'keys',
+                                'budget': 'the pass stops after %d s: a database not begun by then is a gap and is '
+                                          'not read (one begun in time runs each query); a database whose objects '
+                                          'and functions do not fit the section\'s %d bytes (or the room '
+                                          'catalog_snapshot.json has left under its %d-byte cap, room kept first '
+                                          'for every database\'s gap) is a gap with no objects or functions keys; '
+                                          'a database is left out only when the gaps alone do not fit, and none '
+                                          'of its sidecar rows is then observed; the per-database sidecar rows '
+                                          'stop at %d bytes of COLLECTION-SIDECAR.json: a database past them is '
+                                          'a gap and is not read, and one sidecar row other_databases counts '
+                                          'those databases' % (OTHER_DATABASES_SECONDS, OTHER_DATABASES_MAX_BYTES,
+                                                               SNAPSHOT_MAX_BYTES,
+                                                               OTHER_DATABASES_SIDECAR_MAX_BYTES)})
     return json.dumps(doc, indent=2, ensure_ascii=False) + '\n'
 
 
 # ---------------------------------------------------------------- runner
-_PSQL = {'argv': None, 'env': None}
+_PSQL = {'argv': None, 'env': None, 'timeout': None}
 
 
 def build_psql_command(psql, login):          # RF-28 (d): -U takes the login name (--login-user, default --role)
@@ -354,17 +393,156 @@ def build_psql_command(psql, login):          # RF-28 (d): -U takes the login na
 def psql_runner(sql):
     if _PSQL['argv'] is None:
         return 2, '', 'psql runner not configured'
+    limit = _PSQL.get('timeout') or 120         # rf33: the other-databases pass lowers it to its remaining budget
     try:
         run = subprocess.run(_PSQL['argv'] + ['-c', sql], env=_PSQL['env'], capture_output=True, text=True,
-                             timeout=120)
+                             timeout=limit)
     except FileNotFoundError:
         return 127, '', 'psql executable not found'
     except subprocess.TimeoutExpired:
-        return 124, '', 'psql timed out after 120 s'
+        return 124, '', 'psql timed out after %s s' % limit
     return run.returncode, run.stdout, run.stderr
 
 
 RUNNER = psql_runner
+
+
+_SERVER_AT = re.compile(r'connection to server (?:at "[^"]*"(?: \([^)]*\))?, port \d+|on socket "[^"]*") failed:')
+_IPV4 = re.compile(r'(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])')
+_IPV6 = re.compile(r'(?<![\w:])\[?[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){3,7}\]?(?![\w:])')
+
+
+def scrub_server(text, env):
+    """rf33: an other-database error without the server's host, address, port or socket path. psql 14 to 18 prefix
+    each connection failure with them; this text is uploaded (gap and sidecar error), so they are replaced."""
+    s = _SERVER_AT.sub('connection to server failed:', text or '')
+    hosts = {h.strip() for key in ('PGHOST', 'PGHOSTADDR') for h in str((env or {}).get(key) or '').split(',')}
+    for host in sorted((h for h in hosts if h), key=len, reverse=True):
+        s = re.sub(r'(?<![\w.-])%s(?![\w.-])' % re.escape(host), '<host>', s)
+    return _IPV6.sub('<address>', _IPV4.sub('<address>', s))
+
+
+def dbname_conninfo(name):
+    """rf33: `-d` for database `name` as a conninfo holding only dbname. psql reads a `-d` value holding `=` or a
+    postgresql:// or postgres:// prefix as a whole connection string, so a raw datname could move the host, the role
+    or the session options; quoted (libpq: single quotes, backslash before ' and \\) it names that database only."""
+    return "dbname='%s'" % name.replace('\\', '\\\\').replace("'", "\\'")
+
+
+def read_other_databases(collector, rows, major):
+    """rf33: OTHER_DATABASE_QUERIES (those published for `major`) in each `databases` row with datallowconn true and
+    is_current false, through the same runner with `-d dbname_conninfo(datname)` appended to the argv, once each, never
+    retried; a query not run there (an earlier one failed, or the budget was spent) is a `missing` sidecar row.
+    One entry per database: {datname, objects, functions} (no gap key), or {datname, gap: <error text>} when the
+    connection or either query fails (host and address scrubbed; a query already read there becomes a `missing` sidecar
+    row, as its rows are not kept), or when the pass has spent OTHER_DATABASES_SECONDS before the database's first
+    query (not visited). The budget is checked once per database: a database begun in time runs each of its queries,
+    each with a psql timeout of the budget left (at least 1 s). The rows of the pass stop at
+    OTHER_DATABASES_SIDECAR_MAX_BYTES of the sidecar (as dump() writes them, room kept for a later `not kept` error):
+    a database past it is a gap, not read and given no per-query row, and one `missing` row other_databases counts
+    them, so the sidecar stays under its profile cap. A sidecar row's id is `<query>@<datname>`, or
+    `<query>@<withheld: structured value>#<databases index>` for a datname redact_string withholds (the sidecar and
+    TIMING.json are written without redact_tree, so the name is withheld here as the snapshot withholds it; such a
+    name is replaced by `<datname>` in its error text)."""
+    queries = [q for q in QUERIES if q['id'] in OTHER_DATABASE_QUERIES and q['min_major'] <= major <= q['max_major']]
+    base, limit, out = _PSQL['argv'], _PSQL.get('timeout'), []
+    begun, spent, skipped = CLOCK(), 0, 0
+    for index, row in enumerate(rows):
+        if not (isinstance(row, dict) and row.get('datallowconn') is True and row.get('is_current') is False
+                and isinstance(row.get('datname'), str)):
+            continue
+        name = row['datname']
+        label = name if not structured_string(name) else '%s#%d' % (WITHHELD_VALUE, index)
+        entry, gap, read, first = {'datname': name}, None, [], len(collector.entries)
+        if spent + OTHER_DATABASES_SIDECAR_RESERVE > OTHER_DATABASES_SIDECAR_MAX_BYTES:
+            skipped += 1
+            out.append({'datname': name, 'gap': 'not visited: the other_databases sidecar budget of %d bytes was '
+                                                'spent' % OTHER_DATABASES_SIDECAR_MAX_BYTES})
+            continue
+        if OTHER_DATABASES_SECONDS - (CLOCK() - begun) <= 0:
+            gap = 'not visited: the other_databases time budget of %d s was spent' % OTHER_DATABASES_SECONDS
+        _PSQL['argv'] = None if base is None else list(base) + ['-d', dbname_conninfo(name)]
+        try:
+            for query in queries:
+                qid = query['id']
+                query = dict(query, id='%s@%s' % (qid, label), key=OTHER_DATABASES_KEY)
+                if gap is not None:                     # not run: a sidecar gap row, so each query keeps its row
+                    collector.record_query(query, 'missing', None, 'not read: ' + gap, 'other')
+                    continue
+                left = OTHER_DATABASES_SECONDS - (CLOCK() - begun)
+                _PSQL['timeout'] = max(1, min(120, int(left)))
+                status, value, error, error_class = collector.run(query, None if label == name else name)   # once, never retried
+                error = scrub_server(error, _PSQL['env']) if error else error
+                collector.record_query(query, status, value, error, error_class)
+                if status in ('observed', 'observed_empty'):
+                    entry[qid] = value
+                    read.append(query['id'])
+                else:
+                    gap = error or status
+        finally:
+            _PSQL['argv'], _PSQL['timeout'] = base, limit
+        if gap is not None:
+            entry = {'datname': name, 'gap': gap}
+            unkept(collector, read, 'not kept: ' + gap)
+        if label != name:                       # fit_other_databases names its sidecar rows by it (and drops it)
+            entry[SIDECAR_LABEL] = label
+        out.append(entry)
+        spent += sum(sidecar_size(e) for e in collector.entries[first:])
+    if skipped:
+        collector.record_query({'id': OTHER_DATABASES_KEY, 'key': OTHER_DATABASES_KEY, 'views': []}, 'missing', None,
+                               'not visited: %d databases past the other_databases sidecar budget of %d bytes; no '
+                               'query was run in them' % (skipped, OTHER_DATABASES_SIDECAR_MAX_BYTES), 'other')
+    return out
+
+
+def sidecar_size(row):
+    """rf33: the bytes of sidecar row `row` as dump() nests it in entries, its error as long as OTHER_DATABASES_CUT
+    at least (fit_other_databases may rewrite it so)."""
+    text = json.dumps(dict(row, error=None), sort_keys=True, indent=2, ensure_ascii=False)
+    error = json.dumps(row.get('error'), ensure_ascii=False)
+    return (len(text.encode('utf-8')) + max(len(error.encode('utf-8')), len(OTHER_DATABASES_CUT) + 2)
+            + 6 * (text.count('\n') + 1) + 2)
+
+
+def unkept(collector, ids, error):
+    """rf33: the observed sidecar rows `ids` (read, but their rows are not in the snapshot) become `missing`."""
+    for row in (collector.entries if collector else []):
+        if row.get('kind') == 'query' and row.get('id') in ids and row.get('status') in ('observed', 'observed_empty'):
+            row.update(status='missing', error=error, error_class='other')
+
+
+def fit_other_databases(entries, used, collector=None):
+    """rf33: the section within OTHER_DATABASES_MAX_BYTES and within the room catalog_snapshot.json (`used` bytes
+    without it) has left under SNAPSHOT_MAX_BYTES, so a snapshot main wrote under the cap stays under it. Room is kept
+    first for each database's gap form, so a database is listed whenever the gap forms fit; a database whose rows do
+    not fit then is a gap with no objects or functions keys, and its sidecar rows `missing`. Only past that (more gap
+    forms than the room holds) is a database left out of the section; it is then a gap form, so none of its sidecar
+    rows is observed. An entry's sidecar rows are `<query>@<its SIDECAR_LABEL>` when read_other_databases set one (a
+    withheld name), else `<query>@<datname>`; the label is not written to the section."""
+    room = min(OTHER_DATABASES_MAX_BYTES, SNAPSHOT_MAX_BYTES - SNAPSHOT_MARGIN - used)
+
+    def size(entry):                            # as dump() nests it: two levels deeper, plus the separator
+        text = json.dumps(entry, sort_keys=True, indent=2, ensure_ascii=False)
+        return len(text.encode('utf-8')) + 4 * (text.count('\n') + 1) + 2
+
+    def ids(label):
+        return {'%s@%s' % (q, label) for q in OTHER_DATABASE_QUERIES}
+
+    cut = OTHER_DATABASES_CUT
+    labels = [entry.get(SIDECAR_LABEL, entry['datname']) for entry in entries]
+    entries = [{k: v for k, v in entry.items() if k != SIDECAR_LABEL} for entry in entries]
+    gaps = [entry if entry.get('gap') is not None else {'datname': entry['datname'], 'gap': cut} for entry in entries]
+    out, spent, reserved = [], 0, sum(size(gap) for gap in gaps)
+    for entry, gap, label in zip(entries, gaps, labels):
+        reserved -= size(gap)
+        if entry is not gap and spent + size(entry) + reserved > room:
+            unkept(collector, ids(label), cut)
+            entry = gap
+        if spent + size(entry) > room:          # a gap form only (no sidecar row of it is observed)
+            continue
+        spent += size(entry)
+        out.append(entry)
+    return out
 
 
 class Refusal(Exception):
@@ -2031,12 +2209,14 @@ class Collector:
         self.major = None
 
     # ---- queries
-    def run(self, query):
+    def run(self, query, withhold=None):
         start = time.monotonic()
         try:
             code, stdout, stderr = RUNNER(query['sql'])
         except Exception as error:  # a runner failure is recorded, never retried
             code, stdout, stderr = 1, '', 'runner raised ' + type(error).__name__
+        if withhold and stderr:     # rf33: a withheld datname leaves the error text before clean_error reads it
+            stderr = stderr.replace(withhold, '<datname>')
         self.timing['query_elapsed_ms'][query['id']] = round((time.monotonic() - start) * 1000, 3)
         if code != 0:
             status, error_class = classify(stderr)
@@ -2633,6 +2813,12 @@ def _collect(args, out, started, state):
     def ok(key):
         return key in raw_results and raw_results[key][0] in ('observed', 'observed_empty')
 
+    # ---- rf33: objects and functions in every other connectable database (a key only when `databases` was read)
+    if ok('databases') and isinstance(raw_results['databases'][1], list):
+        other_databases = read_other_databases(collector, raw_results['databases'][1], major)
+    else:
+        other_databases = None
+
     # ---- file locations (server view, remapped onto --data-dir)
     locations = raw_results.get('file_locations', (None, None))[1] if ok('file_locations') else {}
     locations = locations if isinstance(locations, dict) else {}
@@ -2769,6 +2955,9 @@ def _collect(args, out, started, state):
                 sub['tables'] = [row.get('relname') for row in snapshot['subscription_rels']
                                  if isinstance(row, dict) and row.get('subname') == sub.get('subname')]
         assembled.append(SUB_KEY + '[].tables from subscription_rels (both reads succeeded)')   # RF-24 (a)
+    if other_databases is not None:             # rf33: within the snapshot's cap (fit_other_databases)
+        snapshot[OTHER_DATABASES_KEY] = fit_other_databases(other_databases, len(dump(snapshot).encode('utf-8')),
+                                                             collector)
     fields = []
     snapshot = redact_tree(snapshot, 'catalog_snapshot', fields)
     note_fields('raw/catalog_snapshot.json', [f[len('catalog_snapshot.'):] for f in fields])
