@@ -77,12 +77,12 @@ The checker performs no SQL of its own. Its readings describe what the declared 
 
 ## The declared stack
 
-The served `python-auth-declared-model` declaration, schema `assure.python-auth.declaration/v1`, has no `stack` key: its stack is `language` `python` with `idiom` `flask-session-decorator`. A `stack` key in it (as an `assure.identity.declaration/v1` contract-form declaration carries) breaks that schema at `/stack`, and the refusal reads one of two kinds, whether `/stack` is its first fault or a later one:
+The served `python-auth-declared-model` declaration, schema `assure.python-auth.declaration/v1`, has no `stack` key: its stack is `language` `python` with `idiom` `flask-session-decorator`. A `stack` key in it (as an `assure.identity.declaration/v1` contract-form declaration carries) breaks that schema at `/stack`, and the refusal reads one of two kinds, whether `/stack` is its first fault or a later one. A repository of `python/fastapi` or `python/django` is read instead by that stack's adapter, from an `assure.identity.declaration/v1` declaration naming the stack (QUICKSTART-API.md section 15); `POST /v1/checks` refuses that form naming another stack `profile_refused` (rule `stack`), the action naming the three stacks:
 
 | Kind | Meaning |
 |---|---|
-| `stack_not_wired` | `profile_refused`, malformation field `stack`: the stack is registered but this build has no runner leg for it. `expected` reads "a stack with a runner leg on this build; STACK is registered but not wired (missing: LEG)", with the declared stack for STACK and the adapter's package for LEG, for example `go/gin` and `assure/checkers/identity/adapters/go_gin`. Send it again once the leg is served. Nothing is charged. |
-| `declaration_invalid` | The value is no registered stack, or is `python/flask`, this profile's own stack, which the served form declares by `language` and `idiom`: fix `raw/declaration.json` at `/stack`. |
+| `stack_not_wired` | `profile_refused`, malformation field `stack`: the stack is registered but this build has no runner leg for it. `expected` reads "a stack with a runner leg on this build; STACK is registered but not wired (missing: LEG)", with the declared stack for STACK and the adapter's package for LEG, for example `go/gin` and `assure/checkers/identity/adapters/go_gin`. Send it again once the leg is served, or send a repository of a stack this profile serves (`python/flask`, `python/fastapi` or `python/django`). Nothing is charged. |
+| `declaration_invalid` | The value is no registered stack; or is `python/fastapi` or `python/django`, whose adapter reads the `assure.identity.declaration/v1` form, not this one; or is `python/flask`, this profile's own stack, which the served form declares by `language` and `idiom`: fix `raw/declaration.json` at `/stack`. |
 
 ## MySQL submissions
 

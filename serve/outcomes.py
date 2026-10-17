@@ -449,6 +449,10 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 'nothing ran and nothing was charged.',
                 # serve-079 (3899 MEDIUM-1): while no paid formalisation runner is bound, no step of the customer's
                 # (another profile, a retry, allow_overage, a top-up) would succeed, so the action names none
+                # serve-089 (#266): a declaration whose stack this profile does not read names the served stacks
+                ('profile_refused', 'stack'):
+                'Declare a stack this profile serves: python/flask, python/fastapi or python/django (the `stacks` list '
+                'of the profile row in GET /v1/profiles); nothing ran and nothing was charged.',
                 ('profile_not_servable', 'runner_unbound'):
                 'Nothing to change on your side; the paid formalisation runner is not bound on this server yet, and '
                 'the free quote beside each requirement row stands until Symbolia binds it.',
@@ -581,7 +585,9 @@ FREE_ACTIONS = {
     ('declaration_invalid', 'parse'): 'Rewrite raw/declaration.json as UTF-8 JSON (the reason gives the position), '
                                       'then send again.',
     ('stack_not_wired', None): 'Send this declaration once its stack has a runner leg on this build (the reason names '
-                               'the missing leg); nothing was charged.',
+                               'the missing leg), or send a repository of a stack python-auth-declared-model serves: '
+                               'python/flask, python/fastapi or python/django (the `stacks` list of its row in GET '
+                               '/v1/profiles); nothing was charged.',
 }
 FLAGS_ACTION = ('Add the seven flags at their standing values to raw/REPOSITORY.json (execution_authorized, '
                 'hardware_authorized, industrial_release_authorized, release_allowed and physical_validation false; '

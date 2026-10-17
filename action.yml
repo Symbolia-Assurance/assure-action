@@ -134,7 +134,7 @@ outputs:
     description: "python-auth-declared-model, and postgresql-declared-model with a connection: unaccepted-draft when the check ran on a declaration drafted from the repository or the database, or on a pull request whose declaration is not yet on the base branch (the result is bounded by that draft until it is merged). Empty otherwise."
     value: ${{ steps.assure.outputs.declaration }}
   lint-findings:
-    description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a paid run). Empty otherwise."
+    description: "With mode lint, how many problems the pre-flight found (0 means the upload is ready for a check). Empty otherwise."
     value: ${{ steps.assure.outputs.lint-findings }}
   report-status:
     description: With the report on, written, withheld, refused, or running (the report was still being written when the Action stopped waiting; open report-url later). Empty otherwise.

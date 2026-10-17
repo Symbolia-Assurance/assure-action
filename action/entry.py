@@ -84,6 +84,8 @@ connection or a runner token.
 upload to `POST /v1/lint` instead of `POST /v1/checks` (never `Client.submit`): nothing is charged and no check runs.
 The lint record is written to the output path; the findings go to the job summary and as `::warning` annotations; the
 outputs are `outcome` (`lint`), `exit-code` (0 when nothing was found, else 2) and `lint-findings` (the count).
+Issue #3168: every lint run says LINT_PREFLIGHT (a pre-flight, no check ran, remove `mode: lint`) as the job
+summary's first line and one notice, and on a pull request as the one Assure comment.
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
@@ -208,6 +210,11 @@ NO_CREDENTIAL_REASON = ('Assure needs this workflow\'s GitHub identity or an api
                         'to the job that runs Assure (keep `contents: read` beside it), or pass api-key from a secret.')
 OIDC_LINE = 'Assure: signed in with this workflow\'s GitHub identity as account %s; the key for this run expires at %s'
 MAX_LINT_LINES = 50
+# Issue #3168: a workflow left on `mode: lint` ran on every pull request for days and never checked anything, and a
+# clean lint exits 0. Every lint run says so first: the job summary's first line, one notice and, on a pull request,
+# the one Assure comment (`post_pr_comment` with `body`).
+LINT_PREFLIGHT = ('This was a pre-flight: no check ran. '
+                  'Remove `mode: lint` from your workflow to check every pull request.')
 # Issue #1186 part 2: on the observed PostgreSQL profile the Action drafts a declaration beside the verdict file,
 # from the catalog snapshot it already collected and withheld (`draft_proposal`). serve/envelope.py PROPOSAL_FILE
 # names the same file.
@@ -574,20 +581,25 @@ def _pull_number(env):
     return n if type(n) is int and n > 0 else None
 
 
-def post_pr_comment(env, verdict, github, tree=None, tree_bases=()):
+def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
     looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
     A GitHub answer that is not 2xx is `api_error` naming its status, with `detail.status` (a 403 is the missing
     `pull-requests: write`; `main` prints it as one notice). Issue #2651: `tree` ({url, proven, total}) adds the
-    footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`)."""
+    footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`).
+    Issue #3168: `body` (a `mode: lint` run's LINT_PREFLIGHT) is posted in place of the verdict's comment, under the
+    same marker, so the one Assure comment says no check ran."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
         return None
     repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or number is None:
         return None
-    body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
-                                      tree_bases=tree_bases)
+    if body is not None:
+        body = '%s\n%s\n' % (render.PR_COMMENT_MARKER, body)
+    else:
+        body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
+                                          tree_bases=tree_bases)
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
@@ -1796,6 +1808,23 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 state['report'] = Refusal('api_error', 'the report request failed unexpectedly (%s)' % type(e).__name__)
         return verdict, list(collected.ignored)
 
+    def pr_comment(verdict, **kw):
+        """Issue #2189: on a pull_request event with a workflow token, post or update the one Assure comment; never
+        changes the verdict, its file or its exit. Issue #3168: `mode: lint` posts its LINT_PREFLIGHT through here."""
+        if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS or not str(env.get('GITHUB_TOKEN') or '').strip():
+            return
+        try:
+            post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
+                                                 str(env.get('GITHUB_TOKEN')).strip()), **kw)
+        except Refusal as e:
+            if e.detail.get('status') == 403:          # the token cannot write comments: say the line to add, once
+                say('::notice title=Assure comment::%s' % _cmd_data(PR_COMMENT_NOTICE))
+            else:
+                say('::warning title=Assure comment::%s' % _cmd_data(scrub(e.reason)))
+        except Exception as e:  # the class name only, never a value
+            say('::warning title=Assure comment::%s' % _cmd_data(
+                'the pull request comment failed unexpectedly (%s)' % type(e).__name__))
+
     def finish_lint(doc, ignored):
         """serve-043: write the lint record to the output path, the findings to the job summary and as warnings, and the
         outputs outcome `lint`, exit-code (0 when ok, else 2) and lint-findings. Never a charge, never a check."""
@@ -1804,7 +1833,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         found = [f for f in doc['findings'] if isinstance(f, dict)]
         code = 0 if doc.get('ok') is True and not found else 2
         try:
-            summary = _lint_markdown(found)
+            summary = LINT_PREFLIGHT + '\n\n' + _lint_markdown(found)     # issue #3168: the first line
         except Exception as e:  # the class name only, never a value
             return failed(Refusal('api_error', 'the lint record could not be rendered (%s)' % type(e).__name__))
         decl_line, decl_md, decl_out = declaration_note()       # serve-102
@@ -1817,6 +1846,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             _append(env.get('GITHUB_STEP_SUMMARY'), summary)
         except OSError as w:
             say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
+        say('::notice title=Assure::%s' % _cmd_data(LINT_PREFLIGHT, cap=None))     # issue #3168
+        pr_comment(doc, body=LINT_PREFLIGHT)
         for f in found:
             say('::warning title=%s::%s' % (_cmd_prop('Assure lint'), _cmd_data(_lint_line(f))))
         if ignored:
@@ -1932,21 +1963,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
     if both is not None:                               # issue #2928: the verdict's first notice reads both readings
         say('::notice title=Assure::%s' % _cmd_data('Assure: ' + both, cap=None))
-    if env.get('GITHUB_EVENT_NAME') in PR_EVENTS and str(env.get('GITHUB_TOKEN') or '').strip():
-        try:                                           # issue #2189: never changes the verdict, its file or its exit
-            client = state.get('client')
-            post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
-                                                 str(env.get('GITHUB_TOKEN')).strip()),
-                            tree=pr_tree(verdict, state['tree']),
-                            tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()))
-        except Refusal as e:
-            if e.detail.get('status') == 403:          # the token cannot write comments: say the line to add, once
-                say('::notice title=Assure comment::%s' % _cmd_data(PR_COMMENT_NOTICE))
-            else:
-                say('::warning title=Assure comment::%s' % _cmd_data(scrub(e.reason)))
-        except Exception as e:  # the class name only, never a value
-            say('::warning title=Assure comment::%s' % _cmd_data(
-                'the pull request comment failed unexpectedly (%s)' % type(e).__name__))
+    client = state.get('client')
+    pr_comment(verdict, tree=pr_tree(verdict, state['tree']),
+               tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()))
     for line in notes:
         say(line)
     if ignored:
