@@ -490,13 +490,17 @@ class Client:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
 
-    def declaration_proposal(self, files):
-        """Draft with the server's identity proposer; never run a second reader in the Action."""
+    def declaration_proposal(self, files, stack='python/flask'):
+        """Draft with the server's identity proposer; never run a second reader in the Action. Issue #3376: `stack`
+        names the identity stack to draft for (sent as the body's `stack` unless it is python/flask, main's body); the
+        answer must be that stack's record."""
         body = bundle.request_body('python-auth-declared-model',
                                    {'raw/repository/' + n: d for n, d in files.items()})
+        if stack != 'python/flask':
+            body = json.dumps(dict(json.loads(body), stack=stack), separators=(',', ':')).encode('ascii')
         status, doc = self._call('POST', '/v1/declaration-proposal', body, route='declaration_proposal')
         if (status != 200 or doc.get('schema') != 'assure.identity.declaration-proposal/v1'
-                or doc.get('stack') != 'python/flask' or not isinstance(doc.get('declaration'), dict)
+                or doc.get('stack') != stack or not isinstance(doc.get('declaration'), dict)
                 or not isinstance(doc.get('sources'), dict) or not isinstance(doc.get('confirm'), list)):
             raise Refusal('api_error', 'the API answered without a declaration proposal record')
         return doc
@@ -637,6 +641,18 @@ class Client:
         status, doc = self._call('POST', path, body, route='lint')
         if status != 200 or doc.get('schema') != LINT_SCHEMA or not isinstance(doc.get('findings'), list):
             raise Refusal('api_error', 'the API answered without a lint record')
+        return doc
+
+    def tree(self, check_id):
+        """Read this account's stored tree, including its formal model; no work is submitted."""
+        if not isinstance(check_id, str) or not CHECK_ID_RE.fullmatch(check_id):
+            raise Refusal('bad_input', 'a proof tree needs the check id of a verdict')
+        status, doc = self._call('GET', '/v1/checks/%s/tree' % check_id, route='tree')
+        header = doc.get('header') if isinstance(doc, dict) else None
+        if status != 200 or not isinstance(doc, dict) or doc.get('schema') != 'assure.proof-tree/v1' \
+                or doc.get('check_id') != check_id or not isinstance(header, dict) \
+                or header.get('check_id') != check_id:
+            raise Refusal('api_error', 'the API answered without the proof tree of this check')
         return doc
 
     def report(self, check_id, *, allow_overage=False):

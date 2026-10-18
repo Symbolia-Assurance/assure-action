@@ -630,9 +630,15 @@ def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, c
     tree = proof_tree.build(verdict, goals=list(goals or ()) or None, requirements_text=text,
                             proposal=_proposal_module() if goals else None, repository=repository, commit=commit,
                             **layer2)
-    _write_file(Path(directory) / PROOF_TREE_JSON, (json.dumps(tree, indent=2, sort_keys=True, ensure_ascii=False)
-                                                    + '\n').encode('utf-8'))
-    _write_file(Path(directory) / PROOF_TREE_HTML, proof_tree.render_html(tree).encode('utf-8'))
+    return write_tree_artifacts(tree, directory)
+
+
+def write_tree_artifacts(tree, directory):
+    """Write one tree object and render that same reading into the companion page."""
+    encoded = (json.dumps(tree, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8')
+    page = proof_tree.render_html(tree).encode('utf-8')
+    _write_file(Path(directory) / PROOF_TREE_JSON, encoded)
+    _write_file(Path(directory) / PROOF_TREE_HTML, page)
     return tree
 
 
@@ -1957,13 +1963,39 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     summary += proposal_md
     draft_out = ('requirements-draft=%s\n' % (Path(out_text).parent / REQUIREMENTS_DRAFT_FILE)  # issue #2892
                  if proposal_md else '')
-    try:                                               # issue #2651: never changes the verdict, its file or its exit
-        repo_name = str(env.get('GITHUB_REPOSITORY') or '').strip()
-        state['tree'] = write_proof_tree(verdict, out_path.parent, state['goals'],
-                                         (state['requirements_text'] or [None])[0], repo_name or None,
-                                         _head_commit(env))
+    client = state.get('client')
+    tree_url = verdict.get('tree_url')
+    tree_bases = (DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ())
+    served_tree = state['mode'] == 'api' and render.tree_url_ok(tree_url, tree_bases)
+    try:                                               # never changes the verdict, its file or its exit
+        if served_tree:
+            state['tree'] = client.tree(verdict['check_id'])
+            write_tree_artifacts(state['tree'], out_path.parent)
+        else:
+            repo_name = str(env.get('GITHUB_REPOSITORY') or '').strip()
+            state['tree'] = write_proof_tree(verdict, out_path.parent, state['goals'],
+                                             (state['requirements_text'] or [None])[0], repo_name or None,
+                                             _head_commit(env))
     except Exception as w:  # the class name only, never a value
-        say('::warning title=Assure::%s' % _cmd_data('the proof tree could not be written (%s)' % type(w).__name__))
+        if served_tree:
+            state['tree'] = None
+            retained_files = []
+            for name in (PROOF_TREE_JSON, PROOF_TREE_HTML):
+                try:
+                    (out_path.parent / name).unlink(missing_ok=True)
+                except OSError:
+                    retained_files.append(name)
+            if retained_files:
+                notice = ('The formal model was not retrieved into the downloaded proof tree. Existing tree files '
+                          'could not be removed: %s; they must not be used or uploaded. '
+                          'Open the server proof-tree link in the verdict file.' % ', '.join(retained_files))
+            else:
+                notice = ('The formal model was not retrieved into the downloaded proof tree; its files are unavailable. '
+                          'Open the server proof-tree link in the verdict file.')
+            summary += '\n' + notice + '\n'
+            say('::warning title=Assure proof tree::%s' % _cmd_data(notice))
+        else:
+            say('::warning title=Assure::%s' % _cmd_data('the proof tree could not be written (%s)' % type(w).__name__))
     if state['pg_proposal'] is not None:              # issue #2435: the drafted declaration's record, beside the verdict
         try:
             _write_file(out_path.parent / PROPOSAL_FILE, (json.dumps(

@@ -3187,7 +3187,7 @@ def _pr_rule(lab, name):
 
 
 def _pr_closing(env, commit):
-    """The closing line: what Assure read (for a python-* profile the profile's own scope note, '... over <catalogue>:
+    """The closing line: a static check that could not look says so; otherwise what Assure read (for a python-* profile the profile's own scope note, '... over <catalogue>:
     <what it reads>.'; else the machines read and not read when there is more than one or one was refused, else the
     inputs the profile lists), that it ran none of the app's code (python-* profiles, which read the repository's
     files), the profile and the commit."""
@@ -3209,8 +3209,10 @@ def _pr_closing(env, commit):
     profile = ('`%s`' % profile if isinstance(profile, str) and _PR_PROFILE.fullmatch(profile) else esc(profile))
     named = '`%s`' % commit[:7] if isinstance(commit, str) and _PR_COMMIT.fullmatch(commit) else (
         esc(commit[:12]) if commit else 'not named')
-    return 'Assure read %s.%s Profile %s, commit %s.' % (
-        words, " It ran none of the app's code." if _pr_static(env) else '', profile, named)
+    reading = ('Assure could not read this change.' if _pr_static(env) and could_not_look(env)
+               else 'Assure read %s.' % words)
+    return '%s%s Profile %s, commit %s.' % (
+        reading, " It ran none of the app's code." if _pr_static(env) else '', profile, named)
 
 
 # The Director, 14 Oct 2026: "after the $1 ends the comment says please buy credits or upgrade". Free credits are not

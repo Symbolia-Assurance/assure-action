@@ -251,7 +251,7 @@ If a reading looks wrong, send a `wrong_reading` note through the [feedback rout
 
 ## Upgrade to Premium (USD 20 a month)
 
-Accounts start on the free plan. Premium (`usd_20`, USD 20 a month) adds checks of your app's sign-in and session routes, not only the database; paid formalisation of requirements no method states yet; and one monthly pool of USD 20 of usage that reports, formalisation and proof search share.
+Accounts start on the free plan. Premium (`usd_20`, USD 20 a month) adds checks of your app's sign-in and session routes, not only the database; paid formalisation of requirements no method states yet; and one monthly pool of USD 20 of usage that reports, formalisation and proof search share. Its model calls default to zero-retention endpoints in the US and the EU (DATA.md, "Where Premium model calls run"). Choosing a region for them is an enterprise feature, for later.
 
 To pay, open the Premium Payment Link with your account id appended as `client_reference_id`, as the upgrade line at the top of a free account's job summary does: `https://buy.stripe.com/<link>?client_reference_id=<your account id>`. You can read your exact link before your first run: on the free plan, `GET /v1/usage` carries `upgrade`, `{"url": "…", "line": "…"}`, the same link and sentence a free account's verdict carries. When the payment completes, your account moves to Premium; no other step is needed. A paid plan's answer never carries `upgrade`, and while Symbolia has set no Payment Link no answer does: then ask Symbolia for a checkout link.
 
@@ -888,7 +888,7 @@ A report for this profile is withheld with `profile_unqualified` until the repor
 
 `python-auth-declared-model` checks how a Flask app signs people in and guards its routes. It reads your code as text and never runs it. The check is free and contacts no server of yours.
 
-A whole workflow. It grants `contents: write` and `pull-requests: write` so the Action can open its proposal (below). Set `profile`; leave `artefacts` and `connection` empty:
+A whole workflow. It grants `id-token: write` so the Action signs in with your workflow's GitHub identity and you store no key, and `contents: write` and `pull-requests: write` so the Action can open its proposal (below). Set `profile`; leave `artefacts` and `connection` empty:
 
 ```yaml
 name: Assure
@@ -901,6 +901,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
   pull-requests: write
 
 jobs:
@@ -918,7 +919,6 @@ jobs:
         id: assure
         uses: Symbolia-Assurance/assure-action@beta
         with:
-          api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: python-auth-declared-model
 
       - name: Keep the verdict
@@ -931,7 +931,7 @@ jobs:
 
 The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 2000 Python files of 512 KiB each, within 2048 upload entries including manifests and an 8 MiB encoded request body. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
 
-**The declaration arrives as a proposal.** The check reads your app against a declaration at `.assure/declaration.json`: your app objects, the session key that means "signed in", your guard decorators, the views that sign people in, raise privilege and sign out, and the routes that are public on purpose. On the first run there is none, so the Action sends the bounded repository bytes to the free declaration proposal route, whose drafter uses the checker's own readers, and runs the check on the returned draft. A field the bytes do not give remains unread in the proposal for you to review. When your Flask app loads its configuration by name (`from_pyfile`, `from_object`, `from_envvar`) from a file or module the check reads as outside the repository (flaskr's `app.config.from_pyfile("config.py")` with no `instance/config.py`, or `from_envvar`; a `from_pyfile` or `from_object` name that is not a literal is not read, and drafts nothing), the draft proposes `instance_config: "constants-only"` as a field to confirm, read at that call: keep it only if that configuration assigns constants.
+**The declaration arrives as a proposal.** The check reads your app against a declaration at `.assure/declaration.json`: your app objects, the session key that means "signed in", your guard decorators, the views that sign people in, raise privilege and sign out, and the routes that are public on purpose. On the first run there is none, so the Action sends the bounded repository bytes to the free declaration proposal route, whose drafter uses the checker's own readers, and runs the check on the returned draft. When the repository's Python files import FastAPI or Django and no other web framework, the Action asks the route for that stack's draft (`stack: python/fastapi` or `python/django`) and the pull request says which stack it was drafted for; any other repository is drafted as Flask. A field the bytes do not give remains unread in the proposal for you to review. When your Flask app loads its configuration by name (`from_pyfile`, `from_object`, `from_envvar`) from a file or module the check reads as outside the repository (flaskr's `app.config.from_pyfile("config.py")` with no `instance/config.py`, or `from_envvar`; a `from_pyfile` or `from_object` name that is not a literal is not read, and drafts nothing), the draft proposes `instance_config: "constants-only"` as a field to confirm, read at that call: keep it only if that configuration assigns constants.
 
 Assure never commits to your branches; it opens one pull request proposing each profile's draft at its own path under .assure/; merging it is the acceptance. The pull request, `Assure: proposed intent — review and merge to accept`, comes from Assure's own branch `assure/declaration-proposal` into your base branch (the pull request's base, or your default branch on a push), and changes only the drafts' files: python-auth's `.assure/declaration.json` and `postgresql-declared-model`'s `.assure/postgresql-declared-model.json`, side by side when both profiles run on one repository, its description holding one section per file. Its description and the job summary list each field to confirm with the file and line it was read from. A later run updates the same pull request, keeping the other profile's file, in the shallow checkout `actions/checkout` leaves too; it never opens a second one. Its description opens by naming the file this run is proposing. A branch on an older base tip, or one holding a file its description does not name (a proposal opened before one pull request carried both profiles), is rebuilt from the base branch's tip, carrying over each draft under `.assure/` whose section its description holds (with that section); a file it does not name is left behind.
 

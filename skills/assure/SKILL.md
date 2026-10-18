@@ -62,7 +62,7 @@ In your repository, open **Settings → Secrets and variables → Actions → Ne
 
 ## Instructions of this skill, not from the documents
 
-- Ask the operator which route fits, then read that route's reference and follow it in order.
+- Choose the route from the repository and stated task; ask the customer only for intent or consent the repository cannot establish.
 - A section number in this skill names a numbered heading of the skill file the sentence names, or of the file the sentence is in; the skill folder carries every section it names.
 - If the database is on Supabase, tell the operator so before any grant; do not grant `pg_monitor` and do not set it in `collection-privileges`.
 - Show the operator `docs/DATA.md` before the first run, and ask before committing collected files to the repository.
@@ -98,6 +98,12 @@ Read [references/http.md](references/http.md).
 - `mysql-declared-model`: a MySQL server, from a `mysql://` connection and your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
 
 Read [references/mysql.md](references/mysql.md).
+
+## Route 5: a Python (Flask) repository
+
+`python-auth-declared-model` checks how a Flask app signs people in and guards its routes. It reads your code as text and never runs it. The check is free and contacts no server of yours.
+
+Read [references/python.md](references/python.md).
 
 ## The steps on every route
 

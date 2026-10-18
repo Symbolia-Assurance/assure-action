@@ -89,9 +89,24 @@ READS_INTENT_NOTE = ('`%s` reads the declaration supplied with the run; Assure d
                      'run with no `' + CHECKOUT_PATH + '` in the checkout, and proposes it in its own pull request.')
 
 
+_IMPORT = re.compile(rb'(?m)^[ \t]*(?:from|import)[ \t]+(flask|fastapi|django)\b')
+FRAMEWORK_STACKS = {b'fastapi': 'python/fastapi', b'django': 'python/django'}   # issue #3376; flask is STACK
+
+
+def stack_of(files):
+    """Issue #3376: the identity stack the repository's Python files import: python/fastapi or python/django when
+    that is the one web framework they import, STACK (main's reading) when they import Flask, more than one framework
+    or none."""
+    seen = {m for n, d in files.items() if str(n).endswith('.py') and isinstance(d, (bytes, bytearray))
+            for m in _IMPORT.findall(bytes(d))}
+    return FRAMEWORK_STACKS.get(seen.pop(), STACK) if len(seen) == 1 else STACK
+
+
 def draft(files, repository_id=None, *, client):
-    """The engine's proposal record; incomplete fields retain their unread sources for review."""
-    return client.declaration_proposal(files)
+    """The engine's proposal record for the repository's stack (`stack_of`); incomplete fields retain their unread
+    sources for review. A Flask repository is sent as on main (no `stack`)."""
+    stack = stack_of(files)
+    return client.declaration_proposal(files) if stack == STACK else client.declaration_proposal(files, stack=stack)
 
 
 def dumps(decl):
@@ -153,8 +168,10 @@ def _section(record, rel, source, lead=None):
     """One file's section of the body; `lead`, when given, replaces its first sentence (issue #2934: an observed
     verdict is not bounded by the draft)."""
     lines = [_SECTION % rel, '', lead or 'Assure drafted `%s` from %s and checked your app against the draft. Until this '
-             'pull request is merged, every Assure result is bounded by the draft.' % (rel, source), '',
-             'Fields to confirm:', '']
+             'pull request is merged, every Assure result is bounded by the draft.' % (rel, source), '']
+    if isinstance(record.get('stack'), str) and record['stack'] in FRAMEWORK_STACKS.values():
+        lines += ['Drafted for the `%s` stack.' % record['stack'], '']     # issue #3376
+    lines += ['Fields to confirm:', '']
     lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
                                else 'read at ' + _read_at(record, p)) for p in record['confirm']]
     notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
