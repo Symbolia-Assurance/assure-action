@@ -643,13 +643,16 @@ def write_tree_artifacts(tree, directory):
 
 
 def pr_tree(verdict, tree):
-    """{url, proven, total} for the comment's proof tree line: the verdict's own `tree_url` (the API adds it on
+    """{url, proven, total[, formal_model]} for the comment's proof tree line: the verdict's own `tree_url` (the API adds it on
     Premium and above; a free account's verdict carries none, so no line) and the tree's counts; None without either."""
     url = verdict.get('tree_url') if isinstance(verdict, dict) else None
     if not isinstance(url, str) or not isinstance(tree, dict):
         return None
     x, y = proof_tree.proven(tree)
-    return {'url': url, 'proven': x, 'total': y}
+    out = {'url': url, 'proven': x, 'total': y}
+    if isinstance(verdict.get('formal_model'), dict):          # issue #3881: the verdict's own, read by render
+        out['formal_model'] = verdict['formal_model']
+    return out
 
 
 def requirements_upload(env, cwd, goals=None, source=None):
@@ -1321,8 +1324,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'compile_requirements': True, 'draft': None, 'proposed': False, 'files': None, 'goals': [],
-             'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
+             'compile_requirements': True, 'draft': None, 'proposed': False, 'proposal_number': None, 'files': None,
+             'goals': [], 'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
              'requirements_text': [], 'tree': None, 'declared': None}
 
     def finish_feedback():
@@ -1400,10 +1403,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 say('::warning title=Assure declaration::%s' % _cmd_data(
                     'the draft could not be proposed (%s)' % type(w).__name__))
             step = declaration_draft.next_step(unread, d['rel'],
-                                               proposed=bool(decl_line) and 'not proposed' not in decl_line)
+                                               proposed=bool(decl_line) and 'not proposed' not in decl_line,
+                                               number=state.get('proposal_number'))
+        # issue #3118: with the next step shown, the customer reads it alone; the raw reason (a declaration pointer) and
+        # its 'What to do' stay in the failure file and the outcome, never in the summary or the annotation
         try:
             _append(env.get('GITHUB_STEP_SUMMARY'), ('## Assure: next step\n\n%s\n\n' % step if step else '')
-                    + render.failure_markdown(doc) + decl_md)
+                    + render.failure_markdown(doc, reason=not step) + decl_md)
         except OSError:
             pass
         if decl_line:
@@ -1412,13 +1418,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             try:                         # never changes the failure file or the exit; pr_comment types its own faults
                 named = str(env.get('INPUT_REQUIREMENTS') or '').strip() not in ('', NONE_SENTINEL)
                 body = render.pr_refusal_markdown(doc, (state['requirements_text'] or [None])[0], step or None,
-                                                  _head_commit(env), named=named)
+                                                  _head_commit(env), named=named, reason=not step)
                 pr_comment(None, body=body.split('\n', 1)[1].rstrip('\n'))
             except Exception as w:  # the class name only, never a value (a refusal before the comment step exists)
                 say('::warning title=Assure comment::%s' % _cmd_data(
                     'the pull request comment failed unexpectedly (%s)' % type(w).__name__))
         say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data(
-            '%s: %s%s' % (e.outcome, e.reason, '. ' + step if step else ''), cap=None if step else 300)))
+            '%s: %s' % (e.outcome, step or e.reason), cap=None if step else 300)))
         outputs(e.outcome, code, decl_out)
         finish_feedback()
         return code
@@ -1591,6 +1597,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12],
                     'commits the declaration' if d.get('observed') else 'accepts it')
                 state['proposed'] = True
+                state['proposal_number'] = got['number']        # issue #3118: the next step names it
             except Refusal as e:
                 if d.get('observed') and e.reason.startswith(declaration_draft.PUSH_REFUSED):
                     # REFUTATION-r1 HIGH-2: a `contents: read` token (the documented observed jobs, a fork) is not

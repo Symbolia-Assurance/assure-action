@@ -2553,17 +2553,19 @@ def hint_line(failure_envelope):
     return None
 
 
-def failure_markdown(failure_envelope):
+def failure_markdown(failure_envelope, reason=True):
+    """The job summary's failure section. `reason` False (issue #3118: the Action shows its own plain next step above
+    it) leaves out the reason, its 'What to do', the hint and the malformation lines; the failure file keeps them."""
     f = failure_envelope
-    hint = hint_line(f)
+    hint = hint_line(f) if reason else None
+    malformation = _malformation_line(f['detail'].get('malformation')) \
+        if reason and isinstance(f.get('detail'), dict) else None
     return '\n'.join(['## Assure: no reading', '',
-                      'Outcome: %s.' % esc(f.get('outcome')), '',
-                      'Reason: %s' % esc(f.get('reason')), '',
-                      'What to do: %s' % esc(next_step(f)), ''] +
+                      'Outcome: %s.' % esc(f.get('outcome')), ''] +
+                     (['Reason: %s' % esc(f.get('reason')), '',
+                       'What to do: %s' % esc(next_step(f)), ''] if reason else []) +
                      ([esc(hint), ''] if hint else []) +
-                     ([esc(_malformation_line(f['detail'].get('malformation'))), '']
-                      if isinstance(f.get('detail'), dict) and _malformation_line(f['detail'].get('malformation'))
-                      else []) +
+                     ([esc(malformation), ''] if malformation else []) +
                      [check_line(f)]) + '\n'
 
 
@@ -3294,7 +3296,41 @@ def pr_tree_line(tree, bases=()):
     x, y = t.get('proven'), t.get('total')
     if type(x) is not int or type(y) is not int or not 0 <= x <= y or not tree_url_ok(t.get('url'), bases):
         return None
-    return '[%s](%s)' % (PR_TREE_LINE % (x, y, ''), t['url'])
+    counts = formal_model_counts(t.get('formal_model'))
+    suffix = '' if counts is None else FORMAL_MODEL_SUFFIX % counts[:2]
+    return '[%s](%s)' % (PR_TREE_LINE % (x, y, suffix), t['url'])
+
+
+# Issue #3881: the verdict's `formal_model` ({model_id, built_at, sentences: [{sentence, state}]}) in the comment.
+FORMAL_MODEL_SUFFIX = ' · formal model: %d of %d sentences stated'
+FORMAL_MODEL_STATES = {'stated': 'method stated', 'not_stated': 'no method stated'}
+FORMAL_MODEL_LINES = 10
+
+
+def formal_model_counts(fm):
+    """(stated, all, sentences) for a well-formed `formal_model` (each sentence a string, each state 'stated' or
+    'not_stated', at least one sentence), None otherwise."""
+    rows = fm.get('sentences') if isinstance(fm, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return None
+    for r in rows:
+        if not (isinstance(r, dict) and isinstance(r.get('sentence'), str) and r.get('state') in FORMAL_MODEL_STATES):
+            return None
+    return sum(r['state'] == 'stated' for r in rows), len(rows), rows
+
+
+def pr_formal_model_line(tree, bases=()):
+    """'Formal model: <sentence> (method stated); ...' naming up to FORMAL_MODEL_LINES sentences with their state, then
+    'and K more'; None when the tree line is not written or `tree` carries no well-formed `formal_model`."""
+    counts = formal_model_counts(tree.get('formal_model') if isinstance(tree, dict) else None)
+    if counts is None or pr_tree_line(tree, bases) is None:
+        return None
+    rows = counts[2]
+    parts = ['%s (%s)' % (esc(r['sentence']).rstrip('.'), FORMAL_MODEL_STATES[r['state']])
+             for r in rows[:FORMAL_MODEL_LINES]]
+    if len(rows) > FORMAL_MODEL_LINES:
+        parts.append('and %d more' % (len(rows) - FORMAL_MODEL_LINES))
+    return 'Formal model: ' + '; '.join(parts)
 
 
 # ---------- assure-on-itself-001 (the Director, 17 Oct 2026; night read of #3843, H1) ----------
@@ -3375,6 +3411,9 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     line = pr_tree_line(tree, tree_bases)       # issue #2651: only for a verdict that carries a validated tree_url
     if line is not None:
         out += [line, '']
+        fm_line = pr_formal_model_line(tree, tree_bases)      # issue #3881: only with the verdict's formal_model
+        if fm_line is not None:
+            out += [fm_line, '']
     out.append('<sub>%s</sub>' % _pr_closing(env, commit))
     return '\n'.join(out) + '\n'
 
@@ -3406,17 +3445,18 @@ def pr_promises(text):
     return out
 
 
-def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None, named=False):
+def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None, named=False, reason=True):
     """The one pull request comment for a refused run (a failure envelope): the marker; the heading; the refusal's
     outcome and reason; one next step (`step` when the Action has one, else `next_step`); each promise of the
     requirements text sent (`pr_promises`) reading `not established` with the refusal as its reason, or the line that
     names the input to send one; the proof tree's line (none for this run); and the commit. Deterministic; every
-    customer-facing value is escaped with `esc`."""
+    customer-facing value is escaped with `esc`. With `reason=False`, the raw reason stays in the failure file while
+    the comment retains the outcome and next step."""
     f = failure if isinstance(failure, dict) else {}
     outcome = f.get('outcome')
     word = '`%s`' % outcome if isinstance(outcome, str) and _PR_OUTCOME.fullmatch(outcome) else esc(outcome)
     out = [PR_COMMENT_MARKER, '## %s' % PR_REFUSED_HEADING, '',
-           'This run was refused (%s): %s' % (word, esc(f.get('reason'))), '',
+           'This run was refused (%s)%s' % (word, ': ' + esc(f.get('reason')) if reason else '.'), '',
            '**Next step:** %s' % esc(step or next_step(f)), '']
     promises = pr_promises(requirements_text)
     if promises:

@@ -61,6 +61,28 @@ _ID = re.compile(r'[^A-Za-z0-9_.-]+')
 # other absent field read not established naming it. A server before #3899 refuses the draft (profile_refused,
 # declaration_invalid, keyword required) until the customer adds the field.
 READ_REQUIRED = ('app_roots', 'app_objects', 'session_identity_key', 'guards', 'identity_writers')
+# Issue #3118 (the Director, 16 Oct 2026; DD-150, DD-161 Add.6): the declaration is internal, so no line the customer
+# reads names one of its fields. Each field of the python-auth declaration schema (python-auth-declaration-v1.schema.json)
+# the customer could be asked about, in the customer's own terms; tests/serving/test_customer_words_accept.py reads the
+# schema and holds this map to it. BOOKKEEPING names the rest: fields the drafter always writes and never asks about.
+FIELD_WORDS = {
+    'app_roots': 'where your Flask app is created',
+    'app_objects': 'where your Flask app is created',
+    'session_identity_key': 'which session value holds the signed-in user',
+    'session_state_keys': 'which other session values your app keeps',
+    'session_elevation_keys': 'which session values mark raised access',
+    'second_factor_keys': 'which session values record a second sign-in step',
+    'guards': 'which decorators protect your routes',
+    'identity_writers': 'where the signed-in user is set',
+    'elevation_writers': 'where a session is given raised access',
+    'signout_views': 'where users sign out',
+    'libraries': 'which sign-in libraries your app uses',
+    'public_routes': 'which routes anyone may open without signing in',
+    'registrations_complete': 'whether Assure read every route your app registers',
+    'requirements_file': 'where your requirements file is',
+    'instance_config': 'how your app loads its instance configuration',
+}
+BOOKKEEPING = ('schema', 'id', 'language', 'idiom') + tuple(FLAGS)
 # Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
 # refuse unknown keys (serve/profiles.py ROW_KEYS) and the public tree ships no profile row (action/build_dist.py).
 # A row names the profile whose run drafts intent, the drafter, and the checkout path the declared profile reads it at
@@ -172,12 +194,48 @@ def _section(record, rel, source, lead=None):
     if isinstance(record.get('stack'), str) and record['stack'] in FRAMEWORK_STACKS.values():
         lines += ['Drafted for the `%s` stack.' % record['stack'], '']     # issue #3376
     lines += ['Fields to confirm:', '']
-    lines += ['- `%s` (%s)' % (p, 'not read from the code' if _read_at(record, p) == 'unread'
-                               else 'read at ' + _read_at(record, p)) for p in record['confirm']]
+    lines += ['- %s (%s)' % (label, _where(at)) for label, at in _confirm_rows(record)]
     notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
     if notes:                                       # issue #2567: routes kept out of public_routes, in plain words
         lines += ['', 'To confirm (routes Assure did not draft as public):', ''] + ['- %s' % n for n in notes]
     return '\n'.join(lines) + '\n'
+
+
+def _confirm_rows(record):
+    """[(label, [where read])] for the record's fields to confirm. Issue #3118: a python-auth record's fields are
+    labelled in the customer's terms (FIELD_WORDS), one row per field however many of its leaves are listed; any other
+    profile's record keeps one row per pointer, as written."""
+    rows, plain = {}, record.get('stack') == STACK
+    for p in record['confirm']:
+        top = p.strip('/').split('/')[0]
+        label = FIELD_WORDS[top][:1].upper() + FIELD_WORDS[top][1:] if plain and top in FIELD_WORDS else '`%s`' % p
+        at = rows.setdefault(label, [])
+        if _read_at(record, p) not in at:
+            at.append(_read_at(record, p))
+    return list(rows.items())
+
+
+def _where(at):
+    """Where one row's leaves were read, in words: 'read at a and b', 'not read from the code', or both."""
+    read = [a for a in at if a != 'unread']
+    out = 'read at ' + _join(read) if read else ''
+    if 'unread' in at:
+        out = out + '; partly not read from the code' if out else 'not read from the code'
+    return out
+
+
+def _join(items, conj='and'):
+    items = list(items)
+    return items[0] if len(items) == 1 else '%s %s %s' % (', '.join(items[:-1]), conj, items[-1])
+
+
+def plain_words(fields):
+    """Issue #3118: the customer's terms for declaration `fields`, each phrase once, in order."""
+    out = []
+    for f in fields:
+        if FIELD_WORDS.get(f, f) not in out:
+            out.append(FIELD_WORDS.get(f, f))
+    return out
 
 
 def _kept_sections(body, keep):
@@ -362,8 +420,9 @@ def summary_markdown(record, rel, proposed, source='the repository'):
     out = ['', '### Declaration: %s' % BOUNDED, '',
            'This check ran on a declaration drafted from %s (`%s`). %s' % (source, rel, proposed), '',
            '| Field to confirm | Read at |', '| --- | --- |']
-    for p in record['confirm']:
-        out.append('| `%s` | %s |' % (p, _read_at(record, p)))
+    for label, at in _confirm_rows(record):
+        out.append('| %s | %s |' % (label, ', '.join(at) if record.get('stack') != STACK else
+                                    ', '.join('not read from the code' if a == 'unread' else a for a in at)))
     return '\n'.join(out) + '\n'
 
 
@@ -377,15 +436,17 @@ def unread_required(data):
     return tuple(f for f in READ_REQUIRED if f not in decl) if isinstance(decl, dict) else ()
 
 
-def next_step(unread, rel, proposed=True):
-    """The one plain next step for a check refused on a partial draft: the unread fields by name, the file to add
-    them to (`proposed`: in Assure's pull request, else the draft in full in the job summary), and that no rule was
-    checked yet."""
-    names = ['`%s`' % f for f in unread]
-    names = names[0] if len(names) == 1 else '%s and %s' % (', '.join(names[:-1]), names[-1])
-    where = 'proposed in Assure\'s pull request' if proposed else 'not proposed; it is in full in the job summary'
-    return ('No rule was checked yet: Assure did not read %s from the code. Add %s to `%s` (the drafted declaration, '
-            '%s), then run again.' % (names, 'it' if len(unread) == 1 else 'them', rel, where))
+def next_step(unread, rel, proposed=True, number=None):
+    """The one plain next step for a check refused on a partial draft: what Assure could not find in the code, in the
+    customer's terms (issue #3118: never a declaration field's name), where to add it (`proposed`: Assure's pull request
+    `number`, to review and merge; else the draft in full in the job summary), and that no rule was checked yet."""
+    what = 'No rule was checked yet: in the code, Assure could not find %s.' % _join(plain_words(unread))
+    if not proposed:
+        return ('%s Assure could not open its pull request, so the draft is in full in the job summary; add what it '
+                'could not find to `%s`, then run again.' % (what, rel))
+    where = 'pull request #%d' % number if isinstance(number, int) else 'its pull request'
+    return '%s Assure proposed what it could read in %s (`%s`); add what it could not find, then merge it.' % (
+        what, where, rel)
 
 
 def intent_markdown(profile, drafted=False):

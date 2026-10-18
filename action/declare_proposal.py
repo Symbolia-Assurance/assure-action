@@ -22,7 +22,9 @@ The record is ``{schema, stack, declaration, sources, confirm}``, the shape of t
 Each rule below drafts the strict reading of what the snapshot shows (access_paths_complete excepted: it is drafted
 true beside protected_tables, always confirmed, since without it the row-security machine is refused). A value that would only widen what the checker
 accepts (an empty untrusted-role list, an empty administrator list) is never drafted from an absence: that key stays
-unread. A snapshot section the collector did not read (absent from the snapshot) is never read as empty.
+unread. Issue #2921 drafts three confirmed `default:` values from an absence: standbys, replication_roles and
+standby_addresses `[]` when roles were collected and no customer replication role was observed; tls_floor not
+collected stays unread (the Director, 17 Oct 2026). A snapshot section the collector did not read (absent from the snapshot) is never read as empty.
 
 The draft requirements.md (``requirements_draft``) holds the goals a person would write (``GOALS``), one plain
 sentence each, for the obligation families the drafted declaration decides; the header is a Markdown heading, so the
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -63,8 +66,6 @@ QUERY_CAP = 32
 ALWAYS_UNREAD = (
     "disjoint_duties",      # PRIV-3: which duties must stay apart is the operator's division of work
     "declared_revokes",     # PRIV-6: which grants the operator means to revoke
-    "intended_flows",       # HBA-2: pg_hba.conf is not in the catalog snapshot, and the flows are the operator's
-    "standby_addresses",    # HBA-4: standby addresses are not in the catalog snapshot
     "certificate_roles",    # TLS-3: which roles must present a client certificate
     "no_loss_required",     # REP-3, REP-3-CONFIG: whether a committed transaction may be lost is the operator's
     "exclusive_reader",     # LR-1: which role alone may read the replication stream
@@ -288,6 +289,73 @@ def _member_sources(rows):
     return out
 
 
+def _hba_rule_id(row, top=None, major=16):
+    """A pg_hba_file_rules row -> the rule id the frozen derive step assigns it, or None (an error row, no file or line,
+    or no known top-level file). `top` is the top-level hba file's path: the collector writes that file as
+    raw/pg_hba.conf whatever it is named, so its rows take the empty stem (derive.py parse_hba, depth 0). Before major
+    16 the view has no file_name and the file no includes, so every row is the top-level file's."""
+    if not isinstance(row, dict) or row.get("error") or type(row.get("line_number")) is not int:
+        return None
+    if major < 16 and "file_name" not in row:
+        return "hba-%d" % row["line_number"]
+    if type(row.get("file_name")) is not str or top is None:
+        return None
+    path = row["file_name"]
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = "" if path == top else _sanitize(name.rsplit(".", 1)[0] if "." in name[1:] else name) + "-"
+    return "hba-%s%d" % (stem, row["line_number"])
+
+
+def _hba_match(row, flow):
+    """Whether pg_hba_file_rules `row` matches `flow` as the frozen derive step's hba_match reads it: True, False, or
+    None when it may (a samerole or samegroup database, a +group or @file entry, a host name or an address the drafter
+    does not resolve, an unknown rule type), past which the drafter guesses no rule id. An error row and an empty name
+    item match nothing."""
+    if not isinstance(row, dict) or row.get("error"):
+        return False
+    kind, transport = row.get("type"), flow["transport"]
+    admits = {"local": transport == "local", "host": transport != "local", "hostssl": transport == "tls",
+              "hostnossl": transport in ("plain", "gss"), "hostgssenc": transport == "gss",
+              "hostnogssenc": transport in ("plain", "tls")}
+    if kind not in admits:
+        return None
+    if not admits[kind]:
+        return False
+
+    def items(value):
+        return [item for item in (value if isinstance(value, list) else [value]) if type(item) is str and item]
+    databases, users = items(row.get("database")), items(row.get("user_name"))
+    database = flow["database"] in databases or ("all" in databases and flow["database"] != "replication") \
+        or ("sameuser" in databases and flow["database"] == flow["user"])
+    user = any(item in ("all", flow["user"]) for item in users)
+    if not database and not any(item in ("samerole", "samegroup") or item[0] == "@" for item in databases) \
+            or not user and not any(item[0] in "+@" for item in users):
+        return False
+    if kind == "local" or row.get("address") == "all":
+        address = True
+    else:
+        try:
+            mask = row.get("netmask")
+            if mask and ":" in str(mask):
+                # the stdlib reads a dotted netmask for IPv4 only: an IPv6 mask is read as its prefix length
+                mask = bin(int(ipaddress.IPv6Address(mask))).count("1")
+            network = ipaddress.ip_network("%s/%s" % (row["address"], mask) if mask not in (None, "") else
+                                           str(row["address"]), strict=False)
+            ip = ipaddress.ip_address(flow["address"])
+            address = ip.version == network.version and ip in network
+        except (KeyError, TypeError, ValueError):
+            address = None
+    if address is False:
+        return False
+    return True if database and user and address else None
+
+
+def _sanitize(value):
+    """derive.py sanitize: the frozen derive step's file stem in a rule id."""
+    text = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))[:60]
+    return text if text and (text[0].isalpha() or text[0] == "_") else "x" + text
+
+
 def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     """(record, notes): the proposal and the drafter's plain notes (what it left out and why), for the draft text."""
     if not isinstance(snapshot, dict):
@@ -490,7 +558,8 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         else:
             d.unread("default_acl_expectations", "no schema-scoped table default privilege was observed")
 
-    # replication_roles (HBA-4): customer logins with the replication attribute (never drafted empty)
+    # replication_roles (HBA-4): customer logins with the replication attribute ([] as a confirmed default when roles
+    # were collected and none has it)
     if roles_sec is None:
         d.unread("replication_roles", "roles were not collected")
     else:
@@ -498,8 +567,17 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 if customer(name) and row.get("rolreplication") is True and row.get("rolsuper") is not True]
         if repl:
             d.put("replication_roles", [a for a, _ in repl], _list_sources([s for _, s in repl]))
+            for key in ("standbys", "standby_addresses"):
+                d.unread(key, "a customer role with the replication attribute was observed; the customer states its "
+                              "standbys and their addresses")
         else:
-            d.unread("replication_roles", "no customer role with the replication attribute was observed")
+            # issue #2921: with no customer replication role observed, no standby is drafted (confirmed)
+            d.put("replication_roles", [], "default:[] no customer role with the replication attribute was observed")
+            d.put("standbys", [], "default:[] no customer role with the replication attribute was observed")
+            d.put("standby_addresses", [], "default:[] no customer role with the replication attribute was observed")
+    if roles_sec is None:
+        for key in ("standbys", "standby_addresses"):
+            d.unread(key, "roles were not collected")
 
     # protected_tables, declared_predicate, required_policies (RLS-2, RLS-3): the row-security tables whose policies
     # carry exactly one non-trivial USING expression, grouped by it; the largest group (first in snapshot order on a
@@ -641,6 +719,83 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
           "default:0600, owner read-write only, the mode PostgreSQL accepts for a key its own user owns")
     d.put("key_owner", "postgres", "default:postgres, the server's own operating-system user owns the key file")
 
+    # intended_flows (HBA-2, HBA-3; issue #2921): one flow per application login, and the connected database's owner,
+    # as the issue states the intent: user that login, database the connected one, method scram-sha-256, address
+    # 127.0.0.1, transport local when a local rule is the first to match it, else plain. The intended method is the
+    # login intent, not the matching rule's, so a trust rule that decides the flow is an HBA-2 failure with its witness. rule_id is the id
+    # the frozen derive step assigns (derive.py parse_hba: "hba-" + "" for the top-level file, else the sanitised file
+    # stem and "-", + the line) to the first readable pg_hba_file_rules row, in rule_number order, that matches the flow
+    # (`_hba_match`).
+    # Where the view was not read, or a row the drafter does not resolve may be a flow's first match, the key stays
+    # unread and the notes name each login's flow for the customer to confirm with its rule_id
+    hba_sec = section("pg_hba_file_rules")
+    database = datname if datname and NAME.match(datname) else "postgres"
+    logins = [name for name in d.decl.get("applications", []) + ([owner] if type(owner) is str else [])
+              if roles.get(name, (None, {}))[1].get("rolcanlogin") is True]
+    logins = list(dict.fromkeys(logins))
+    flows, missed, unresolved = [], [], []
+    if hba_sec is not None:
+        # the top-level file: pg_settings hba_file when collected, else the view's one file when it is named
+        # pg_hba.conf (a top-level file of include lines alone lists only its included file's rows, so a lone file of
+        # another name is not read as top-level; two or more files: unknown)
+        top = [row.get("setting") for row in section("pg_settings") or []
+               if isinstance(row, dict) and row.get("name") == "hba_file" and type(row.get("setting")) is str]
+        files = {row.get("file_name") for row in hba_sec if isinstance(row, dict) and not row.get("error")}
+        lone = next(iter(files)) if len(files) == 1 else None
+        top = top[0] if top else (lone if type(lone) is str and lone.replace("\\", "/").rsplit("/", 1)[-1]
+                                  == "pg_hba.conf" else None)
+        # the order the server (and derive, inlining each include at its line) reads the rules: rule_number, which the
+        # collector does not sort by (it lists rows by file and line); without it, one file's rows in line order
+        live = [i for i, row in enumerate(hba_sec) if isinstance(row, dict) and not row.get("error")]
+        if all(type(hba_sec[i].get("rule_number")) is int for i in live):
+            order = sorted(live, key=lambda i: hba_sec[i]["rule_number"])
+        else:
+            order = sorted(live, key=lambda i: hba_sec[i].get("line_number") or 0) if len(files) <= 1 else None
+    for name in logins:
+        flow = {"address": "127.0.0.1", "database": database, "method": "scram-sha-256", "transport": "local",
+                "user": name}
+        if hba_sec is None:
+            missed.append("%s to %s (local, scram-sha-256, 127.0.0.1, rule_id unread)" % (name, database))
+            continue
+        for transport in ("local", "plain"):
+            candidate = dict(flow, transport=transport)
+            if order is None:
+                unresolved.append("%s to %s (%s, scram-sha-256, 127.0.0.1): the order of pg_hba_file_rules rows "
+                                  "across files is not known (no rule_number)" % (name, database, transport))
+                break
+            index = next((i for i in order if _hba_match(hba_sec[i], candidate) is not False), None)
+            rule_id = _hba_rule_id(hba_sec[index], top, major) if index is not None else None
+            if index is not None and (_hba_match(hba_sec[index], candidate) is None or rule_id is None):
+                unresolved.append("%s to %s (%s, scram-sha-256, 127.0.0.1): %s may be its first rule"
+                                  % (name, database, transport, rule_id or "pg_hba_file_rules row %d" % index))
+                break
+            if rule_id:
+                flows.append((dict(candidate, rule_id=rule_id), SNAP + "/pg_hba_file_rules/%d" % index))
+                break
+        else:
+            missed.append(name)
+    if hba_sec is None:
+        # declare.validate requires each flow's rule_id, so a flow without one is named in the notes, not drafted
+        d.unread("intended_flows", "pg_hba_file_rules was not read, so no flow's rule id is known; the customer states "
+                                   "each flow's rule_id")
+        if missed:
+            d.notes.append({"key": "intended_flows", "note": "intended_flows is not drafted: pg_hba_file_rules was not "
+                            "read, so no flow's rule_id is known; confirm one local flow per application login with "
+                            "its rule_id: " + "; ".join(missed)})
+    elif unresolved:
+        d.unread("intended_flows", "a pg_hba_file_rules row the drafter does not resolve may be a flow's first match; "
+                                   "the customer states each flow's rule_id")
+        d.notes.append({"key": "intended_flows", "note": "intended_flows is not drafted: confirm each flow with its "
+                        "rule_id: " + "; ".join(unresolved)})
+    elif flows:
+        d.put("intended_flows", [f for f, _ in flows], _member_sources(flows))
+    else:
+        d.unread("intended_flows", "no application login was observed" if not logins else
+                 "no readable pg_hba_file_rules row matches an application login's flow")
+    if missed and flows and not unresolved and hba_sec is not None:
+        d.notes.append({"key": "intended_flows", "note": "intended_flows drafts no flow for %s: no readable "
+                        "pg_hba_file_rules row matches it" % ", ".join(missed)})
+
     for key in ALWAYS_UNREAD:
         d.unread(key, "the catalog snapshot gives no basis for it; the customer states it")
 
@@ -743,7 +898,7 @@ NO_ROW = {
                      "carries no TLS goal",
     "key_owner": "a drafted server default: TLS-1 to TLS-5 rest on it with tls_floor and key_file_mode; the draft "
                  "carries no TLS goal",
-    "replication_roles": "HBA-4 also needs standby_addresses, which the catalog snapshot does not give",
+    "replication_roles": "HBA-4 reads it beside standbys and standby_addresses, drafted [] with it",
     "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
                        "snapshot does not give",
 }
