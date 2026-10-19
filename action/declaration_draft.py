@@ -115,20 +115,39 @@ _IMPORT = re.compile(rb'(?m)^[ \t]*(?:from|import)[ \t]+(flask|fastapi|django)\b
 FRAMEWORK_STACKS = {b'fastapi': 'python/fastapi', b'django': 'python/django'}   # issue #3376; flask is STACK
 
 
+# issue #4590: a repository that serves HTTP with the standard library and imports no web framework
+_HTTP_SERVER = re.compile(rb'(?m)^[ \t]*(?:from[ \t]+http\.server[ \t]+import\b|import[ \t]+http\.server\b)')
+STDLIB_STACK = 'python/stdlib-http'
+STDLIB_REASON = ('this repository serves HTTP with the standard library (http.server) and imports no web framework; '
+                 'Assure drafts declarations for Flask, FastAPI and Django only, so write the declaration: '
+                 'schema assure.identity.declaration/v1 with stack python/stdlib-http, committed at '
+                 + CHECKOUT_PATH + ' (QUICKSTART-API.md, the python-auth-declared-model section, lists its fields)')
+
+
 def stack_of(files):
     """Issue #3376: the identity stack the repository's Python files import: python/fastapi or python/django when
     that is the one web framework they import, STACK (main's reading) when they import Flask, more than one framework
-    or none."""
-    seen = {m for n, d in files.items() if str(n).endswith('.py') and isinstance(d, (bytes, bytearray))
-            for m in _IMPORT.findall(bytes(d))}
+    or none. Issue #4590: STDLIB_STACK when they import no web framework and import http.server."""
+    py = [bytes(d) for n, d in files.items() if str(n).endswith('.py') and isinstance(d, (bytes, bytearray))]
+    seen = {m for d in py for m in _IMPORT.findall(d)}
+    if not seen and any(_HTTP_SERVER.search(d) for d in py):
+        return STDLIB_STACK
     return FRAMEWORK_STACKS.get(seen.pop(), STACK) if len(seen) == 1 else STACK
 
 
-def draft(files, repository_id=None, *, client):
+def draft(files, repository_id=None, *, client, library_versions=None):
     """The engine's proposal record for the repository's stack (`stack_of`); incomplete fields retain their unread
-    sources for review. A Flask repository is sent as on main (no `stack`)."""
+    sources for review. A Flask repository is sent as on main (no `stack`). `library_versions`: the derived
+    raw/LIBRARY-VERSIONS.json bytes the collector sends (issue #3128), or None."""
     stack = stack_of(files)
-    return client.declaration_proposal(files) if stack == STACK else client.declaration_proposal(files, stack=stack)
+    if stack == STDLIB_STACK:
+        raise Refusal('bad_input', STDLIB_REASON)
+    args = {}
+    if stack != STACK:
+        args['stack'] = stack
+    if library_versions is not None:
+        args['library_versions'] = library_versions
+    return client.declaration_proposal(files, **args)
 
 
 def dumps(decl):
@@ -195,6 +214,8 @@ def _section(record, rel, source, lead=None):
         lines += ['Drafted for the `%s` stack.' % record['stack'], '']     # issue #3376
     lines += ['Fields to confirm:', '']
     lines += ['- %s (%s)' % (label, _where(at)) for label, at in _confirm_rows(record)]
+    if record.get('kept'):                          # committed values this run read differently, kept as written
+        lines += [''] + list(record['kept'])
     notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
     if notes:                                       # issue #2567: routes kept out of public_routes, in plain words
         lines += ['', 'To confirm (routes Assure did not draft as public):', ''] + ['- %s' % n for n in notes]

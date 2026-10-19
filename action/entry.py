@@ -135,7 +135,10 @@ readable server major, or a major outside 14..18, nothing is drafted and nothing
 `::warning`. The verdict file and the exit never change; the one output it adds is `requirements-draft`, the draft's
 path, which action.yml's next step uploads with `continue-on-error`, so a failed upload leaves the exit as it was. The
 drafter is imported only there (`_proposal_module`): action/declare_proposal.py in the public tree,
-assure/declare_proposal.py in this checkout.
+assure/declare_proposal.py in this checkout. Issue #3267: when the section came back (the run drafted requirements),
+the job summary's first line, the `::notice` lines and the last stdout line that carry "top action: state it in
+requirements.md" read "top action: review the drafted requirements in Assure's proposal pull request (or the
+assure-requirements-draft artifact)" instead (`drafted_top_action`); the verdict file keeps the entries' own actions.
 
 Issue #2435: in api mode, with a PostgreSQL connection and profile `postgresql-declared-model`, the Action collects as
 for the observed baseline and places the checkout's `.assure/postgresql-declared-model.json`, else
@@ -253,9 +256,23 @@ PROPOSAL_UNCHANGED = ' The verdict, its file and the exit never change; the pull
 OBSERVED_LEAD = ('Assure drafted `%(rel)s` from %(source)s. Merging it commits the declaration; the next check then '
                  'also reads `postgresql-declared-model` beside this reading, to decide the %(rows)d rows that need '
                  'intent.')
+# A committed declaration is the customer's (outside beta report fb-20261018-9bc45347fb999865): the observed run proposes
+# only the fields the committed file lacks, as additions, and lists every committed value that differs from this run's
+# reading under "Fields to confirm" by field and place, never by value, kept as written. A drafted default (source
+# `default:`) is not a reading.
+ADDITIONS_LEAD = ('Assure adds the fields it read from %(source)s that your committed `%(rel)s` does not have yet; every '
+                  'value you committed is kept as written. Merging it commits the additions; the next check then also '
+                  'reads `postgresql-declared-model` beside this reading, to decide the %(rows)d rows that need intent.')
+KEPT_HEAD = ('Fields to confirm: your committed `%s` is kept as written. This run read a different value for %d '
+             'field(s); Assure keeps yours. Change a field only if this run read it right.')
+KEPT_SCALAR_CAP = 64
 # issue #2892: action.yml's upload-artifact step ships the draft under this name; the section links the run's artifacts
 REQUIREMENTS_DRAFT_ARTIFACT = 'assure-requirements-draft'
 PROPOSAL_ARTIFACT_LINE = 'This run uploads %(draft)s as its %(artifact)s artifact: <%(url)s>.'
+# issue #3267: the top action of a run that drafted requirements names the draft, not a file to write from nothing
+DRAFTED_TOP_ACTION = ("review the drafted requirements in Assure's proposal pull request (or the %s artifact)"
+                      % REQUIREMENTS_DRAFT_ARTIFACT)
+_NEEDS_INTENT_TOP = ' — top action: ' + render.CLASS_ACTIONS['needs_intent']
 _RUN_SERVER = re.compile(r'https?://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?')
 _RUN_REPOSITORY = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}')
 _RUN_ID = re.compile(r'[0-9]{1,20}')
@@ -392,12 +409,16 @@ def _with_layout(e, allow, art):
 def failure_envelope(check_id, refusal, charged=False):
     """The failure envelope (`assure.serve.failure/v1`), the same object `serve.envelope.failure` builds. Its `charged`
     (issue #1103) is the one the server's failure envelope stated, else `charged`: False when nothing reached the
-    server, None when a check did and the Action could not read its charge."""
+    server, None when a check did and the Action could not read its charge. Issue #4577: `upgrade` when the server's
+    failure envelope carried one (`refusal.upgrade`, client `_typed`)."""
     doc = {'schema': FAILURE_SCHEMA, 'check_id': check_id}
     doc.update(refusal.to_dict())
     stated = doc['detail'].pop('server_charged', None)
     doc['charged'] = stated if isinstance(stated, bool) else charged
     doc.update(FLAGS)
+    upgrade = getattr(refusal, 'upgrade', None)
+    if isinstance(upgrade, dict):    # issue #4577: the server's `upgrade` on a spent free balance's refusal, kept as sent
+        doc['upgrade'] = dict(upgrade)
     return doc
 
 
@@ -455,7 +476,14 @@ class _Scrub:
 
     def refusal(self, e):
         detail = {k: (self(v) if isinstance(v, str) and k != 'answered' else v) for k, v in e.detail.items()}
-        return Refusal(e.outcome, self(e.reason), **detail)
+        if isinstance(detail.get('faults'), list):    # a declaration refusal's rows: each string scrubbed too
+            detail['faults'] = [{k: (self(v) if isinstance(v, str) else v) for k, v in f.items()}
+                                if isinstance(f, dict) else f for f in detail['faults']]
+        out = Refusal(e.outcome, self(e.reason), **detail)
+        upgrade = getattr(e, 'upgrade', None)          # issue #4577: the server's upgrade line (client `_typed`)
+        if isinstance(upgrade, dict):
+            out.upgrade = {k: self(v) for k, v in upgrade.items() if isinstance(v, str)}
+        return out
 
 
 def load_collect():
@@ -588,6 +616,7 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
     A GitHub answer that is not 2xx is `api_error` naming its status, with `detail.status` (a 403 is the missing
     `pull-requests: write`; `main` prints it as one notice). Issue #2651: `tree` ({url, proven, total}) adds the
     footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`).
+    Issue #3149: each quoted rule names the `requirements` input it was read from (`render.pr_requirements_file`).
     Issue #3168: `body` (a `mode: lint` run's LINT_PREFLIGHT) is posted in place of the verdict's comment, under the
     same marker, so the one Assure comment says no check ran."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
@@ -599,7 +628,8 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
         body = '%s\n%s\n' % (render.PR_COMMENT_MARKER, body)
     else:
         body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
-                                          tree_bases=tree_bases)
+                                          tree_bases=tree_bases, requirements_file=render.pr_requirements_file(
+                                              env.get('INPUT_REQUIREMENTS'), env.get('GITHUB_WORKSPACE')))
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
@@ -627,10 +657,15 @@ def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, c
     returns the tree. The repository and commit make the tree's blob links only when they validate. `layer2` (tier,
     model, repository_files, budget, remodel_quote_usd, remodel_parts) is passed to `build` as given: the formal-model
     layer, absent while the caller names no tier."""
-    tree = proof_tree.build(verdict, goals=list(goals or ()) or None, requirements_text=text,
+    return write_tree_artifacts(build_proof_tree(verdict, goals, text, repository, commit, **layer2), directory)
+
+
+def build_proof_tree(verdict, goals=(), text=None, repository=None, commit=None, **layer2):
+    """The tree `write_proof_tree` writes, built in memory only (issue #4295: the comment's counts when the served
+    tree could not be read)."""
+    return proof_tree.build(verdict, goals=list(goals or ()) or None, requirements_text=text,
                             proposal=_proposal_module() if goals else None, repository=repository, commit=commit,
                             **layer2)
-    return write_tree_artifacts(tree, directory)
 
 
 def write_tree_artifacts(tree, directory):
@@ -713,16 +748,23 @@ def typed_requirements(text, directory):
         return text, None, []
 
 
-def goal_rollup_markdown(goals, verdict):
+def goal_rollup_markdown(goals, verdict, declared=None):
     """Issue #1186: the job summary's roll-up of the goals sent (`typed_requirements`), one line per goal from its
     children's requirement states in the verdict (`declare_proposal.rollup`); '' when no goal was sent or the verdict
-    carries no requirement rows."""
+    carries no requirement rows. Issue #4594: `declared`, (profile, verdict, path) of an accepted declared reading
+    whose profile the goals are typed for, rolls them up on that verdict's rows, said in one line; the verdict file,
+    outputs and exit stay the observed reading's."""
     rows = render.requirement_rows(verdict)
+    lead = ''
+    if declared is not None and render.requirement_rows(declared[1]) is not None:
+        rows = render.requirement_rows(declared[1])
+        lead = ('Read on the declared reading (%s, with `%s`): the goals are typed for that profile. The verdict file, '
+                'the outputs and the exit stay the observed reading\'s.\n\n' % (declared[0], declared[2]))
     if not goals or rows is None:
         return ''
     states = {r.get('id'): r.get('state') for r in rows}
     dp = _proposal_module()
-    return '\n### Requirement goals\n\n' + ''.join('- %s %s\n' % (render.esc(goal['english']),
+    return '\n### Requirement goals\n\n' + lead + ''.join('- %s %s\n' % (render.esc(goal['english']),
                                                                        render.esc(dp.rollup(goal, states)))
                                                     for goal in goals)
 
@@ -939,12 +981,28 @@ def _lint_line(f):
     return '%s: %s%s' % (f.get('stage'), f.get('text'), ' (%s)' % ', '.join(where) if where else '')
 
 
+def _lint_fault_texts(f):
+    """Customer feedback 18 Oct 2026: a declaration finding's every fault (`<pointer> (keyword <k>): expected
+    <shape>`), then `and N more` past the rows the API listed; [] for a finding without `faults`."""
+    faults = f.get('faults')
+    rows = [r for r in faults if isinstance(r, dict) and isinstance(r.get('pointer'), str)
+            and isinstance(r.get('keyword'), str)][:MAX_LINT_LINES] if isinstance(faults, list) else []
+    out = ['%s (keyword %s)%s' % (r['pointer'], r['keyword'], ': expected %s' % r['expected']
+                                  if isinstance(r.get('expected'), str) and r['expected'] else '') for r in rows]
+    total = f.get('fault_count') if type(f.get('fault_count')) is int else len(rows)
+    if rows and total > len(rows):
+        out.append('and %d more; correct these and lint again to see them' % (total - len(rows)))
+    return out
+
+
 def _lint_markdown(found):
     """serve-043: the job summary of a lint record: a headline, then one short line per finding."""
     if not found:
         return '## Assure lint: ready\n\nNo problems found. Nothing was charged.\n'
     lines = ['## Assure lint: %d finding(s)' % len(found), '', 'Fix these before a check. Nothing was charged.', '']
-    lines += ['- %s' % render.esc(_lint_line(f)) for f in found[:MAX_LINT_LINES]]
+    for f in found[:MAX_LINT_LINES]:
+        lines.append('- %s' % render.esc(_lint_line(f)))
+        lines += ['  - %s' % render.esc(t) for t in _lint_fault_texts(f)]
     if len(found) > MAX_LINT_LINES:
         lines.append('- and %d more in the lint file' % (len(found) - MAX_LINT_LINES))
     return '\n'.join(lines) + '\n'
@@ -999,12 +1057,77 @@ def checkout_declaration(top, cap):
     return None if got is None else got[1]
 
 
+def _json_object(data):
+    """`data` (committed bytes) parsed as a UTF-8 JSON object; None for anything else."""
+    try:
+        value = json.loads(bytes(data).decode('utf-8'))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _same_json(data, value):
     """Issue #3153: whether `data` (committed bytes) parses as UTF-8 JSON equal to `value`; False for anything else."""
     try:
         return json.loads(bytes(data).decode('utf-8')) == value
     except (UnicodeDecodeError, ValueError, RecursionError):
         return False
+
+
+def _pointer_key(key):
+    return str(key).replace('~', '~0').replace('/', '~1')
+
+
+def _is_reading(sources, at):
+    """Whether the drafter read the value at pointer `at` (every source on it, above it or under it names where it
+    was read): a `default:` or `unread` source is not a reading."""
+    rows = [v for k, v in sources.items() if k == at or k.startswith(at + '/') or at.startswith(k + '/')]
+    return bool(rows) and all(isinstance(v, str) and v != 'unread' and not v.startswith('default:') for v in rows)
+
+
+def kept_merge(committed, drafted, sources):
+    """(merged, added, changed) for a committed declaration and this run's draft: `merged` is `committed` with every
+    key it lacks (at any object depth) taken from `drafted`; `added` names those keys' pointers; `changed` is
+    [(pointer, committed value, read value)] for each committed value the draft read differently. A committed value is
+    never replaced."""
+    added, changed = [], []
+
+    def walk(c, d, at):
+        if isinstance(c, dict) and isinstance(d, dict):
+            out = dict(c)
+            for k, v in d.items():
+                p = at + '/' + _pointer_key(k)
+                if k in c:
+                    out[k] = walk(c[k], v, p)
+                else:
+                    out[k] = v
+                    added.append(p)
+            return out
+        if c != d and _is_reading(sources, at):
+            changed.append((at, c, d))
+        return c
+    merged = walk(committed, drafted, '')
+    return dict(sorted(merged.items())), added, changed
+
+
+def _span(text):
+    """`text` as one Markdown code span (shown literally: no link, no HTML), on one line, bounded."""
+    text = re.sub(r'[`\r\n\t]', ' ', str(text))
+    return '`%s`' % (text if len(text) <= 2 * KEPT_SCALAR_CAP else text[:2 * KEPT_SCALAR_CAP] + '...')
+
+
+def kept_lines(rel, changed, sources):
+    """The fields-to-confirm lines for committed values this run read differently; [] when there are none. Refs #4454
+    r2 HIGH-1: a line names the field and where it was read, never a value: this run's reading is drafted before the
+    withholding and the committed value is the customer's, so either can be a literal of their policies."""
+    if not changed:
+        return []
+    rows = []
+    for at, _mine, _read in changed:
+        where = sources.get(at) or next((v for k, v in sorted(sources.items()) if k.startswith(at + '/')), '')
+        rows.append('- %s: your committed value is kept; this run read a different value%s' % (
+            _span(at), ' (read at %s)' % _span(where) if where else ''))
+    return [KEPT_HEAD % (rel, len(changed)), ''] + rows
 
 
 def checkout_declaration_at(top, cap, skip_links=False):
@@ -1156,6 +1279,12 @@ def proposal_markdown(counts, artifacts_url=None, proposed=False):
         files += '\n\n' + PROPOSAL_ARTIFACT_LINE % {'draft': REQUIREMENTS_DRAFT_FILE,
                                                     'artifact': REQUIREMENTS_DRAFT_ARTIFACT, 'url': artifacts_url}
     return '\n### Declaration proposal\n\n%s %s\n' % ((PROPOSED_LINE if proposed else PROPOSAL_LINE) % counts, files)
+
+
+def drafted_top_action(text):
+    """Issue #3267: `text` with each needs_intent top action ("— top action: state it in requirements.md") read as
+    DRAFTED_TOP_ACTION; any other text unchanged. Called only when the run drafted requirements."""
+    return text.replace(_NEEDS_INTENT_TOP, ' — top action: ' + DRAFTED_TOP_ACTION) if isinstance(text, str) else text
 
 
 def write_proposal(verdict, files, directory, say, artifacts_url=None, proposed=False):
@@ -1326,7 +1455,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
              'compile_requirements': True, 'draft': None, 'proposed': False, 'proposal_number': None, 'files': None,
              'goals': [], 'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
-             'requirements_text': [], 'tree': None, 'declared': None}
+             'requirements_text': [], 'tree': None, 'declared': None, 'kept_md': '', 'declared_accepted': False}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1538,11 +1667,28 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if not isinstance(got, dict) or got.get('schema') != VERDICT_SCHEMA:
                 raise Refusal(unexpected, 'no verdict envelope')
             say('Assure: declared reading: %s, with %s' % (pid, rel))   # issue #3153: the log names it too
+            state['declared_accepted'] = declared_accepted(rel, data)
         except Refusal as e:
             got = Refusal(e.outcome, scrub(e.reason))
         except Exception as e:  # typed, never a traceback; the class name only
             got = Refusal(unexpected, 'the declared check failed unexpectedly (%s)' % type(e).__name__)
         state['declared'] = (pid, got, rel)
+
+    def declared_accepted(rel, data):
+        """Issue #4594: True when the declared reading's declaration is accepted: any run but a pull request's, or a
+        pull request whose base branch carries the same bytes at `rel`; an unknown reading is not accepted."""
+        if not declaration_draft.is_pull_request(env):
+            return True
+        top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd), env)
+        return top is not None and declaration_draft.on_base(top, rel, data, env) is True
+
+    def goals_declared():
+        """Issue #4594: (profile, verdict, path) of the declared reading the goals roll up on, or None."""
+        d = state['declared']
+        if d is None or not isinstance(d[1], dict) or not state['declared_accepted'] \
+                or d[0] != _proposal_module().TYPED_PROFILE:
+            return None
+        return d
 
     def manifest_written(written):
         if written is not None:
@@ -1559,7 +1705,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if declaration_draft.NAME not in collected.files:
             repo = {n[len(repository_manifest.PREFIX):]: d for n, d in collected.files.items()
                     if n.startswith(repository_manifest.PREFIX)}
-            record = declaration_draft.draft(repo, client=state['client'])
+            record = declaration_draft.draft(repo, client=state['client'],
+                                             library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
             data = declaration_draft.dumps(record['declaration'])
             collected.files[declaration_draft.NAME] = data
             state['draft'] = {'record': record, 'data': data, 'top': top, 'rel': rel}
@@ -1637,8 +1784,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         DECLARED_CHECKOUT_PATH nor `.assure/declaration.json`, `checkout_declaration`), the draft from the collector's own
         snapshot and sidecar before withholding (`state['observed_raw']`, REFUTATION-r1 HIGH-3: the literals as written,
         as `pg_declare` drafts), recorded to be proposed at DECLARED_CHECKOUT_PATH as `pg_declare` records its own.
-        Issue #3153 (#2249 "keep it current"): intent committed at DECLARED_CHECKOUT_PATH whose JSON differs from the
-        draft (or is not JSON) gets the draft proposed too; one equal to it, or one at `.assure/declaration.json`, none."""
+        Issue #3153 (#2249 "keep it current"), as the outside beta report fb-20261018-9bc45347fb999865 bounds it: intent
+        committed at DECLARED_CHECKOUT_PATH is the customer's. Only the keys it lacks are proposed, as additions to it
+        (`kept_merge`); a committed value this run read differently is listed under "Fields to confirm" and kept. A
+        committed file that is not a JSON object gets the draft; one with nothing to add, or one at
+        `.assure/declaration.json`, none."""
         if state['draft'] is not None or not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE \
                 or not isinstance(state['observed_raw'], dict):
             return
@@ -1657,6 +1807,21 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if drafted is None or (at is not None and _same_json(at[1], drafted[0]['declaration'])):
             return
         record = drafted[0]
+        committed = _json_object(at[1]) if at is not None else None
+        if committed is not None:            # the customer's declaration: additions only, every committed value kept
+            merged, added, changed = kept_merge(committed, record['declaration'], record['sources'])
+            kept = kept_lines(DECLARED_CHECKOUT_PATH, changed, record['sources'])
+            if kept:
+                state['kept_md'] = '\n### Declaration: fields to confirm\n\n%s\n' % '\n'.join(kept)
+            if not added:
+                return
+            record = dict(record, declaration=merged, confirm=sorted(added), kept=kept)
+            state['draft'] = {'record': record, 'data': declaration_draft.dumps(merged), 'top': top,
+                              'rel': DECLARED_CHECKOUT_PATH, 'observed': True, 'shown': None,
+                              'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE, 'lead': ADDITIONS_LEAD % {
+                                  'rel': DECLARED_CHECKOUT_PATH, 'source': DECLARED_SOURCE,
+                                  'rows': proposal_counts(record, verdict)['rows']}}}
+            return
         try:            # REFUTATION-r6 MEDIUM-2: the summary shows only the withheld draft (write_proposal's), never `data`
             withheld = draft_proposal(state['files']) if isinstance(state['files'], dict) else None
         except Exception:  # nothing is shown; the file beside the verdict says the same
@@ -1764,6 +1929,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         elif inputs.get('checkout'):              # serve-102: python-auth from the checkout, in one step
             top = Path(env.get('GITHUB_WORKSPACE') or cwd)
             collected, modes = repository_manifest.from_checkout(top, allow, lim, env)
+            line = repository_manifest.bound_line(top, collected.files, lim.file_bytes)
+            if line is not None:                  # issue #3841: the declaration bounds what leaves the runner
+                say(line)
             collected = withhold.apply(collected, allow)
             target = top / declaration_draft.CHECKOUT_PATH
             if os.path.isfile(target) and not os.path.islink(target):
@@ -1930,7 +2098,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         summary += markers.session_markdown(state['session'])
         if state['requirements_notice']:                  # REFUTATION-034 F1/F2: the same words in the summary
             summary += '\n' + render.esc(state['requirements_notice']) + '\n'
-        summary += goal_rollup_markdown(state['goals'], verdict)          # issue #1186
+        summary += goal_rollup_markdown(state['goals'], verdict, goals_declared())    # issues #1186, #4594
         compiled = verdict.get('requirements_compilation')  # issue #2252: the server's sentence on the Haiku reading
         if isinstance(compiled, dict) and isinstance(compiled.get('summary'), str) and compiled['summary']:
             summary += '\n' + render.esc(compiled['summary']) + '\n'
@@ -1943,7 +2111,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
     observed_draft(verdict)                                     # issue #2934: proposed like the declared draft
     decl_line, decl_md, decl_out = declaration_note()           # serve-102: the draft bounds this verdict
-    summary += decl_md
+    summary += decl_md + state['kept_md']                       # committed values this run read differently, kept
     summary += declaration_draft.intent_markdown(inputs_profile, drafted=state['draft'] is not None)   # issue #2926
     both = None
     if state['declared'] is not None:               # issue #2928: informational; never the verdict, its file or exit
@@ -1968,24 +2136,34 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     proposal_md = write_proposal(verdict, state['files'], out_path.parent, say, run_artifacts_url(env),  # #1186 part 2
                                  state['proposed'])                                                # issue #2934
     summary += proposal_md
+    if proposal_md:                                   # issue #3267: the drafted run's top action names the draft
+        summary, notes = drafted_top_action(summary), [drafted_top_action(n) for n in notes]
     draft_out = ('requirements-draft=%s\n' % (Path(out_text).parent / REQUIREMENTS_DRAFT_FILE)  # issue #2892
                  if proposal_md else '')
     client = state.get('client')
     tree_url = verdict.get('tree_url')
     tree_bases = (DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ())
     served_tree = state['mode'] == 'api' and render.tree_url_ok(tree_url, tree_bases)
+    fetched = False
+
+    def local_tree():
+        return build_proof_tree(verdict, state['goals'], (state['requirements_text'] or [None])[0],
+                                str(env.get('GITHUB_REPOSITORY') or '').strip() or None, _head_commit(env))
     try:                                               # never changes the verdict, its file or its exit
         if served_tree:
             state['tree'] = client.tree(verdict['check_id'])
+            fetched = True
             write_tree_artifacts(state['tree'], out_path.parent)
         else:
-            repo_name = str(env.get('GITHUB_REPOSITORY') or '').strip()
-            state['tree'] = write_proof_tree(verdict, out_path.parent, state['goals'],
-                                             (state['requirements_text'] or [None])[0], repo_name or None,
-                                             _head_commit(env))
+            state['tree'] = write_tree_artifacts(local_tree(), out_path.parent)
     except Exception as w:  # the class name only, never a value
         if served_tree:
             state['tree'] = None
+            if not fetched:                            # issue #4295: the comment keeps main's proof tree line
+                try:
+                    state['tree'] = local_tree()
+                except Exception:  # no line, as on main when the tree could not be built
+                    pass
             retained_files = []
             for name in (PROOF_TREE_JSON, PROOF_TREE_HTML):
                 try:
@@ -2038,6 +2216,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say(decl_line)
     line = render.verdict_line(verdict)              # serve-016: the verdict line; an older server's coverage phrase
     line = render.first_line(verdict) if line is None else line
+    line = drafted_top_action(line) if proposal_md else line      # issue #3267
     say('Assure: %s%s; policy exit %d; %s' % ('' if line is None else _cmd_data(line, cap=None) + '; ',
                                               _cmd_data(verdict['outcome']), code, _cmd_data(out_text)))
     outputs(verdict['outcome'], code, report_extra + decl_out + draft_out, verdict)

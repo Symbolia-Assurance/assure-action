@@ -12,10 +12,12 @@ The record is ``{schema, stack, declaration, sources, confirm}``, the shape of t
 - ``declaration`` validates against assure/schemas/postgresql-declaration-v1.schema.json (assure.declare.validate).
 - ``sources`` maps a JSON pointer to where its value came from: ``catalog_snapshot.json#<pointer>`` (the snapshot
   row the value was read from), ``COLLECTION-SIDECAR.json#<pointer>`` or ``argument:major`` (the major), or
-  ``default:<reason>`` (a strict value that grants nothing, needed beside a proposed key). A key the snapshot gives
+  ``default:<reason>`` (a strict value that grants nothing, needed beside a proposed key), or ``packaging:<reason>``
+  (what a named package installs at the observed path). A key the snapshot gives
   no basis for is ``unread`` and is left out of ``declaration``: the drafter never invents an intent. The server key
-  file's mode and owner (key_file_mode 0600, key_owner postgres; issue #2925) are file facts the snapshot cannot show:
-  they are drafted as ``default:`` server defaults the customer confirms (the Director's ruling, 16 Oct 2026).
+  file's mode and owner (key_file_mode, key_owner; issue #2925) are file facts the snapshot cannot show: where
+  ssl_key_file is a stock packaged key (``STOCK_KEYS``) they are drafted from that packaging (``packaging:`` source)
+  for the customer to confirm; for any other key file they stay unread and a note asks the customer to state them.
 - ``confirm`` lists the keys whose value is a judgement the customer confirms before committing (every proposed key
   except the four observed facts: schema, major, collection_role, database_owner).
 
@@ -60,6 +62,15 @@ TABLE_PRIVS = {"r": "SELECT", "a": "INSERT", "w": "UPDATE", "d": "DELETE"}
 TABLE_KINDS = ("r", "p")
 #: the tls_floor values the declaration schema and the M3 explorer represent (postgresql-declaration-v1.schema.json)
 TLS_VERSIONS = ("TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3")
+#: the stock packaged server keys whose mode and owner the packaging fixes: ssl_key_file path -> (key_file_mode,
+#: key_owner, source). Debian/Ubuntu's ssl-cert package (make-ssl-cert) creates the snakeoil key 0640 root:ssl-cert and
+#: Debian's postgresql-common points ssl_key_file at it; the declaration holds the owner alone (postgres/root/other),
+#: so the group ssl-cert is named in the source
+STOCK_KEYS = {
+    "/etc/ssl/private/ssl-cert-snakeoil.key": (
+        "0640", "root",
+        "packaging:debian ssl-cert installs /etc/ssl/private/ssl-cert-snakeoil.key as 0640 root:ssl-cert"),
+}
 #: the derive step reads at most 32 privilege_queries rows (derive_lifted.py m1_acl scoped(...)[:32])
 QUERY_CAP = 32
 #: keys the snapshot gives no basis for: every one is reported unread, never drafted (observed needs_intent ids)
@@ -579,6 +590,37 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         for key in ("standbys", "standby_addresses"):
             d.unread(key, "roles were not collected")
 
+    # permitted (SU-3-OB, issue #4642): the customer roles observed as members of pg_read_all_data or
+    # pg_write_all_data, directly or through other roles, each sourced to the first membership edge on its path
+    if members_sec is None:
+        d.unread("permitted", "memberships were not collected")
+    else:
+        edges = {}
+        for index, row in enumerate(members_sec):
+            if isinstance(row, dict) and type(row.get("member")) is str and type(row.get("roleid")) is str:
+                edges.setdefault(row["member"], []).append((row["roleid"], index))
+        permitted, permitted_sources = {}, {}
+        for target in ("pg_read_all_data", "pg_write_all_data"):
+            reached = []
+            for name in sorted(n for n in edges if customer(n)):
+                seen, queue = {name}, [(roleid, index) for roleid, index in edges[name]]
+                while queue:
+                    roleid, first = queue.pop(0)
+                    if roleid == target:
+                        reached.append((name, first))
+                        break
+                    if roleid not in seen:
+                        seen.add(roleid)
+                        queue += [(next_role, first) for next_role, _index in edges.get(roleid, [])]
+            if reached:
+                permitted[target] = [name for name, _ in reached]
+                for i, (_name, first) in enumerate(reached):
+                    permitted_sources["/%s/%d" % (target, i)] = SNAP + "/memberships/%d" % first
+        if permitted:
+            d.put("permitted", permitted, permitted_sources)
+        else:
+            d.unread("permitted", "no non-collection role is a member of pg_read_all_data or pg_write_all_data")
+
     # protected_tables, declared_predicate, required_policies (RLS-2, RLS-3): the row-security tables whose policies
     # carry exactly one non-trivial USING expression, grouped by it; the largest group (first in snapshot order on a
     # tie) is drafted, since the declaration states one predicate. Issue #1186: a table with a permissive policy whose
@@ -672,6 +714,20 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 d.put("rls_exempt_logins", [n for n, _ in exempt], _list_sources([w for _, w in exempt]))
             else:
                 d.put("rls_exempt_logins", [], "default:[] exempts no login from row security")
+            # rls_exempt_roles (issue #4708): the roles whose BYPASSRLS is drafted as intended, so a path whose effective
+            # role is one of them is exempt; superusers are SU-1's and logins are rls_exempt_logins'
+            bypass = [(index, name) for name, (index, row) in roles.items() if NAME.match(name)
+                      and row.get("rolbypassrls") is True and row.get("rolsuper") is not True
+                      and row.get("rolcanlogin") is not True]
+            if bypass:
+                d.put("rls_exempt_roles", [n for _, n in bypass],
+                      _list_sources([SNAP + "/roles/%d/rolbypassrls" % i for i, _ in bypass]))
+                for _, name in bypass:
+                    d.notes.append({"key": "rls_exempt_roles", "bypass": "## To confirm: %s skips row security%s. If "
+                                    "that is not intended, remove BYPASSRLS from it."
+                                    % (name, " (Supabase's server key)" if name == "service_role" else "")})
+            else:
+                d.put("rls_exempt_roles", [], "default:[] exempts no role from row security")
             d.put("view_exemptions", [], "default:[] exempts no view from row security")
 
     # intended_tables (LR-1-SCOPE): the tables the observed publications name (none when no publication exists)
@@ -713,11 +769,23 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     else:
         d.unread("tls_floor", "the observed ssl_min_protocol_version is not a TLS version name (%s)"
                  % ", ".join(TLS_VERSIONS))
-    # key_file_mode, key_owner (TLS-1..TLS-5 after the floor; issue #2925): file facts the snapshot cannot show, so the
-    # server defaults are drafted for the customer to confirm (the Director's ruling, 16 Oct 2026)
-    d.put("key_file_mode", "0600",
-          "default:0600, owner read-write only, the mode PostgreSQL accepts for a key its own user owns")
-    d.put("key_owner", "postgres", "default:postgres, the server's own operating-system user owns the key file")
+    # key_file_mode, key_owner (TLS-1..TLS-5 after the floor; issue #2925): file facts the snapshot cannot show. A stock
+    # packaged key (ssl_key_file in STOCK_KEYS, exact path) is drafted with its packaging's mode and owner, confirmed;
+    # any other key file stays unread, since a default would declare a premise the server may not meet (customer
+    # feedback fb-20261018-d071cf4a662ca1e3: the Debian snakeoil key is 0640 root:ssl-cert)
+    keyfile = [row for row in section("pg_settings") or []
+               if isinstance(row, dict) and row.get("name") == "ssl_key_file"]
+    path = keyfile[0].get("setting") if keyfile else None
+    if type(path) is str and path in STOCK_KEYS:
+        mode, key_owner, packaging = STOCK_KEYS[path]
+        d.put("key_file_mode", mode, packaging)
+        d.put("key_owner", key_owner, packaging)
+    else:
+        d.unread("key_file_mode", "the key file's mode is a file fact the catalog snapshot cannot show")
+        d.unread("key_owner", "the key file's owner is a file fact the catalog snapshot cannot show")
+        d.notes.append({"key": "key_file_mode", "note": "key_file_mode and key_owner are not drafted: state the mode "
+                        "and owner of the server key file %s before committing; TLS-1 to TLS-5 rest on them"
+                        % ("at %s (ssl_key_file)" % path if type(path) is str else "(ssl_key_file was not collected)")})
 
     # intended_flows (HBA-2, HBA-3; issue #2921): one flow per application login, and the connected database's owner,
     # as the issue states the intent: user that login, database the connected one, method scram-sha-256, address
@@ -894,14 +962,19 @@ GOALS = (
 NO_ROW = {
     "id": "it names the declaration; no obligation reads it",
     "tls_floor": "TLS-1 to TLS-5 rest on it with key_file_mode and key_owner; the draft carries no TLS goal",
-    "key_file_mode": "a drafted server default: TLS-1 to TLS-5 rest on it with tls_floor and key_owner; the draft "
-                     "carries no TLS goal",
-    "key_owner": "a drafted server default: TLS-1 to TLS-5 rest on it with tls_floor and key_file_mode; the draft "
-                 "carries no TLS goal",
+    "key_file_mode": "drafted from the stock packaged key: TLS-1 to TLS-5 rest on it with tls_floor and key_owner; "
+                     "the draft carries no TLS goal",
+    "key_owner": "drafted from the stock packaged key: TLS-1 to TLS-5 rest on it with tls_floor and key_file_mode; "
+                 "the draft carries no TLS goal",
+    "permitted": "SU-3-OB on postgresql-observed-baseline reads it; the declared-model goals carry no row for it",
     "replication_roles": "HBA-4 reads it beside standbys and standby_addresses, drafted [] with it",
     "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
                        "snapshot does not give",
 }
+#: issue #4598: the note for a server with no publication, where the replication goal could never be established
+NO_PUBLICATION = ("LR-1-SCOPE has no row: no publication exists, so there is nothing published to check and the "
+                  "replication goal is not drafted; intended_tables [] stays in the declaration, and LR-1-SCOPE "
+                  "reads fails if a table is published")
 #: the companion of the draft: each goal line, keyed by its sha256, with its child typed rows (`typed_companion`)
 TYPED_SCHEMA = "assure.requirements-typed/v1"
 TYPED_PROFILE = "postgresql-declared-model"
@@ -1059,6 +1132,11 @@ def _drafted(record):
     decl, rows, left = record["declaration"], [], []
     for obligation, keys, statement in ROWS:
         if not all(key in decl for key in keys if not key.endswith("?")):
+            continue
+        if obligation == "LR-1-SCOPE" and decl["intended_tables"] == []:
+            # issue #4598: with no publication the published set is empty and LR-1-SCOPE reads vacuous, which never
+            # establishes a sentence; the declaration keeps intended_tables [] so a published table reads fails
+            left.append(NO_PUBLICATION)
             continue
         row = {"obligation": obligation, "statement": statement,
                "values": {key.rstrip("?"): decl[key.rstrip("?")] for key in keys if key.rstrip("?") in decl}}
@@ -1283,6 +1361,9 @@ def requirements_draft(record, notes=()):
     owners = [n["owner"] for n in notes if isinstance(n.get("owner"), str)]
     if owners:
         lines += owners + [""]
+    bypass = [n["bypass"] for n in notes if isinstance(n.get("bypass"), str)]
+    if bypass:
+        lines += bypass + [""]
     unread = sorted(p[1:] for p, v in record["sources"].items() if v == "unread")
     if unread:
         lines += ["## Not proposed (the snapshot gives no basis; state these yourself): " + ", ".join(unread) + ".", ""]

@@ -223,11 +223,34 @@ QUERIES = [
        _agg([('proname', 'p.proname::text'), ('schema', 'n.nspname::text'),
              ('arguments', 'pg_catalog.pg_get_function_identity_arguments(p.oid)'), ('prokind', 'p.prokind::text'),
              ('prosecdef', 'p.prosecdef'), ('proconfig', 'p.proconfig'), ('proacl', 'p.proacl::text[]'),
-             ('proowner', 'pg_catalog.pg_get_userbyid(p.proowner)')],
+             ('proowner', 'pg_catalog.pg_get_userbyid(p.proowner)'),
+             # rf33 (#460, trial-012 section 7): the return type, so RULE-SD-CALLER-TEMP-001 r3 can tell a trigger
+             # function (prorettype trigger) from one EXECUTE holders can call
+             ('prorettype', 'p.prorettype::pg_catalog.regtype::text')],
             'pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE '
             "n.nspname NOT IN ('pg_catalog', 'information_schema')",
             'n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)'),
-       'functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL'),
+       'functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL, '
+       'return type'),
+    # rf33 (#460, trial-012 section 7): the triggers that run SECURITY DEFINER functions, so RULE-SD-CALLER-TEMP-001 r3
+    # can name a trigger function's callers by the table privilege that fires it. Names, events (tgtype bits 4 INSERT,
+    # 8 DELETE, 16 UPDATE, 32 TRUNCATE: src/include/catalog/pg_trigger.h:95-98) and tgenabled only: no function body,
+    # no trigger argument literal (tgargs), no row data
+    _q('triggers', 'triggers', ['pg_trigger', 'pg_class', 'pg_namespace', 'pg_proc'], 14, 18, 'catalog_snapshot',
+       _agg([('schema', 'n.nspname::text'), ('relname', 'c.relname::text'), ('tgname', 't.tgname::text'),
+             ('function_schema', 'fn.nspname::text'), ('function_name', 'p.proname::text'),
+             ('function_arguments', 'pg_catalog.pg_get_function_identity_arguments(p.oid)'),
+             ('events', "(SELECT coalesce(json_agg(e.name ORDER BY e.bit), '[]'::json) FROM (VALUES (4, 'INSERT'), "
+                        "(8, 'DELETE'), (16, 'UPDATE'), (32, 'TRUNCATE')) AS e(bit, name) WHERE (t.tgtype & e.bit) <> 0)"),
+             ('tgenabled', 't.tgenabled::text')],
+            'pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid '
+            'JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace '
+            'JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid '
+            'JOIN pg_catalog.pg_namespace fn ON fn.oid = p.pronamespace '
+            "WHERE NOT t.tgisinternal AND p.prosecdef AND fn.nspname NOT IN ('pg_catalog', 'information_schema')",
+            'n.nspname, c.relname, t.tgname'),
+       'triggers that run SECURITY DEFINER functions: table, trigger name, function, events and tgenabled '
+       '(no body, no argument literal, no row data)'),
     # serve-076 (M-U4 + M-U6, 3806 / 3817): which functions an extension maintains, so the observed reading can name
     # them as the extension's (owner_class `extension`) instead of the customer's. Same schema filter and identity
     # arguments as `functions`, so each row matches one `functions` row; class is read through pg_class, so it does

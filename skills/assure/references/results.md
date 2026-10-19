@@ -1,0 +1,75 @@
+## Reading your first result
+
+The first line of the job summary, and the Action's last log line, starts with a colour, then says how much was read, "N of 8 machines read, M refused", and the bounds of the result. A machine is one part of the check, such as client authentication or row-level security. A refused machine was not read, and the summary lists it under "Machines not read" with its reason. When a scope limit names machines the checker could not reach, they are out of scope, not refused, and the count ends ", n out of scope", for example "5 of 5 machines read, 3 out of scope": an out-of-scope machine leaves both counts, and the summary names the limit.
+
+- **green** (exit 0): within these bounds, nothing disproven. For example "green: 7 of 8 machines read, 1 refused; declared premises: none (observed profile); version pins: major 18; nothing disproven; established: 3 of 40; deviations: 1; vacuous: 13; not established: 23 — top action: state it in requirements.md". A deviation is counted on its own. When no obligation on the machines read holds, the line says so in words: "nothing could be established (0 of N obligations hold); not established: n — top action: \<action>". One line follows for each obligation that could not be established, "\<id>: \<reason> — \<owner>: \<what it needs>". Green never means more than this.
+- **red**: something is disproven, for example "red: ...; disproven: \<obligation> — \<object>, \<access path>, \<locator>"; with more than one, "disproven: k, first \<obligation> — …", and the free summary (`GET /v1/checks/{id}/summary`) lists the same k under `disproven`, each with `platform_owned`. It exits 1 when your `fail-on` names the status (`fails` by default) and the disproof is yours to fix. A `fails` reading whose findings are all platform-owned keeps the colour red with exit 0 and `policy.reason` `platform_owned`: the disproof is someone else's to fix. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. When your `fail-on` leaves a disproven status out, the exit is 0 and the line ends "(exit 0 by your fail-on: ...)". A status you chose to stop on that is not a verdict (for example `fail-on: not_observed`) is red with exit 1 and reads "stopped by your choice: not observed — \<obligation>", never "disproven".
+- **yellow** (exit 3): nothing could be read at all, "yellow: could not look: \<reason>; \<action>", for example "yellow: could not look: the input could not be represented; re-collect with the pinned collector". The summary prints the reason and the file it names under it. A typed outcome that stopped the check before any reading also exits 3. Yellow is a check run's `action_required` where a check run is published with `checks: write`; this Action publishes none, so it falls back to exit 3, which fails the job.
+
+Under the first line, one sentence says what it means in plain words. For a green PostgreSQL run: "Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 21 of 41 checks could not be completed, mostly because they depend on what the system is for, which has not been stated. That is a gap in what we could see; your database configuration is unchanged by it." (synthesised, not recorded: the successor build's readings with RLS-5-OB added, read vacuous; FIRST-LINE-SAMPLES.md). For red, the consequence of what was disproven and where; for yellow, that nothing below is a finding and what to do. Each disproven or deviating obligation is listed under "Why it matters" with its statement and its consequence ("Consequence not yet stated for \<obligation>." until the profile states one).
+
+When you name a file in the `requirements` input, the first line adds "requirements: h hold, n not established[, d disproven]", the summary lists each requirement under the not-established list with its sentence, "R3 — "\<sentence>" — not established — missing method — \<action>", and the outputs `requirements-not-established` and `requirements-disproven` count them. A disproven requirement turns the run red. A requirement checked with `http-observed-baseline` cannot hold today: the HTTP check does not yet carry a verified method and path for each endpoint, so a matched HTTP requirement reads not established with the reason class `missing_identity_binding`. `mode: local` does not read `requirements.md`: requirements are checked in `mode: api` only, and a local run that finds one says so in one notice.
+
+A refused machine bounds the result and is named; a status you name in `fail-on` on its rows stops the job as on a read machine, and a reading the checker kept on it is read as not observed. `allow-partial` is still accepted and no longer changes anything.
+
+Under the first line, the summary lists every reading under its status, each with its text: why it holds, why it fails, or what could not be read.
+
+If a reading looks wrong, send a `wrong_reading` note through the [feedback route](feedback.md), within the customer's permission, naming the check id, obligation and expected reading. Never send your configuration files or your connection string. Never send your API key in the note.
+
+A green check claims this: within the bounds its first line states, nothing the rules Symbolia holds could check was disproven; every obligation that could not be established is named with what would establish it. The claim covers those rules and those observations, and nothing beyond them. It does not say the database is fit for its purpose.
+
+| Code | Meaning |
+|---|---|
+| 0 | Green: nothing disproven within the bounds the first line states; or red with exit 0 because your `fail-on` leaves the disproven status out (or is `never`, which still exits 1 on a prove-class obligation that is not proven), and the first line says so. |
+| 1 | Red: something is disproven and your `fail-on` stops on it, a prove-class obligation is not proven, a status you chose to stop on was read, or under strict (`fail-on: unresolved-security`) an obligation marked `security: true` is unresolved. |
+| 2 | Red: bad input, or an API key that is missing, unknown or revoked. Fix the inputs, the files or the key. |
+| 3 | Yellow: nothing could be read at all, or a typed outcome stopped the check. The failure file holds the reason and what to do. |
+
+The colour is green, red or yellow. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `fail-on: unresolved-security` is the strict preset; it is never the default, and while a profile marks no obligation it changes nothing ("strict: no obligations marked").
+
+The Action sets these outputs: `verdict-path`, `outcome`, `exit-code`, `colour`, `not-established` (how many obligations could not be established), and with the report on also `report-status`, `report-url`, `report-cost-usd`, `report-charge-usd` and `report-allowance-remaining`. On `postgresql-observed-baseline`, when the Action writes `assure-requirements-draft.md`, it also sets `requirements-draft`, that file's path (empty when nothing was drafted).
+
+## 10. Typed outcomes
+
+When the Action cannot produce a verdict, it writes a failure file at the `output` path (schema `assure.serve.failure/v1`) with `outcome`, `charged`, `reason` and `action`. In `mode: api`, `charged` is the one the server's failure envelope stated, copied as is. It is `false` when nothing reached the server (refused before a check was sent, or `mode: local`, which never contacts the API and charges nothing), and `null` when a check reached the server but the Action could not read what it charged (for example `api_unreachable` after the 202, or an older server whose envelope has no `charged`): read `GET /v1/checks/{id}` with the check id in the file. A `mode: local` verdict file says `charged` is `false` too. It also writes the reason to the job summary and one error annotation. When the API gave a check id, the failure file carries it.
+
+| Outcome | Exit | What it means |
+|---|---|---|
+| `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://` (plain `http://` only for a loopback host). |
+| `oversize_input` | 2 | A required file, a checkout source file, the file count or the total size is over the limit (for `artefacts` and local directory collection, a file matching only an optional input is dropped and listed on the ignored line instead). |
+| `unknown_profile` | 2 | The API serves no profile with that name. |
+| `unauthenticated` | 2 | The API key is missing, unknown or revoked. |
+| `key_expired` | 2 | The API key is past its expiry date. |
+| `rate_limited` | 3 | Too many checks in a minute or a day. The Action waits the API's `Retry-After` when it is at most 60 seconds and sends the same request again, for up to 300 seconds of waits on each request. |
+| `credit_exhausted` | 3 | The account's free credit is spent. |
+| `server_busy` | 3 | The API's queue stayed full, or the first send of the check was still being checked when the Action sent it again (issue #2601): the Action sends the check again after each refusal, three times in all, or more while the API names a `Retry-After` of at least 1 s and those waits add up to at most 300 s (five 60 s waits); between sends it waits the API's `Retry-After` when it is at most 60 s, or a longer one within the same 300 s; the 300 s the Action waits for the check itself starts when the queue admits it. The sign-in stops after three attempts. |
+| `api_unreachable` | 3 | The runner could not reach the API: three attempts, then, on the check's send and on the poll of a sent check, retries with backoff (1, 2, 4, 8, then 15 s) while those waits stay within 300 s; the reason names the attempts and the seconds waited. |
+| `api_error` | 3 | The API answered in a way the Action does not accept, after three attempts where a retry applies; a 5xx without a failure envelope on the check's send or on the poll of a sent check is retried like `api_unreachable`, for up to 300 s of waits. |
+| `engine_digest_mismatch` | 3 | The server's engine does not match its pin, so it runs no check. |
+| `not_found` | 3 | The API holds no check with that id for this account. |
+| `server_fault` | 3 | A record the API keeps for this account no longer reads as it was written. No check ran and nothing was charged. |
+| `collector_cannot_connect` | 3 | The first query could not reach the database, or `psql` is missing. |
+| `collector_refused` | 3 | The collector refused the collection. Some refusals come before it reads anything: the role is too broad (a superuser, or a member of `pg_monitor` or `pg_stat_scan_tables`; the reason says what to grant), the major is outside 14 to 18, or the role name does not match (behind a connection pooler, the reason says which name to set as `collection-role`; references/postgres.md, section 6). Others come after it has read: its self-check found a withheld secret value in its own output. The Action also refuses in the runner when a collection mixes this collector's output with the earlier collector's; when files from the earlier collector hold a whole `pg_hba.conf` rule (a quoted name, an `@file` list or a regular-expression user) or `postgresql.conf` setting line that collector withheld; and when a file holds a line the collector withheld but its `COLLECTION-SIDECAR.json` is missing or has no record of that file, or its `REDACTION-MANIFEST.json` is missing, records a different digest for that file, or disagrees with the sidecar. The reason names the file, the lines and the collector's reason, never a line's text. In every refusal it keeps no collected data, and nothing is sent. |
+| `profile_not_servable` | 3 | The server holds no qualified checker for this profile, or the checker it holds cannot import a module the server tree lacks (`detail.rule: pipeline_import`; not charged). |
+| `profile_refused` | 3 | The checker refused the collected input with a stated reason, for example because the major version was not observed. |
+| `checker_error` | 3 | The checker failed in an unexpected way, for example a crash. A check the server restarted during also reads `checker_error`; its reason says to submit it again. |
+| `checker_timeout` | 3 | The check ran longer than its time cap, or did not finish within 300 seconds of waiting; the `rate_limited` waits before the API admitted it are not counted. |
+| `checker_cpu_limit` | 3 | The check used more than its CPU time limit. |
+| `checker_memory_limit` | 3 | The check used more than its memory limit. |
+
+`tier_excludes` never ends a job. With the report on, it would mean your account's plan does not include the report; no plan served today excludes it, and a free account without its USD 1 report grant is refused `allowance_exhausted` instead. Either way the verdict, its summary and its exit stand, and the summary says the report was withheld. Set `report: false`, ask Symbolia to grant the free report balance, or upgrade to Premium (USD 20 a month) at the checkout link `POST /v1/billing/checkout` with `{"tier": "usd_20"}` returns (or ask Symbolia for the Premium payment link where billing is not set up).
+
+The last line of the summary says what left your runner:
+
+- "No check was sent." The Action stopped in your runner. Nothing was sent.
+- "The API refused the request for the profile list before anything was collected; nothing from your system was sent." The Action asks the API for the profile list first. A wrong or revoked key, or a rate limit, is refused there, before the Action collects or sends anything.
+- "The API refused the request before a check started; the collected files were sent and not kept."
+- "Check \<id>. The check was sent; the API refused the poll for its result."
+- "Check \<id>." The check reached the server. Report this id to Symbolia.
+- "No check id came back from the API." The request may have left your runner; no check id came back.
+
+## Not in this release
+
+- Live collection against real endpoints is not in this release: the Action reads response heads you captured, offline.
+- The report is opt-in: set `report: true` in `mode: api` to ask for it; unset or `report: false` skips it. It is a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. `mode: local` never asks for one. Every plan served today includes the report: a free account draws it from the USD 1 free balance granted with its key or at its GitHub sign-in, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report.
+- On Supabase, the `postgres` role cannot grant `pg_read_all_settings` or `pg_read_all_stats`. It can grant `pg_monitor`, and the collector this Action ships refuses `pg_monitor` as broader than it needs (references/postgres.md, section 2). So this Action version cannot collect from a Supabase database.

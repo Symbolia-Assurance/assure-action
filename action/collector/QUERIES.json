@@ -208,8 +208,23 @@
       "min_major": 14,
       "max_major": 18,
       "target": "catalog_snapshot",
-      "sql": "SELECT coalesce(json_agg(json_build_object('proname', p.proname::text, 'schema', n.nspname::text, 'arguments', pg_catalog.pg_get_function_identity_arguments(p.oid), 'prokind', p.prokind::text, 'prosecdef', p.prosecdef, 'proconfig', p.proconfig, 'proacl', p.proacl::text[], 'proowner', pg_catalog.pg_get_userbyid(p.proowner)) ORDER BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)), '[]'::json) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')",
-      "purpose": "functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL"
+      "sql": "SELECT coalesce(json_agg(json_build_object('proname', p.proname::text, 'schema', n.nspname::text, 'arguments', pg_catalog.pg_get_function_identity_arguments(p.oid), 'prokind', p.prokind::text, 'prosecdef', p.prosecdef, 'proconfig', p.proconfig, 'proacl', p.proacl::text[], 'proowner', pg_catalog.pg_get_userbyid(p.proowner), 'prorettype', p.prorettype::pg_catalog.regtype::text) ORDER BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)), '[]'::json) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      "purpose": "functions and procedures outside pg_catalog/information_schema: owner, SECURITY DEFINER, proconfig, ACL, return type"
+    },
+    {
+      "id": "triggers",
+      "key": "triggers",
+      "views": [
+        "pg_trigger",
+        "pg_class",
+        "pg_namespace",
+        "pg_proc"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('schema', n.nspname::text, 'relname', c.relname::text, 'tgname', t.tgname::text, 'function_schema', fn.nspname::text, 'function_name', p.proname::text, 'function_arguments', pg_catalog.pg_get_function_identity_arguments(p.oid), 'events', (SELECT coalesce(json_agg(e.name ORDER BY e.bit), '[]'::json) FROM (VALUES (4, 'INSERT'), (8, 'DELETE'), (16, 'UPDATE'), (32, 'TRUNCATE')) AS e(bit, name) WHERE (t.tgtype & e.bit) <> 0), 'tgenabled', t.tgenabled::text) ORDER BY n.nspname, c.relname, t.tgname), '[]'::json) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid JOIN pg_catalog.pg_namespace fn ON fn.oid = p.pronamespace WHERE NOT t.tgisinternal AND p.prosecdef AND fn.nspname NOT IN ('pg_catalog', 'information_schema')",
+      "purpose": "triggers that run SECURITY DEFINER functions: table, trigger name, function, events and tgenabled (no body, no argument literal, no row data)"
     },
     {
       "id": "extension_members",

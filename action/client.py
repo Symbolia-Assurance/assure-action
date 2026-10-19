@@ -82,7 +82,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from serve import bundle, is_development
-from serve.outcomes import OUTCOMES, Refusal
+from serve.outcomes import OUTCOMES, UPGRADE_URL, Refusal
 from serve.secrets import KEY_RE
 
 VERDICT_SCHEMA = 'assure.serve.verdict/v1'
@@ -139,10 +139,29 @@ class _Delivery(Exception):
         self.kind, self.reason = kind, reason
 
 
-def _clip(value):
+#: Customer feedback 18 Oct 2026: the rows of a declaration refusal's `detail.faults` the Action keeps (the server
+#: serves at most 50), each with these string fields only, every value clipped.
+MAX_FAULT_ROWS = 50
+FAULT_ROW_KEYS = ('pointer', 'keyword', 'expected', 'text')
+UPGRADE_TEXT_CAP = 1000     # issue #4577: a failure's `upgrade` line ends in its url, kept whole (render checks it)
+FAULT_TEXT_CAP = 1000       # a row's text names its pointer, keyword and expected shape (at most 240) whole
+
+
+def _fault_rows(value):
+    """The server's `detail.faults` as rows of FAULT_ROW_KEYS strings (each clipped), at most MAX_FAULT_ROWS; a row
+    without a string pointer and keyword is left out; [] for anything that is not a list."""
+    if not isinstance(value, list):
+        return []
+    rows = [{k: _clip(f[k], FAULT_TEXT_CAP) for k in FAULT_ROW_KEYS if isinstance(f.get(k), str)}
+            for f in value[:MAX_FAULT_ROWS]
+            if isinstance(f, dict) and isinstance(f.get('pointer'), str) and isinstance(f.get('keyword'), str)]
+    return rows
+
+
+def _clip(value, cap=_TEXT_CAP):
     s = '' if value is None else str(value)
     s = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', s)
-    return s if len(s) <= _TEXT_CAP else s[:_TEXT_CAP - 1] + '…'
+    return s if len(s) <= cap else s[:cap - 1] + '…'
 
 
 def _digest_of(value):
@@ -376,10 +395,24 @@ class Client:
                 if isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) and k not in _CLIENT_KEYS \
                         and (v is None or isinstance(v, (bool, int, float)) or isinstance(v, str)):
                     detail[k] = _clip(v) if isinstance(v, str) else v
+            faults = _fault_rows(extra.get('faults'))
+            if faults:
+                detail['faults'] = faults
+            up = extra.get('upgrade')         # issue #4578: a free account's payment link, the server's buy.stripe.com
+            if isinstance(up, dict) and isinstance(up.get('url'), str) and UPGRADE_URL.fullmatch(up['url']) \
+                    and isinstance(up.get('line'), str) and up['line'].endswith(' ' + up['url']):
+                detail['upgrade'] = {'url': up['url'], 'line': _clip(up['line'])}
         if isinstance(doc.get('charged'), bool):
             detail['server_charged'] = doc['charged']    # issue #1103: the charge the server stated, for the failure file
         detail['answered'] = route       # which request the API answered: the page says what left the runner
-        return Refusal(name, _clip(doc.get('reason')), **detail)
+        refusal = Refusal(name, _clip(doc.get('reason')), **detail)
+        upgrade = doc.get('upgrade')     # issue #4577: the server's upgrade line, for the failure file and its renderers
+        if isinstance(upgrade, dict):
+            kept = {k: _clip(upgrade[k], UPGRADE_TEXT_CAP) for k in ('url', 'line', 'notice')
+                    if isinstance(upgrade.get(k), str)}
+            if kept:
+                refusal.upgrade = kept
+        return refusal
 
     def _call(self, method, path, body=None, headers=None, *, route):
         """Send with retries on the same route (`route` names it for `_typed`). Returns (status, doc) for 200 and 202 with a parsed object; raises the
@@ -490,12 +523,15 @@ class Client:
             raise Refusal('api_error', 'the profile list answered %d' % status)
         return doc
 
-    def declaration_proposal(self, files, stack='python/flask'):
-        """Draft with the server's identity proposer; never run a second reader in the Action. Issue #3376: `stack`
-        names the identity stack to draft for (sent as the body's `stack` unless it is python/flask, main's body); the
-        answer must be that stack's record."""
-        body = bundle.request_body('python-auth-declared-model',
-                                   {'raw/repository/' + n: d for n, d in files.items()})
+    def declaration_proposal(self, files, stack='python/flask', *, library_versions=None):
+        """Draft with the server's identity proposer; never run a second reader in the Action. `library_versions`: the
+        bytes of the derived raw/LIBRARY-VERSIONS.json (issue #3128), sent beside the repository files. Issue #3376:
+        `stack` names the identity stack to draft for (sent as the body's `stack` unless it is python/flask, main's
+        body); the answer must be that stack's record."""
+        sent = {'raw/repository/' + n: d for n, d in files.items()}
+        if library_versions is not None:
+            sent['raw/LIBRARY-VERSIONS.json'] = library_versions
+        body = bundle.request_body('python-auth-declared-model', sent)
         if stack != 'python/flask':
             body = json.dumps(dict(json.loads(body), stack=stack), separators=(',', ':')).encode('ascii')
         status, doc = self._call('POST', '/v1/declaration-proposal', body, route='declaration_proposal')

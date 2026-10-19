@@ -52,7 +52,9 @@ _TABLE = {
     'secret_in_input': (422, 2, 'Remove the secret the reason names from the input, then send it again; nothing was stored.'),
     'store_unavailable': (503, None, 'Try again in a minute, because the result store cannot be reached just now.'),
     # serve-014: the account's tier does not include the claim-tree report (refused before any model call).
-    'tier_excludes': (403, None, 'Ask Symbolia to move this account to a tier that includes the report, or leave the '
+    # issue #4578: the price and a self-serve link, not "Ask Symbolia to move this account" (`TIER_LINK_ACTIONS`)
+    'tier_excludes': (403, None, 'Upgrade to Premium (USD 20 a month) at the link `POST /v1/billing/checkout` with '
+                                 '{"tier": "usd_20"} returns, or ask Symbolia for the Premium payment link, or leave the '
                                  'report off.'),
     # serve-015: a metered line's allowance is spent and nothing pays for the request (refused before any model call,
     # free of charge, counted in the rate windows).
@@ -71,8 +73,10 @@ _TABLE = {
                                'ran and nothing was charged.'),
     # serve-079 (Director's decision 3902): paid formalisation is on Premium and above; a free account is refused before
     # anything is held, written or charged, and `detail` names the tier, its monthly price and what it adds.
-    'tier_required': (403, None, 'Ask Symbolia to move this account to Premium (USD 20 a month), or keep the free quote '
-                                 'beside each requirement row; nothing was held and nothing was charged.'),
+    # issue #4578: the price and a route this server has to the link (no Premium payment link set: checkout, else ask)
+    'tier_required': (403, None, 'Upgrade to Premium (USD 20 a month) via `POST /v1/billing/checkout` with {"tier": '
+                                 '"usd_20"} or ask Symbolia for the Premium payment link, or keep the free quote beside '
+                                 'each requirement row.'),
     # serve-084: Stripe billing is not configured on this server, or Stripe could not be reached; a typed refusal of
     # the billing routes, never a 500. Nothing was written and no tier changed.
     'billing_unavailable': (503, None, 'Ask Symbolia to move this account by hand, or try the checkout link again later, '
@@ -80,6 +84,15 @@ _TABLE = {
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),
+}
+
+# Issue #4578: a tier refusal whose `detail.upgrade.url` is the server's Premium payment link (serve/api.py
+# `upgrade_for`, a buy.stripe.com link: `UPGRADE_URL`, render's `_UPGRADE_URL`) gives that link in its action.
+UPGRADE_URL = re.compile(r'https://buy\.stripe\.com/[A-Za-z0-9_./-]+(\?[A-Za-z0-9_.~%=&-]*)?')
+TIER_LINK_ACTIONS = {
+    'tier_excludes': 'Upgrade this account to Premium for USD 20 a month at %s, or leave the report off.',
+    'tier_required': 'Upgrade this account to Premium for USD 20 a month at %s, or keep the free quote beside each '
+                     'requirement row; nothing was held and nothing was charged.',
 }
 
 OUTCOMES = MappingProxyType({name: MappingProxyType({'http': http, 'exit': code, 'action': action})
@@ -458,9 +471,10 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 'Nothing to change on your side; the paid formalisation runner is not bound on this server yet, and '
                 'the free quote beside each requirement row stands until Symbolia binds it.',
                 # issue #3084: the bound runner serves Premium on python-auth-declared-model; another paid plan or
-                # profile is refused before any hold, and no step of the customer's opens it today
+                # profile is refused before any hold, and no step of the customer's opens it today. Issue #3872: Pro
+                # runs the Premium build; Enterprise, zero retention, is the plan refused here
                 ('profile_not_servable', 'tier_not_bound'):
-                'Nothing to change on your side; paid formalisation runs on the Premium plan today, nothing was held '
+                'Nothing to change on your side; paid formalisation runs on Premium and Pro today, nothing was held '
                 'or charged, and the free quote beside each requirement row stands.',
                 ('profile_not_servable', 'profile_not_bound'):
                 'Nothing to change on your side; paid formalisation runs on the python-auth-declared-model profile '
@@ -681,6 +695,10 @@ class Refusal(Exception):
                 return own
         if self.outcome == 'unknown_profile' and served_profiles(self.detail) is not None:
             return UNKNOWN_PROFILE_ACTION % ', '.join(served_profiles(self.detail))
+        up = self.detail.get('upgrade')
+        url = up.get('url') if isinstance(up, dict) else None
+        if self.outcome in TIER_LINK_ACTIONS and isinstance(url, str) and UPGRADE_URL.fullmatch(url):
+            return TIER_LINK_ACTIONS[self.outcome] % url
         return OUTCOMES[self.outcome]['action']
 
     def to_dict(self):

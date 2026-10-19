@@ -69,7 +69,7 @@ permissions:
   id-token: write
 
 jobs:
-  check:
+  assure:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
@@ -102,7 +102,7 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust.
+Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@beta` resolves to; `gh api repos/Symbolia-Assurance/assure-action/branches/beta -q .commit.sha` prints it. Pin every third-party action to the full commit SHA of the release you trust.
 
 The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line.
 

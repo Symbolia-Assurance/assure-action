@@ -24,7 +24,7 @@ inputs:
     required: false
     default: postgresql-observed-baseline
   artefacts:
-    description: "A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it. For python-auth-declared-model leave both empty: the Action reads the checked-out repository (its Python files and requirements.md) and the declaration at .assure/declaration.json, and when there is none it drafts one and opens one pull request of its own proposing it (it never commits to your branches; the workflow needs contents: write and pull-requests: write)."
+    description: "A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it. For python-auth-declared-model leave both empty: the Action reads the checked-out repository (its Python files and requirements.md, and its dependency files in the runner, of which it sends only the Flask-Login, Flask-HTTPAuth, Flask-JWT-Extended, flask-apispec and Flask-RESTful versions they pin as raw/LIBRARY-VERSIONS.json) and the declaration at .assure/declaration.json, and when there is none it drafts one and opens one pull request of its own proposing it (it never commits to your branches; the workflow needs contents: write and pull-requests: write)."
     required: false
     default: ''
   connection:

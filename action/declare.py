@@ -126,7 +126,7 @@ def _notes(value):
                 'Confirm the supplied catalog includes every relevant direct and view route. The checker derives at most four paths for one protected table. '
                 'SET ROLE routes and real session tenant mapping require separate evidence.'),
             _notice('exemptions', '/rls_exempt_logins',
-                'Confirm all named exempt logins and view exemptions are intentional. Exempt access reduces the isolation domain.')])
+                'Confirm all named exempt logins, exempt roles (/rls_exempt_roles) and view exemptions are intentional. Exempt access reduces the isolation domain.')])
         if not value['protected_tables']:
             gaps.append(_notice('empty_protected_domain','/protected_tables','No protected table is declared; tenant isolation has an empty domain.'))
         if len(value['protected_tables']) > 1:

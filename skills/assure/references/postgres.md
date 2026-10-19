@@ -21,6 +21,8 @@ Naming one permission sets every other permission to none, so keep `contents: re
 The smallest job, for files you collected and committed in `collected/` (references/postgres-local.md, section 9); put it under `jobs:` in a workflow that runs on `pull_request` and on `push` to your default branch:
 
 ```yaml
+  assure:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -131,7 +133,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  assure:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -165,9 +167,11 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
+The job is named `assure`, so it never shares a name with your repository's own jobs, such as a `check` job that a ruleset requires. A workflow you added earlier whose Assure job is named `check` keeps working. Rename that job to `assure`, so your own required `check` reads only your own job; if a ruleset or branch protection requires Assure's job, require `assure`.
+
 Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@beta` resolves to; `gh api repos/Symbolia-Assurance/assure-action/branches/beta -q .commit.sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line. The template above already does: it signs in with the workflow's GitHub identity, so you store no key. To use a stored key instead, pass it to the step:
 
@@ -251,4 +255,4 @@ The runner cannot read a managed server's configuration files, so the readings t
 
 - **A refused machine (M2, client authentication) when the server has more than six databases or more than six users, as the checker counts them.** It counts the databases that allow connections, plus each one a `pg_hba.conf` rule names, and the login roles, plus each `+group`. The summary names the bound exceeded, for example "databases 7 (cap 6)" or "users 7 (cap 6)". The other machines still read, and the run stays green unless something is disproven. M2 also reads "missing method" today when any `pg_hba.conf` line uses `peer`, `ident` or another external authentication method (the Debian and Ubuntu default `local all postgres peer` included), until the checker bounds those methods.
 - **A `pg_hba.conf` rule with a quoted role name, an `@file` list or a regular-expression user reads `representation` or `missing method`, not a verdict.** Under the default `fail-on: fails` such a run can still pass; choose `fail-on: fails,not_collected` to make those readings stop the job. A rule the collector has to withhold (an unclosed quote, for example) appears as `not observed: pg_hba.conf line N (<reason>)`.
-- **Readings that read not observed or representation where you might expect a verdict.** On every major the collection role cannot read `pg_hba_file_rules` or `pg_file_settings` (nor, from 15, `pg_ident_file_mappings`), and the collector never reads `pg_subscription.subconninfo`, so the readings that need them read not observed. With more than one `SECURITY DEFINER` function, the search-path readings (SD-1, SD-2) read representation.
+- **Readings that read not observed or representation where you might expect a verdict.** On every major the collection role cannot read `pg_hba_file_rules` or `pg_file_settings` (nor, from 15, `pg_ident_file_mappings`), and the collector never reads `pg_subscription.subconninfo`, so the readings that need them read not observed. With more than one `SECURITY DEFINER` function, the search-path readings (SD-1, SD-2) read representation. When pg_hba.conf itself cannot be collected, `GRANT SELECT ON pg_catalog.pg_hba_file_rules TO <your collection role>; GRANT EXECUTE ON FUNCTION pg_catalog.pg_hba_file_rules() TO <your collection role>` lets the collector read the server's own parse of the rules; on a managed service that cannot grant on pg_catalog the rules stay out of scope.

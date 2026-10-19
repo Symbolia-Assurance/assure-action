@@ -48,6 +48,8 @@ Rotate a stored key with `POST /v1/keys/rotate` during its rotation window; a Gi
 The smallest job, for files you collected and committed in `collected/`; put it under `jobs:` in your workflow:
 
 ```yaml
+  assure:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -89,7 +91,7 @@ With an API key instead, pass it from a secret. The declared profile reads colle
 
 Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@beta` resolves to; `gh api repos/Symbolia-Assurance/assure-action/branches/beta -q .commit.sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 `SOURCE-CONTRACT.json` at the top of this repository records the digest of the Assure source the tree was built from, the files that built it and the digest of every file it ships, with its details in `SOURCE-CONTRACT-DETAIL.json`; `DIST-MANIFEST.json` lists each shipped file with its digest and the reason it ships.
 

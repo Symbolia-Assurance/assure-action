@@ -36,7 +36,9 @@ the collector that writes a withheld rule or setting as a marker line, takes `--
 read-only and TLS facts; `rf31` is `rf28` plus one query, table inheritance and partitions (`inherits`, from
 pg_inherits); `rf32` is `rf31` plus one query, which functions an extension maintains (`extension_members`, from
 pg_depend); `rf33` is `rf32` plus the `objects` and `functions` queries read again in each other database
-`databases` lists with datallowconn (`other_databases`, the same login and read-only session with `-d <datname>`), and
+`databases` lists with datallowconn (`other_databases`, the same login and read-only session with `-d <datname>`),
+each function's return type (`functions[].prorettype`) and the triggers that run SECURITY DEFINER functions
+(`triggers`, from pg_trigger: names, tables, events and tgenabled; #460), and
 is the one this tree ships, as a candidate until its gate record lands. The pin's `previous` block records the digests of the collector it replaced
 (a record only; nothing is verified against it).
 
@@ -124,7 +126,7 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '1676817a3e0d01118ed15f196c6fd764dd9e5b6c252fccac5f98fe56c3141c49'      # rf33 (candidate)
+FROZEN_COLLECTOR_SHA256 = '725a308bc75047a4c6a340bcab84dd5e0b8c432cf0ddf4f083084d3ad4a50a57'      # rf33 (candidate)
 RF32_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'        # the pin's `previous`
 RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'
 RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'
@@ -958,7 +960,7 @@ def verify_collector_mysql(collector_dir=None, frozen_sha256=None):
             'generation': doc.get('generation', 'my1'), 'filter_sha256': doc.get('filter_sha256')}
 
 
-FROZEN_MYSQL_COLLECTOR_SHA256 = '65895722a6ce834f115d913a8a0fc349d4044c547080a756f5961b67c3babd66'
+FROZEN_MYSQL_COLLECTOR_SHA256 = '8e828c31fbc1609c4e7e3cef139159db1d729d1a4a7576b6f428bf22f1b242f7'
 
 
 def check_declaration(path):

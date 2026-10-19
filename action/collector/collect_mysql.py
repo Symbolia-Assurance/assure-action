@@ -18,7 +18,9 @@ The connection reaches the client by environment only (MYSQL_HOST, MYSQL_TCP_POR
 them); the login user goes to the client as `-u <login user>`; no password is ever on a command line or printed. Every
 query is one fixed string from QUERIES below (published; never built from input), fed on the client's stdin, and is a
 SELECT or SHOW; the collector performs no write. An unreadable source after the first read is recorded in `sources[]`
-as `unreadable` and its section is left absent (never an empty roster).
+as `unreadable` and its section is left absent (never an empty roster); the server's error line for it (code, class and
+message, one line, at most 200 characters, scrubbed) is kept under the top-level `source_errors` map by source name,
+beside the entry and not inside it, since the frozen explorers close the entry's keys (Assure #272).
 
 Exit codes: 0 collected, every source supplied; 1 collected with recorded gaps; 2 invalid arguments (nothing written);
 3 typed refusal (REFUSAL.json written, nothing else). Standard library only; no network of its own; no writes to any
@@ -153,6 +155,25 @@ def scrub(text, env, flt):
     return flt.redact(text)[:500] if flt is not None else text[:200]
 
 
+ERROR_LINE_CAP = 200
+NO_ERROR_LINE = 'the client exited without an error line'   # exit non-zero, empty stderr (a killed client)
+WITHHELD_MESSAGE = 'the message is withheld: the sensitive-field filter flags it'
+_ERROR_HEAD = re.compile(r'ERROR \d+ \([0-9A-Z]{5}\)')
+
+
+def error_line(name, err, env, flt):
+    """The client's error for an unreadable source, fit to store (#272): its first non-empty line (the server's `ERROR
+    <code> (<class>): <message>`), scrubbed, at most ERROR_LINE_CAP characters. Never a row value: the client wrote it
+    to stderr, not stdout. A scrubbed line the frozen filter's scan() still flags keeps only its code and class, so an
+    error text never turns a recorded gap into a sensitive_field refusal."""
+    first = next((l.strip() for l in str(err).splitlines() if l.strip()), '')
+    line = scrub(first, env, flt)[:ERROR_LINE_CAP]
+    if flt is not None and flt.scan({'source_errors': {name: line}}):
+        head = _ERROR_HEAD.match(first)
+        line = (head.group(0) + ': ' if head else '') + WITHHELD_MESSAGE
+    return line
+
+
 # ---------- projections ----------
 def as_int(v):
     try:
@@ -217,14 +238,17 @@ def collect_observable(client, declaration_series):
     if declaration_series is not None and declaration_series != series:
         raise Refuse('series_mismatch', 'the declaration names a series the server does not report')
     sections, sources = {'grant_tables': {}}, []
+    errors = {}
 
-    def source(name, status):
+    def source(name, status, err=None):
         sources.append({'name': name, 'status': status, 'sha256': None, 'reading': 'collected by collect_mysql.py' if status == 'supplied' else 'the collection role could not read this source'})
+        if status != 'supplied':   # one key per unreadable source, even when the client wrote nothing (F-1)
+            errors[name] = error_line(name, err or NO_ERROR_LINE, client.env, client.filter)
 
     # mysql.user: lock facts (M2), the account roster and SHOW GRANTS projection (M1/M6/M7/M8), 840 restrictions
     rows, err = client.rows(QUERIES['mysql.user'])
     if rows is None:
-        source('mysql.user', 'unreadable')
+        source('mysql.user', 'unreadable', err)
     else:
         mysql_user, users, show_grants = [], [], []
         for r in rows:
@@ -236,7 +260,7 @@ def collect_observable(client, declaration_series):
                                'password_lifetime': as_int(lifetime)})
             g, gerr = client.rows(QUERIES['show_grants'] % quoted_account(user, host))
             if g is None:
-                source('mysql.user', 'unreadable')
+                source('mysql.user', 'unreadable', gerr)
                 mysql_user = None
                 break
             privileges, revokes = grants_of(g)
@@ -269,18 +293,18 @@ def collect_observable(client, declaration_series):
     for name, (table, project) in projections.items():
         rows, err = client.rows(QUERIES[name])
         if rows is None:
-            source(name, 'unreadable')
+            source(name, 'unreadable', err)
             continue
         try:
             sections['grant_tables'][table] = [project(r) for r in rows]
         except IndexError:
-            source(name, 'unreadable')
+            source(name, 'unreadable', 'a row with fewer columns than the published query selects')
             continue
         source(name, 'supplied')
     # global variables
     rows, err = client.rows(QUERIES['system-variables'])
     if rows is None:
-        source('system-variables', 'unreadable')
+        source('system-variables', 'unreadable', err)
     else:
         values = {r[0]: r[1] for r in rows if len(r) >= 2}
         sysvars = {}
@@ -294,7 +318,7 @@ def collect_observable(client, declaration_series):
     # replication applier channels (M8 form)
     rows, err = client.rows(QUERIES['replication-channel-declarations'])
     if rows is None:
-        source('replication-channel-declarations', 'unreadable')
+        source('replication-channel-declarations', 'unreadable', err)
     else:
         channels = []
         for r in rows:
@@ -312,6 +336,7 @@ def collect_observable(client, declaration_series):
         rows, err = client.rows(QUERIES[name])
         if rows is None:
             ok = False
+            perr = err
             break
         for r in rows:
             if name == 'routines':
@@ -326,7 +351,9 @@ def collect_observable(client, declaration_series):
         sections['stored_programs'] = programs
         source('stored program definitions', 'supplied')
     else:
-        source('stored program definitions', 'unreadable')
+        source('stored program definitions', 'unreadable', perr)
+    if errors:
+        sections['source_errors'] = errors
     return sections, sources, exact, series
 
 
@@ -382,6 +409,7 @@ def build(args, env, flt):
         raise Refuse('role_mismatch', 'the declaration collection.role must equal --role')
     series_declared = (decl.get('version') or {}).get('series') if isinstance(decl.get('version'), dict) else None
     client = Client(args.mysql, args.login_user or args.role, env)
+    client.filter = flt
     try:
         sections, sources, exact, series = collect_observable(client, series_declared)
     except Refuse as r:
@@ -406,7 +434,7 @@ def build(args, env, flt):
                                           for k, v in state.items()):
             state = [{'pointer': k, 'state': state[k]} for k in sorted(state)]
         submission['declaration_state'] = state
-    submission['configuration_sha256'] = hashlib.sha256(canonical({k: sections.get(k) for k in sorted(sections)} | {'version': submission['version']})).hexdigest()
+    submission['configuration_sha256'] = hashlib.sha256(canonical({k: sections.get(k) for k in sorted(sections) if k != 'source_errors'} | {'version': submission['version']})).hexdigest()   # error text is not configuration
     findings = flt.scan(submission)
     if findings:
         raise Refuse('sensitive_field', 'the submission holds a field that must not be stored: ' +

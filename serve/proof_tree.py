@@ -163,6 +163,9 @@ def _check(env, cid, req, row, state, waypoint, *, repository, commit, source_li
                                'line': source_line(line, req.get('id')) if source_line is not None and line is not None
                                else line,
                                'sentence': _text(req.get('sentence'))}
+        sm = req.get('stored_method')
+        if isinstance(sm, dict) and isinstance(sm.get('claim'), str):   # issue #4213: read by the Premium model's method
+            node['stored_method'] = {'claim': _text(sm['claim']), 'route': _text(sm.get('route'))}
     ev = {'facts': _evidence_facts(req, row), 'locators': _locators(env, req, row, repository, commit)}
     if state == 'disproven':
         item = render._pr_item(env, ('disproven', row.get('id'), row), *render._pr_requirements(env))
@@ -553,10 +556,12 @@ def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quo
         changed = [p for p in sorted(set(pinned) | set(current)) if pinned.get(p) != current.get(p)
                    and _in_read_set(read_set, p)]
         state = 'drifted' if changed else 'current'
-    words = {}
+    words, stated = {}, {}
     for c in checks or ():
         if isinstance(c, dict) and c.get('id'):
             words[c['id']] = c.get('waypoint') or (c.get('requirement') or {}).get('sentence')
+            if isinstance(c.get('stored_method'), dict) and c['stored_method'].get('claim'):
+                stated[c['id']] = c
     branches = []
     readings = m.get('readings') if isinstance(m.get('readings'), dict) else {}
     obs = readings.get('obligations') if isinstance(readings.get('obligations'), dict) else {}
@@ -572,8 +577,14 @@ def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quo
             kids.append({'id': _text(oid), 'words': _text(ob_words.get(oid)) or 'the check of this line',
                          'state': ob[0] if ob[0] in STATES else 'not_established',
                          'routes': [_text(r) for r in ob[2] if isinstance(r, str)] if isinstance(ob[2], list) else []})
+        bstate = row[3] if row[3] in STATES else 'not_established'
+        c = stated.get(rid)
+        if c is not None:                    # issue #4213: this check read the model's stated method for the row
+            bstate = c['state'] if c.get('state') in STATES else 'not_established'
+            kids = [{'id': 'stated-method', 'words': c['stored_method']['claim'], 'state': bstate,
+                     'routes': [c['stored_method']['route']] if c['stored_method'].get('route') else []}]
         branches.append({'id': rid, 'words': _text(words.get(rid)) or fallback, 'line': line,
-                         'state': row[3] if row[3] in STATES else 'not_established', 'checks': kids})
+                         'state': bstate, 'checks': kids})
     built = m.get('built_at') if isinstance(m.get('built_at'), str) else m.get('verified_utc')
     commit = m.get('commit') if isinstance(m.get('commit'), str) and render._PR_COMMIT.fullmatch(m['commit']) \
         else None

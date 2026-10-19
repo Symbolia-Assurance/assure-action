@@ -65,13 +65,13 @@ It prints one line of JSON and exits with one of four codes:
 | 2 | Invalid arguments. Nothing was read and nothing was written. The printed line, or the usage text before it, names the argument. |
 | 3 | A typed refusal. The printed line gives its `type` and its `reason`. A refusal during the collection removes everything the run wrote and leaves `REFUSAL.json`, with the same type and reason, as the only file in `--out`. A refusal before the collection, such as a `--out` that is not new or empty, writes no `REFUSAL.json`. |
 
-With the two roles of section 2, a collection usually ends with exit 1: the role cannot read the catalog views that only a superuser may read, `pg_hba_file_rules` and `pg_file_settings` and, from PostgreSQL 15, `pg_ident_file_mappings`, and each view it cannot read is a gap with the status `unreadable`. The collector still reads the configuration files themselves inside `--data-dir` and `--extra-root`.
+With the two roles of section 2, a collection usually ends with exit 1: the role cannot read the catalog views that only a superuser may read, `pg_hba_file_rules` and `pg_file_settings` and, from PostgreSQL 15, `pg_ident_file_mappings`, and each view it cannot read is a gap with the status `unreadable`. The collector still reads the configuration files themselves inside `--data-dir` and `--extra-root`. When pg_hba.conf itself cannot be collected, `GRANT SELECT ON pg_catalog.pg_hba_file_rules TO <your collection role>; GRANT EXECUTE ON FUNCTION pg_catalog.pg_hba_file_rules() TO <your collection role>` lets the collector read the server's own parse of the rules; on a managed service that cannot grant on pg_catalog the rules stay out of scope.
 
 The refusals name the reason in their `type`: for example `collection_role_superuser`, `collection_role_not_read_only` or `collection_role_not_least_privilege` for a role section 2 does not allow, `collection_role_mismatch` when the role you connect as is not `--role`, `unsupported_major` outside PostgreSQL 14 to 18, and `redaction_selfcheck_failed` when its own check found a withheld value in its output. Recreate the role as in section 2, or fix what the reason names, and run it again into an empty directory.
 
 | Flag | Meaning |
 |---|---|
-| `--out` | A new or empty directory for the output. Required. Any other directory is refused with exit 3 before anything is read. |
+| `--out` | A new or empty directory for the output. Its parent directory must be writable by the user running the collector: the collector builds its output in a new directory beside `--out` and then renames it into place, and a parent it cannot write is refused `output_unwritable` with exit 3 before anything is read. When you run it as the `postgres` OS user on the database host, give a directory that user owns, such as `/tmp/assure-collected`, and copy it into your checkout afterwards. Required. Any other directory is refused with exit 3 before anything is read. |
 | `--role` | The collection role's name inside the database (section 2). Required. |
 | `--privileges` | The roles granted to it, comma separated: `pg_read_all_settings`, `pg_read_all_stats` or both. Required. `pg_monitor` or `pg_stat_scan_tables` here is refused with exit 2. |
 | `--data-dir` | The server's data directory, as this machine sees it. Required, and it must be a directory that exists. When this machine cannot read the server's files, give an empty directory: every configuration file then reads as a recorded gap, as it does for the Action without `data-dir`. |
@@ -171,7 +171,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  assure:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -218,7 +218,7 @@ For a folder made by an earlier job, this step takes the place of the checkout s
 The earlier job uploads the whole folder as the collector wrote it, under the name `collected`. The job that runs the Action names the collecting job in `needs:`, so it starts only after the upload; without it the two jobs run at the same time and the download finds nothing:
 
 ```yaml
-  check:
+  assure:
     needs: collect
     runs-on: ubuntu-latest
 ```
