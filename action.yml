@@ -76,7 +76,7 @@ inputs:
     required: false
     default: pipe
   report:
-    description: The report is opt-in (off unless set) because it sends the verdict record through OpenRouter to a third-party model; report true, in api mode, makes the job summary carry the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; empty or false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
+    description: On by default on the free plan while the free balance lasts (unset asks for it when the verdict says the account is free and its balance is not spent); it sends the verdict record through OpenRouter to a third-party model under zero data retention; report true, in api mode, asks for it on any plan and makes the job summary and the pull request comment carry the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
     required: false
     default: ''
   allow-overage:

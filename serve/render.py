@@ -372,13 +372,29 @@ def report_markdown(text):
     for line in t.split('\n'):
         line = _CONTROL.sub(' ', line).lstrip('#').strip()          # no heading, no raw control character
         out, pos = [], 0
-        for m in _LINKISH.finditer(line):
-            out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(line[pos:m.start()], quote=True)))
-            out.append('`%s`' % m.group(0).replace('`', ''))
+        # readable-report-001: a `code span` stays one (the gate's `quotes` clause holds each to the record, verbatim);
+        # a code span renders no link and no markup, so its text is kept as written
+        for m in _REPORT_SPAN.finditer(line):
+            out.append(_report_plain(line[pos:m.start()]))
+            out.append(m.group(0))
             pos = m.end()
-        out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(line[pos:], quote=True)))
+        out.append(_report_plain(line[pos:]))
         lines.append(''.join(out))
     return '\n'.join(lines).strip()
+
+
+_REPORT_SPAN = re.compile(r'`[^`\n]{1,200}`')
+
+
+def _report_plain(text):
+    """Report text outside a code span: each link-like run shown as code, the rest escaped (serve-014)."""
+    out, pos = [], 0
+    for m in _LINKISH.finditer(text):
+        out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(text[pos:m.start()], quote=True)))
+        out.append('`%s`' % m.group(0).replace('`', ''))
+        pos = m.end()
+    out.append(_REPORT_SPECIAL.sub(r'\\\1', html.escape(text[pos:], quote=True)))
+    return ''.join(out)
 
 
 def _money(v, places):
@@ -3352,6 +3368,31 @@ def _pr_reason_class(env, row):
     return row.get('status')
 
 
+# The EXPERIENCE gate (trial lane 12041, readability.not_checked_next_step): a rule the customer wrote that this profile
+# does not check, and that the paid formalisation can model (`needs_formalisation_quote`, serve/requirements.py), reads
+# that as its next step on a free account (`_free_upgrade_url`, #4611). A paid account's row and every other class read as
+# before.
+PR_FORMALISE_WORDS = 'this profile does not check this yet; Premium can check it with a formal model of the rule'
+
+
+# Night read of #5006 at a860ed09 (HIGH-1): the paid formalisation serves only the profiles the bound Premium runner
+# serves (serve/premium_runner.py SERVES['profiles']; the API refuses any other with `profile_not_bound` before a hold).
+# render stays standard library only (action/build_dist.py), so the set is a constant here, pinned equal to the
+# runner's by tests/serving/test_readable_report_redesign_accept.py; never type it anywhere else.
+FORMAL_MODEL_PROFILES = frozenset({'python-auth-declared-model'})
+
+
+def _pr_formalisable(env, r):
+    # night read of #5006 HIGH-1: `needs_formalisation_quote` is true on every declared profile's missing_method row; only
+    # a row whose profile the formalisation namespace serves carries a priced `formalisation_quote` (a dict;
+    # serve/requirements_adapter.py `quote` leaves it null elsewhere, e.g. mysql-declared-model). render stays standard
+    # library only (action/build_dist.py), so the served list is read from the row the server built, not imported.
+    return (env.get('profile') in FORMAL_MODEL_PROFILES
+            and r.get('reason_class') == 'missing_method' and r.get('needs_formalisation_quote') is True
+            and isinstance(r.get('formalisation_quote'), dict)
+            and _free_upgrade_url(env.get('upgrade')) is not None)      # a free account (#4611), never a gifted plan
+
+
 def _pr_unchecked_words(env, cls):
     """The plain sentence for a reason class; "nothing for you to do" when the class is Symbolia's."""
     s = 'app' if _pr_static(env) else 'system'
@@ -3627,6 +3668,8 @@ def pr_reading(envelope):
                           **({'mapped': True} if name and _checked_as(r) else {})})
         else:
             words = None if unread else _pr_unchecked_words(env, r.get('reason_class'))
+            if words is not None and _pr_formalisable(env, r):   # EXPERIENCE gate 12041: a real next step, on Premium
+                words = PR_FORMALISE_WORDS
             if spent_rows and _pr_unread_row(r):    # the Director, 14 Oct 2026: the spent balance left it unread
                 words = PR_SPENT_ROW if words is None else words + '; ' + PR_SPENT_ROW
             unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'), 'words': words,
@@ -3863,6 +3906,30 @@ def _free_upgrade_url(block):
     if isinstance(line, str) and line.startswith(GIFT_LINE_PREFIX):
         return None
     return url
+
+
+# Launch scope (the Director, 12081, MUST item 3: readable and converting): every free comment ends with this sentence,
+# then the upgrade line: the server's own (`upgrade.line`, escaped as the summary prints it); a malformed line prints
+# no closing link (#4577's pin). Paid and gifted accounts read neither (`_free_upgrade_url`, #4611).
+PR_VERIFY_MORE = 'Verify more of your requirements.'
+
+
+def pr_verify_more(envelope):
+    """['', PR_VERIFY_MORE, '', <the upgrade line>] for a verdict or failure envelope carrying a free account's
+    `upgrade` block (at the top, or in a failure's `detail`), else []."""
+    env = envelope if isinstance(envelope, dict) else {}
+    block = env.get('upgrade')
+    url = _free_upgrade_url(block)
+    if url is None and 'upgrade' not in env and isinstance(env.get('detail'), dict):   # a malformed top-level block wins (#4577)
+        block = env['detail'].get('upgrade')
+        url = _free_upgrade_url(block)
+    if url is None:
+        return []
+    line = block.get('line')
+    words = line[:-len(url)].rstrip() if isinstance(line, str) and line.endswith(' ' + url) else ''
+    if not words or _CONTROL.search(words) or len(words) > CAP or '://' in words:
+        return []           # #4577's pin: render's own checks on `upgrade` hold; a malformed line prints no price
+    return ['', PR_VERIFY_MORE, '', '%s <%s>' % (_esc_line(words), url)]
 
 
 def premium_tree_line(envelope):
@@ -4119,6 +4186,13 @@ def pr_engine_line(env):
     return 'Checked by Assure engine `%s`.' % c[:7] if isinstance(c, str) and _PR_ENGINE.fullmatch(c) else None
 
 
+def _pr_listed_unchecked(env, rd):
+    """The "Not checked yet" rows the comment lists (issue #3150)."""
+    written = bool(requirement_rows(env))
+    return [u for u in rd['unchecked'] if u['requirement'] is not None or u.get('coverage')
+            or not (written or u.get('quiet'))]
+
+
 def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_bases=(), requirements_file=None):
     """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
     finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
@@ -4152,7 +4226,7 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
         out += [_pr_unread_words(rd['unread'], lambda loc: _pr_where(loc, repository, commit)), '']
         if rd['app_unread']:                  # issue #3174: one next step, then the footer (`_pr_footer`)
             out += [PR_UNREAD_NEXT, '']
-            return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names)) + '\n'
+            return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names) + pr_verify_more(env)) + '\n'
     elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']
 
@@ -4185,9 +4259,7 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     # issue #3150: "Not checked yet" lists the rules the customer wrote that Assure could not decide, and a check on a
     # machine it could not read; a check they did not write as a rule stays in the proof tree, and with no rules
     # written so does one that needs nothing from anyone and has nothing to check (nothing declared, or Symbolia's gap)
-    written = bool(requirement_rows(env))
-    unchecked = [u for u in rd['unchecked'] if u['requirement'] is not None or u.get('coverage')
-                 or not (written or u.get('quiet'))]
+    unchecked = _pr_listed_unchecked(env, rd)   # the same rows the templated status line counts (#5006)
     # issue #3221: a run that sent no requirements.md (`requirements: none`, or none named) chose to skip the checks
     # that depend on what the system is for; the comment says so once instead of asking on every row
     skipped = [u for u in unchecked if u['requirement'] is None and u.get('cls') == 'needs_intent'] \
@@ -4201,7 +4273,7 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
             words = PR_SKIPPED_INTENT_HTTP if env.get('profile') == HTTP_PROFILE else PR_SKIPPED_INTENT
             out += [words.format(n=_plural(len(skipped), 'check', 'checks'),
                                  verb='depends' if len(skipped) == 1 else 'depend'), '']
-    return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, names=names)) + '\n'
+    return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, names=names) + pr_verify_more(env)) + '\n'
 
 
 def _pr_footer(env, commit, tree, tree_bases, read=True, names=None):
@@ -4272,7 +4344,8 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
            'This run was refused (%s)%s' % (word, ': ' + esc(f.get('reason')) if reason else '.'), '',
            '**Next step:** %s' % esc(step or next_step(f)), '']
     upgrade = upgrade_markdown(f).rstrip('\n')     # issue #4577: a spent free balance's refusal: price and payment link
-    if upgrade:
+    closing = pr_verify_more(f)
+    if upgrade and not closing:                    # a gifted plan's line, or no free account: said where it was
         out += [upgrade, '']
     promises = pr_promises(requirements_text)
     if promises:
@@ -4288,7 +4361,91 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
         out += [PR_UNREAD_PROMISES if named else PR_NO_PROMISES, '']   # night read L1: named, refused before the read
     named = '`%s`' % commit[:7] if isinstance(commit, str) and _PR_COMMIT.fullmatch(commit) else 'not named'
     out += ['---', pr_refused_tree(f), '', '<sub>Assure reached no verdict on this run. Commit %s.</sub>' % named]
-    return '\n'.join(out) + '\n'
+    # #4577 + launch scope 12081: one payment-link line. A free refusal that carries its own upgrade line (price, the spent
+    # notice, the link) ends with it, after the closing sentence, in place of the closing's plain upgrade line.
+    if closing and upgrade:
+        closing = ['', PR_VERIFY_MORE, '', upgrade]
+    return '\n'.join(out + closing) + '\n'
+
+# ---------- readable-report-001 (the Director, 18 Oct 2026): the report leads the pull request comment ----------
+# "the readable ... comments written by agents on the PR to tell humans on the PR what it found, what's recorded". A
+# written report's first paragraph is the reviewer's summary under the comment's heading; the full report follows,
+# folded; then two template lines, never model text (the Director's ruling the same day): the trace line, and for a
+# free account the proof-tree line with the Premium payment link. Everything else in the comment is unchanged.
+PR_REPORT_FOLD = '<details><summary>The full report</summary>'
+PR_TRACE_LINE = 'Everything Assure checked is in the trace: the verdict file `%s` of this run, check `%s`.'
+DEFAULT_VERDICT_FILE = 'assure-verdict.json'
+_TRACE_FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+_TRACE_CHECK = re.compile(r'[0-9a-f]{32}')
+
+
+def report_paragraphs(record):
+    """The paragraphs of a written report record's body, each rendered as `report_markdown` renders it; [] for a record
+    that is not written (withheld, refused, running, absent)."""
+    if not (isinstance(record, dict) and record.get('status') == 'written' and isinstance(record.get('body_md'), str)):
+        return []
+    return [p.strip() for p in re.split(r'\n\s*\n', report_markdown(record['body_md'])) if p.strip()]
+
+
+def report_by_default(envelope):
+    """True when the verdict says its account is on the free plan with its free balance not spent: `upgrade` carries
+    the server's payment link (`_UPGRADE_URL`) and no `notice` (a spent balance and a gifted plan both carry one). The
+    Action then asks for the report with the `report` input unset; a paid account stays opt-in."""
+    up = envelope.get('upgrade') if isinstance(envelope, dict) else None
+    return (isinstance(up, dict) and isinstance(up.get('url'), str) and bool(_UPGRADE_URL.fullmatch(up['url']))
+            and not up.get('notice'))
+
+
+def trace_line(envelope, verdict_file=None):
+    """PR_TRACE_LINE for the verdict's check id and the verdict file's name (DEFAULT_VERDICT_FILE when the name given
+    is not a plain file name), or None without a check id."""
+    cid = envelope.get('check_id') if isinstance(envelope, dict) else None
+    if not (isinstance(cid, str) and _TRACE_CHECK.fullmatch(cid)):
+        return None
+    name = verdict_file if isinstance(verdict_file, str) and _TRACE_FILE.fullmatch(verdict_file) \
+        else DEFAULT_VERDICT_FILE
+    return PR_TRACE_LINE % (name, cid)
+
+
+PR_STATUS_WORDS = {'broken': 'is broken by this change', 'deviates': 'deviates from the baseline',
+                   'holds': 'holds', 'unchecked': 'is not checked yet'}
+
+
+def report_status_lines(envelope):
+    """remodel lane 11937: the report's status, one line per rule the comment lists, from the verdict rows
+    (`pr_reading`), never from the model: '- **<label>** <PR_STATUS_WORDS>.', or an other finding's kind words;
+    broken, deviations, other findings, holds, then not checked yet."""
+    env = envelope if isinstance(envelope, dict) else {}
+    rd = pr_reading(env)
+    kinds = {k: w for k, w, _ in PR_OTHER_KINDS}
+    out = ['- **%s** %s.' % (esc(i['label']), PR_STATUS_WORDS['broken']) for i in rd['broken'][:MAX_ANNOTATIONS]]
+    out += ['- **%s** %s.' % (esc(i['label']), PR_STATUS_WORDS['deviates']) for i, _ in rd['deviations'][:MAX_ANNOTATIONS]]
+    out += ['- **%s** is %s.' % (esc(i.get('label') or i.get('text')), kinds[k]) for k, i in rd['others'][:MAX_ANNOTATIONS]]
+    out += ['- **%s** %s.' % (esc(h['label']), PR_STATUS_WORDS['holds']) for h in rd['holds'][:MAX_ANNOTATIONS]]
+    out += ['- **%s** %s.' % (esc(u['label'] or u['name']), PR_STATUS_WORDS['unchecked'])
+            for u in _pr_listed_unchecked(env, rd)[:MAX_ANNOTATIONS]]
+    return out
+
+
+def pr_with_report(body, record, envelope, verdict_file=None):
+    """The comment `body` (`pr_comment_markdown`) with a written report under its heading (after a free comment's
+    Premium proof-tree line, #4611's `premium_tree_line`, which stays first): the report's first paragraph, then
+    folded: each rule's status from the verdict (`report_status_lines`) and the full report; then the trace line. The
+    tree line is the comment's one payment link. `body` itself for any record that is not written."""
+    paras = report_paragraphs(record)
+    if not paras:
+        return body
+    lines = body.split('\n')
+    at = 3
+    top = premium_tree_line(envelope)              # #4611 (issue #4576): the free comment's one tree line stays first
+    if top is not None and lines[3:5] == [top, '']:
+        at = 5
+    block = [paras[0], '', PR_REPORT_FOLD, ''] + report_status_lines(envelope) + ['', '\n\n'.join(paras), '',
+                                                                                  '</details>', '']
+    block += [line for line in (trace_line(envelope, verdict_file),) if line]
+    block.append('')
+    return '\n'.join(lines[:at] + block + lines[at:])
+
 
 
 def pr_refused_tree(failure):

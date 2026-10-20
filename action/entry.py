@@ -611,7 +611,7 @@ def _pull_number(env):
     return n if type(n) is int and n > 0 else None
 
 
-def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
+def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, report=None, verdict_file=None):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
     looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
@@ -620,7 +620,8 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
     footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`).
     Issue #3149: each quoted rule names the `requirements` input it was read from (`render.pr_requirements_file`).
     Issue #3168: `body` (a `mode: lint` run's LINT_PREFLIGHT) is posted in place of the verdict's comment, under the
-    same marker, so the one Assure comment says no check ran."""
+    same marker, so the one Assure comment says no check ran. readable-report-001: a written `report` record leads
+    the comment under its heading (`render.pr_with_report`), with the trace line naming `verdict_file`."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
         return None
     repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
@@ -632,6 +633,7 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
         body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
                                           tree_bases=tree_bases, requirements_file=render.pr_requirements_file(
                                               env.get('INPUT_REQUIREMENTS'), env.get('GITHUB_WORKSPACE')))
+        body = render.pr_with_report(body, report, verdict, verdict_file)
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
@@ -1059,15 +1061,27 @@ def parse_allow_partial(text):
 
 
 def parse_report(text, mode='api'):
-    """serve-014, DD-103: the `report` input: unset or '' is False in every mode (issue #2174: the report sends the
-    verdict record to a third-party model, so it is opt-in); 'false' or '0' is False; 'true' or '1' is True
-    (case-insensitive); else bad_input."""
+    """serve-014, DD-103: the `report` input: 'false' or '0' is False; 'true' or '1' is True (case-insensitive); else
+    bad_input. Unset or '' is 'auto' in api mode (readable-report-001, the Director, 18 Oct 2026: on by default for a
+    free account's first runs, within its free balance; `report_wanted` decides once the verdict says which account
+    it is) and False in every other mode."""
     v = (text or '').strip().lower()
-    if v in ('', 'false', '0'):
+    if v == '':
+        return 'auto' if mode == 'api' else False
+    if v in ('false', '0'):
         return False
     if v in ('true', '1'):
         return True
     raise Refusal('bad_input', 'report must be true or false')
+
+
+def report_wanted(report_on, verdict):
+    """True when the report is asked for after `verdict`: `report: true`; or the input unset ('auto') and the verdict
+    says the account is free with its free balance not spent (`render.report_by_default`). A paid account stays
+    opt-in; a spent balance asks for none (the comment's spent line says so)."""
+    if report_on == 'auto':
+        return render.report_by_default(verdict)
+    return report_on is True
 
 
 def parse_allow_overage(text):
@@ -1128,14 +1142,15 @@ def _report_usage(report, first_checked_at=None):
     return line, outs
 
 
-def _with_report(summary, report, url, first_checked_at=None):
+def _with_report(summary, report, url, first_checked_at=None, trace=None):
     """(summary, report-status, report-url) for a requested report (module docstring). `report` is the record or the
-    Refusal that ended the request."""
+    Refusal that ended the request. readable-report-001: a written report's first paragraph leads, under the first
+    line, and `trace` (`render.trace_line`) follows the report."""
     tail = _usage_tail(report, first_checked_at)
     if isinstance(report, dict) and report.get('status') == 'written':
         head = summary.split('\n', 1)[0]
-        return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n' + render.report_page_line(url)
-                + '\n' + tail, 'written', url)
+        return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n'
+                + (trace + '\n\n' if trace else '') + render.report_page_line(url) + '\n' + tail, 'written', url)
     if isinstance(report, dict):
         fallback = report.get('fallback') if isinstance(report.get('fallback'), dict) else {}
         return (summary + '\n' + render.report_withheld_line(fallback.get('reason')) + '\n'
@@ -2191,6 +2206,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         declared_reading(inputs['profile'], collected, lambda pid, files, counts: client.submit(   # issue #2928
             pid, files, declared_fail_on(inputs['fail_on']), limits=lim, key_from_bundle=not state['fresh_check'],
             **extra), lim, 'api_error')
+        state['report_on'] = report_wanted(state['report_on'], verdict)      # readable-report-001: 'auto' decides here
         if state['report_on']:                    # serve-014: never changes the verdict, its file or its exit
             state['report_url'] = client.base + '/v1/checks/%s/report.html' % verdict['check_id']
             try:
@@ -2285,8 +2301,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     try:                                               # rendered before anything is written: a fault is typed
         summary = render.summary_markdown(verdict)
         when = render.first_checked(verdict)            # serve-035: the first check's time, as the API wrote it
-        if state['report_on']:
-            summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'], when)
+        if state['report_on'] is True:
+            summary, report_status, report_url = _with_report(summary, state['report'], state['report_url'], when,
+                                                              trace=render.trace_line(verdict, out_path.name))
             report_extra = 'report-status=%s\nreport-url=%s\n' % (report_status, report_url) \
                 + _report_usage(state['report'], when)[1]
         summary = _replay_lead(summary, verdict)
@@ -2405,12 +2422,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say('::notice title=Assure::%s' % _cmd_data('Assure: ' + both, cap=None))
     client = state.get('client')
     pr_comment(verdict, tree=pr_tree(verdict, state['tree']),
-               tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()))
+               tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()),
+               report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name)
     for line in notes:
         say(line)
     if ignored:
         say(_notice_line(ignored, inputs_profile))
-    if state['report_on']:
+    if state['report_on'] is True:
         if isinstance(state['report'], dict):
             say('Assure: report %s; %s' % (_cmd_data(state['report'].get('status')), _cmd_data(state['report_url'])))
         else:
