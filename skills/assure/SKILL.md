@@ -14,7 +14,7 @@ Five steps, in order.
 Read the repository and pick one check:
 
 - **A Flask, FastAPI or Django app:** the sign-in check, `python-auth-declared-model`. Free. It reads your code as text and never runs it.
-- **A PostgreSQL database the app uses:** `postgresql-observed-baseline`, from a connection, or from the database your migrations build in CI.
+- **A PostgreSQL database the app uses:** `postgresql-observed-baseline`, from a connection or a CI database.
 - **Both:** start with Flask. Add the database once the first check is in.
 
 MySQL and HTTP heads: see the references. Standard-library http.server: the same check with a declaration you write (references/python.md). On Supabase, the role the collector needs cannot be granted (references/postgres.md, section 2). So this Action version cannot collect from a Supabase database.
@@ -24,8 +24,8 @@ MySQL and HTTP heads: see the references. Standard-library http.server: the same
 One question each, with its tradeoff. With no answer, leave that part out.
 
 - **Let GitHub Actions open pull requests?** Settings, Actions, General: "Allow GitHub Actions to create and approve pull requests". Yes: Assure opens one pull request with the rules it drafted, and merging it accepts them. No: Assure pushes its proposal to a branch and prints a link; one click opens the pull request (once #3238 ships), and checks still run.
-- **PostgreSQL only: the connection.** They create a read-only role and store the connection as the secret `ASSURE_PG_CONNECTION` (references/postgres.md, sections 2 and 3). Show each command; they run it. Yes: Assure reads settings, roles and policies, never table contents. No: check the CI database instead, or skip the database.
-- **The report (off by default).** Yes: add `report: true`; a model writes a plain-language report from each verdict, paid from the free report balance. Today only declared PostgreSQL checks get one. No: nothing goes to a model.
+- **PostgreSQL only: the connection.** They create a read-only role and store the connection as the secret `ASSURE_PG_CONNECTION` (references/postgres.md, sections 2 and 3). Show each command; they run it. Yes: Assure reads settings, roles and policies, never table contents. No: check the CI database, or skip the database.
+- **The report (off by default).** Yes: add `report: true`; a model writes a plain-language report from each verdict, paid from the free report balance. No: no report is written; unmatched requirement lines still go to Claude Haiku (`compile-requirements`, see DATA.md).
 - **Check your own rules?** Yes: add `requirements: requirements.md`; Assure sends the file's text with each check and reports on each rule by name (kept 30 days). No: only Assure's built-in checks run.
 
 Ask nothing else. Sign-in uses the workflow's GitHub identity, so there is no key, and the account is free.
@@ -101,7 +101,7 @@ jobs:
           # requirements: requirements.md   # if they said yes
 ```
 
-The runner must reach the database. PostgreSQL from the database your migrations build in CI: collect from it and pass the folder as `artefacts` in place of `connection` (references/postgres-local.md).
+The runner must reach the database. A private database: by default, the one your migrations build in CI (references/postgres.md, section 4), or collect it and pass the folder as `artefacts` in place of `connection` (references/postgres-local.md).
 
 `@beta` moves to each release, so you get every fix. If the repository requires SHA pins, pin the commit `@beta` resolves to. This prints it:
 
@@ -121,13 +121,19 @@ Push the file to the default branch, or open a pull request with it if the branc
 
 For a proposal, the job needs `actions/checkout` before the Assure step. The Flask job's first run opens `Assure: proposed intent — review and merge to accept`. It holds the rules Assure drafted, each value to confirm with the file and line it came from. GitHub may hold its check until someone clicks **Approve and run** on it; ask the person to. Go through the draft with them, fix what is wrong on its branch, and merge it.
 
+| Omitted | Default |
+|---|---|
+| `app_roots` | repo root |
+| `guards` | none: yellow |
+| `session_identity_key` | AUTH-3/4/5 not established |
+
 ## 5. Every pull request gets a comment
 
 Success: the next pull request gets a comment from Assure, headed "Assure: N rules broken by this change". Later runs update the same comment.
 
 If a run stops, read the first line of its job summary.
 
-- **Red:** a rule this change breaks. The comment says what and how to fix it.
+- **Red:** a rule this change breaks.
 - **Yellow:** Assure could not read part of the app or the setup. If the line names the setup (a permission, the connection, the role), fix that and push again. If it names your code, that is Assure's gap: do not rewrite working code or silence the job. Send the summary's first line as feedback (references/feedback.md) and tell the person.
 
 Never commit `mode: lint`: a lint run checks nothing. Never store a key or guess a commit.

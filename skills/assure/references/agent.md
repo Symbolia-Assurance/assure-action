@@ -9,6 +9,7 @@
 - Replace the example endpoint values with the operator's own; keep the top-level keys and the seven flags as shown.
 - Before the run, check that the first line of each captured head begins with `HTTP/1.1`.
 - Set up the Assure GitHub Action on a repository and read its result.
+- On the Python route, ask the customer once whether each published release should be checked too, saying that it adds one run per release and needs `contents: write` to write the report into the release notes (references/python.md, "Check each release").
 - The commands for (a) and (b), the two ways to let the runner read the configuration files, are in references/postgres.md, section 6, with paths for Debian or Ubuntu; show them to the operator and let the operator choose and run one.
 
 ## Rules for an agent

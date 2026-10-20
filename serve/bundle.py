@@ -98,7 +98,7 @@ def commit_ok(value):
 
 @dataclass(frozen=True)
 class Limits:
-    body_bytes: int = 8 * 2 ** 20
+    body_bytes: int = 64 * 2 ** 20
     file_bytes: int = 4 * 2 ** 20
     files: int = 2048
     json_depth: int = 32

@@ -4,8 +4,8 @@ byte, so the public Action tree ships it and the server runs it at admission (se
 
 The marker. The RF-28 collector replaces a rule, setting or other parsed line it cannot keep by exactly one line:
 
-    !collect_pg-withheld line <N> reason <CODE>
-    !collect_pg-withheld line <N> reason <CODE> setting <name>
+    `!collect_pg-withheld line <N> reason <CODE>`
+    `!collect_pg-withheld line <N> reason <CODE> setting <name>`
 
 - `MARKER_RE` is the contract's grammar; a line is a marker only by `fullmatch` on the line without its line ending.
 - Lines are counted at '\\n' only. Exactly one '\\r' before the '\\n' is line ending; a further '\\r' is part of the line,

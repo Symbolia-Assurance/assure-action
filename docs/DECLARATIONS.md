@@ -42,7 +42,7 @@ These five groups explain the existing flat fields. They are not new nested keys
 
 Do not infer purpose from the observed settings. An operator must confirm that declaration and collection describe the same database and major, that declared authentication works, that loaded HBA rules match supplied files, and that TLS, function authority and replication assumptions apply where declared. The validator names the confirmations relevant to your fields.
 
-For tenant boundaries, confirm the predicate means each user can read only their own tenant rows, that identities map to the model, that all direct and view access routes are supplied, and that exemptions are intentional. The derive step compares normalized SQL text with `declared_predicate`; it does not parse or prove the meaning of arbitrary SQL, `auth.uid()`, joins or functions. A literal `true` does not describe tenant isolation, and a literal `false` denies every row.
+For tenant boundaries, confirm the predicate means each user can read only their own tenant rows, that identities map to the model, that all direct and view access routes are supplied, and that exemptions are intentional. The derive step compares normalized SQL text with `declared_predicate`. It also accepts a hand-written `<column> = current_setting('<name>')` against a policy that is one comparison of the same column with the same setting, read as `current_setting('<name>')` or `current_setting('<name>', true|false)`, bare, in `nullif(<read>, '')` (on the served path the second argument is withheld, so any withheld literal there is read as `''`; it can only remove rows) or in `(select <read> [as <alias>])`, casts dropped (an OR, AND, bypass disjunct, other column or other setting is still refused). Otherwise it does not parse or prove the meaning of arbitrary SQL, `auth.uid()`, joins or functions. A literal `true` does not describe tenant isolation, and a literal `false` denies every row.
 
 The current RLS model represents one protected table, at most four access paths and four policies, and two non-NULL tenants. Each derived path is assigned the `tenant_a` abstraction; actual session/JWT mapping needs operator confirmation. Additional protected tables, incomplete paths, NULL tenants, arbitrary SQL, joins, functions, triggers, `RETURNING` and integrity-check side channels remain outside those bounds. The validator reports gaps rather than changing your declaration. Standbys are bounded to two; privilege queries, disjoint duties, default ACL expectations and declared revokes are each bounded to 32 entries by derivation.
 
@@ -61,7 +61,7 @@ collected/
   REDACTION-MANIFEST.json
 ```
 
-`postgresql-declared-model` requires `raw/catalog_snapshot.json` (at most 4 MiB) and `raw/declaration.json` (at most 1 MiB). Optional `raw/clients.json` is at most 1 MiB. The Action's bundle limits are 2048 files and an 8 MiB encoded request body; consult [DATA.md](DATA.md) for collected data and [SCOPE.md](SCOPE.md) for the claim boundaries. Use `artefacts`, since the connection collector does not author a declaration:
+`postgresql-declared-model` requires `raw/catalog_snapshot.json` (at most 4 MiB) and `raw/declaration.json` (at most 1 MiB). Optional `raw/clients.json` is at most 1 MiB. The Action's bundle limits are 2048 files and a 64 MiB encoded request body; consult [DATA.md](DATA.md) for collected data and [SCOPE.md](SCOPE.md) for the claim boundaries. Use `artefacts`, since the connection collector does not author a declaration:
 
 ```yaml
       - name: Check declared database intent
@@ -88,15 +88,17 @@ The served `python-auth-declared-model` declaration, schema `assure.python-auth.
 
 A `python-auth-declared-model` declaration may leave out `app_roots` (the repository root is read), `session_identity_key` or `identity_writers` (the obligations that read it read not established and the rest are decided), and `app_objects` or `guards` (every obligation reads not established and the check reads yellow, never green). Leaving one out never refuses the check; the table gives each default:
 
-| Field | When it is left out |
+| Field | Its default: when it is left out |
 |---|---|
-| `app_roots` | The repository root: every top-level folder that holds a `.py` file and every top-level `.py` file. The verdict's `warnings` names the entries read, in a `declaration_default` entry. |
+| `app_roots` | The repository root: every top-level folder that holds a `.py` file and every top-level `.py` file. The verdict's `warnings` names the entries read, in a `declaration_default` entry, and the served `scope_notes` carry the same note naming `declaration.json#/app_roots`. |
 | `app_objects` | No route can be read. Every obligation reads not established and names `app_objects`; the check reads yellow, never green. |
 | `guards` | Every obligation reads the guards, so every one reads not established and names `guards`; the check reads yellow, never green. |
 | `session_identity_key` | AUTH-3, AUTH-4 and AUTH-5 read not established and name `session_identity_key`. The other obligations are decided. |
 | `identity_writers` | AUTH-3 reads not established and names `identity_writers`. The other obligations are decided. |
 
 A value that is present but malformed (for example `guards` written as a string, or an empty `app_roots`) still breaks the schema and is refused as `declaration_invalid` at its pointer. Add a left-out field to `.assure/declaration.json` to have the obligations that read it decided.
+
+Each left-out field's `declaration_default` note is also served in the verdict's `scope_notes`, naming its pointer (for example `guards is not declared (declaration.json#/guards): ...`). When the Action drafted a Flask declaration and the check reached a verdict, the job summary's declaration section names, in plain words, each of these five fields the draft left out, with what its default reads. A server that still requires a field refuses the declaration (`profile_refused`, `declaration_invalid`, keyword `required` at that field), and the Action's next step names it. A refusal that names none of the fields the draft left out still proposes the draft, and the next step asks you to correct what Assure read.
 
 ## MySQL submissions
 

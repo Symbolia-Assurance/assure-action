@@ -45,9 +45,9 @@ PRODUCER = 'action_identity_fixture.py'
 COLLECTOR = 'collector/collect_http.py'
 #: the producer, the scope helper it verifies and the collector, at the checker entry's listed digests
 FILES = {
-    'action_identity_fixture.py': '5348fa3d66b24a2611bf4116fc5c963f52461e652ab69a9366398cb1debe5916',
+    'action_identity_fixture.py': 'c8699fa2be312d47fbde43dca4bf08b9c95a449189305d2c2575ae42a4fb12ea',
     'scope_binding.py': '64889563b2b974c736dab5f45f66c9cf1be464a9a16e81cb17e3508f2220be8c',
-    'collector/collect_http.py': '916af00b93b49df84fc2e186e95b8d184fc93917a06696bed5c7f4aa394cae9b',
+    'collector/collect_http.py': 'd0b86d977e5495025f755fda8d5c90a825479424a642b57815c6cb967021d153',
 }
 SCOPE_FILE = 'identity-scope.json'
 MAX_SCOPE_BYTES = 65536

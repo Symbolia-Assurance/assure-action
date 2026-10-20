@@ -13,7 +13,7 @@ import types
 FLAGS=dict(execution_authorized=False,hardware_authorized=False,
            industrial_release_authorized=False,release_allowed=False,
            physical_validation=False,simulation=True,self_approved=False)
-COLLECTOR_PIN='916af00b93b49df84fc2e186e95b8d184fc93917a06696bed5c7f4aa394cae9b'
+COLLECTOR_PIN='d0b86d977e5495025f755fda8d5c90a825479424a642b57815c6cb967021d153'
 BINDING_PIN='64889563b2b974c736dab5f45f66c9cf1be464a9a16e81cb17e3508f2220be8c'
 
 class ProducerError(Exception):

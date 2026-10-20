@@ -35,7 +35,7 @@ ENDPOINT_ID = re.compile(r'endpoint-[0-9]{3}\Z')
 ALLOW = frozenset(('content-length', 'transfer-encoding', 'location',
                   'strict-transport-security', 'content-security-policy',
                   'content-security-policy-report-only', 'x-content-type-options',
-                  'referrer-policy', 'set-cookie'))
+                  'referrer-policy', 'set-cookie', 'cache-control'))
 REASONS = frozenset(('HEADER-SENSITIVE', 'HEADER-NOT-ALLOWLISTED',
                      'HEADER-CONTINUATION', 'HEADER-MALFORMED', 'CONTROL-CHARACTER',
                      'FIELD-OVER-BOUND', 'MARKER-COLLISION'))
@@ -215,6 +215,12 @@ def _hsts(value):
     return result
 
 
+def _cache_control(value):
+    # The directive names only; an argument (max-age=0, private="x") is data that is never returned.
+    names = [p.split('=', 1)[0].strip().lower() for p in value.split(',')]
+    return dict(status='observed', no_store='no-store' in names)
+
+
 def _location(value, endpoint):
     result = dict(status='observed', syntax='valid', form='relative', scheme=endpoint['scheme'],
                   origin_relation='same_origin', secure_to_insecure=False)
@@ -339,7 +345,7 @@ def sanitize_response(head, endpoint, complete=True):
                  content_length_and_transfer_encoding=None, locations=[], hsts=[], cookies=[],
                  cookie_count=None, cookie_coverage='unknown', header_coverage='unknown',
                  csp=dict(enforcing_count=0, report_only_count=0, status='observed'),
-                 nosniff=[], referrer_policy=[], policy=request_policy(code), gaps=[])
+                 nosniff=[], referrer_policy=[], cache_control=[], policy=request_policy(code), gaps=[])
     if over:
         facts['gaps'].append('LIMIT-EXCEEDED')
     if interim:
@@ -425,6 +431,11 @@ def sanitize_response(head, endpoint, complete=True):
                 facts['nosniff'].append(dict(extracted, source=source))
                 if extracted['value']:
                     retained = 'X-Content-Type-Options: nosniff'
+            elif name == 'cache-control':
+                extracted = _cache_control(value)
+                facts['cache_control'].append(dict(extracted, source=source))
+                if extracted['no_store']:
+                    retained = 'Cache-Control: no-store'
             elif name == 'referrer-policy':
                 policies = [v.strip().lower() for v in value.split(',')]
                 extracted = dict(status='observed' if all(v in REFERRERS for v in policies) else 'representation', values=[v for v in policies if v in REFERRERS])
@@ -432,7 +443,8 @@ def sanitize_response(head, endpoint, complete=True):
         elif name in ALLOW:
             extracted = dict(status='not_observed', syntax='unknown', value=None)
             target = {'content-length':'content_length', 'transfer-encoding':'transfer_encoding',
-                      'location':'locations', 'strict-transport-security':'hsts'}.get(name)
+                      'location':'locations', 'strict-transport-security':'hsts',
+                      'cache-control':'cache_control'}.get(name)
             if target:
                 facts[target].append(dict(extracted, source=source))
             if name.startswith('content-security-policy'):

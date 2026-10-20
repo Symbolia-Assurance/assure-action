@@ -58,9 +58,22 @@ JUDGEMENT = ('/session_identity_key', '/guards', '/identity_writers', '/elevatio
 _ID = re.compile(r'[^A-Za-z0-9_.-]+')
 # The declaration fields the drafter reads from the code; one it could not read is left out of the draft. The checker
 # checks such a draft (issue #3899): an absent app_roots reads the repository root, and the obligations that read any
-# other absent field read not established naming it. A server before #3899 refuses the draft (profile_refused,
-# declaration_invalid, keyword required) until the customer adds the field.
-READ_REQUIRED = ('app_roots', 'app_objects', 'session_identity_key', 'guards', 'identity_writers')
+# other absent field read not established naming it (grade.ABSENT_NEEDS). A server before #3899 refuses the draft
+# (profile_refused, declaration_invalid, keyword required) until the customer adds the field. Issue #3969: a refusal's
+# next step always names a left-out READ_REQUIRED field (without app_objects no route is read; identity_writers is
+# AUTH-3's premise), and a READ_DEFAULTED one only while the refusal shows the check still requires it
+# (unread_refused); a verdict's declaration section on a python/flask draft names, in FIELD_WORDS, every READ_ORDER
+# field the draft left out with what its default reads (summary_markdown `defaulted`, DEFAULT_READS).
+READ_REQUIRED = ('app_objects', 'identity_writers')
+READ_DEFAULTED = ('app_roots', 'session_identity_key', 'guards')
+READ_ORDER = ('app_roots', 'app_objects', 'session_identity_key', 'guards', 'identity_writers')   # main's READ_REQUIRED
+DEFAULT_READS = {'app_roots': "the repository's top-level Python entries are read as the app roots",
+                 'app_objects': 'no app object: no route is read, every obligation reads not established and the '
+                                'check reads yellow',
+                 'session_identity_key': 'no session identity key: AUTH-3/4/5 not established',
+                 'guards': 'no guard: no obligation is decided (each reads not established unless its reading is '
+                           'a representation one) and the check reads yellow',
+                 'identity_writers': 'no identity writer: AUTH-3 not established'}
 # Issue #3118 (the Director, 16 Oct 2026; DD-150, DD-161 Add.6): the declaration is internal, so no line the customer
 # reads names one of its fields. Each field of the python-auth declaration schema (python-auth-declaration-v1.schema.json)
 # the customer could be asked about, in the customer's own terms; tests/serving/test_customer_words_accept.py reads the
@@ -436,14 +449,22 @@ def commit_markdown(env, branch, rel, data):
     return '\n[Commit this draft](%s) at `%s` (GitHub opens its commit form with the file filled in).\n' % (url, rel)
 
 
-def summary_markdown(record, rel, proposed, source='the repository'):
-    """The job summary's section for an unaccepted draft: what it is, where it was proposed, the fields to confirm."""
+def summary_markdown(record, rel, proposed, source='the repository', defaulted=()):
+    """The job summary's section for an unaccepted draft: what it is, where it was proposed, the fields to confirm,
+    and (issue #3969) each READ_ORDER field in `defaulted` the draft left to its default, in the customer's words
+    (FIELD_WORDS; issue #3118), with what it reads."""
     out = ['', '### Declaration: %s' % BOUNDED, '',
            'This check ran on a declaration drafted from %s (`%s`). %s' % (source, rel, proposed), '',
            '| Field to confirm | Read at |', '| --- | --- |']
     for label, at in _confirm_rows(record):
         out.append('| %s | %s |' % (label, ', '.join(at) if record.get('stack') != STACK else
                                     ', '.join('not read from the code' if a == 'unread' else a for a in at)))
+    rows = [f for f in READ_ORDER if f in defaulted]
+    if rows:
+        out += ['', 'Assure could not find these in the code; the check read each at its default. Add one to `%s` '
+                'to replace its default.' % rel, '', '| Field left to its default | The default reads |',
+                '| --- | --- |']
+        out += ['| %s | %s |' % (FIELD_WORDS[f], DEFAULT_READS[f]) for f in rows]
     return '\n'.join(out) + '\n'
 
 
@@ -457,17 +478,44 @@ def unread_required(data):
     return tuple(f for f in READ_REQUIRED if f not in decl) if isinstance(decl, dict) else ()
 
 
+def unread_defaulted(data):
+    """Issue #3969: the defaulted fields (READ_DEFAULTED, in that order) a draft's bytes `data` leave out; () when
+    `data` is not a JSON object."""
+    try:
+        decl = json.loads(bytes(data))
+    except (TypeError, ValueError):
+        return ()
+    return tuple(f for f in READ_DEFAULTED if f not in decl) if isinstance(decl, dict) else ()
+
+
+def unread_refused(data, detail):
+    """Issue #3969: the fields a check refused on the draft `data` (declaration_invalid; the refusal's `detail`: its
+    first `pointer` and `keyword`, and its `faults` list of {pointer, keyword}) is to name in its next step, in
+    READ_ORDER: each of `unread_required(data)`, and each of `unread_defaulted(data)` whose own pointer the refusal
+    names with keyword required (a check that still requires it). An unrelated fault never names a defaulted field."""
+    required = unread_required(data)
+    faults = detail.get('faults') if isinstance(detail.get('faults'), list) else []
+    named = {r.get('pointer') for r in [detail] + faults if isinstance(r, dict) and r.get('keyword') == 'required'}
+    keep = set(required) | {f for f in unread_defaulted(data) if '/' + f in named}
+    return tuple(f for f in READ_ORDER if f in keep)
+
+
 def next_step(unread, rel, proposed=True, number=None):
     """The one plain next step for a check refused on a partial draft: what Assure could not find in the code, in the
     customer's terms (issue #3118: never a declaration field's name), where to add it (`proposed`: Assure's pull request
-    `number`, to review and merge; else the draft in full in the job summary), and that no rule was checked yet."""
-    what = 'No rule was checked yet: in the code, Assure could not find %s.' % _join(plain_words(unread))
+    `number`, to review and merge; else the draft in full in the job summary), and that no rule was checked yet. An
+    empty `unread` (issue #3969: the refusal names no field the draft left out) asks to correct what Assure read."""
+    if unread:
+        what, fix, at = ('No rule was checked yet: in the code, Assure could not find %s.' % _join(plain_words(unread)),
+                         'add what it could not find', 'to')
+    else:       # issue #3969 (REFUTATION-r5 MEDIUM-2): the refusal names no field the draft left out
+        what, fix, at = ('No rule was checked yet: the check could not use a value Assure read from the code.',
+                         'correct what it read', 'in')
     if not proposed:
-        return ('%s Assure could not open its pull request, so the draft is in full in the job summary; add what it '
-                'could not find to `%s`, then run again.' % (what, rel))
+        return ('%s Assure could not open its pull request, so the draft is in full in the job summary; %s %s `%s`, '
+                'then run again.' % (what, fix, at, rel))
     where = 'pull request #%d' % number if isinstance(number, int) else 'its pull request'
-    return '%s Assure proposed what it could read in %s (`%s`); add what it could not find, then merge it.' % (
-        what, where, rel)
+    return '%s Assure proposed what it could read in %s (`%s`); %s, then merge it.' % (what, where, rel, fix)
 
 
 def intent_markdown(profile, drafted=False):

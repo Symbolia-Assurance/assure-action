@@ -712,6 +712,27 @@ class Client:
             raise Refusal('api_error', 'the API answered without a report record')
         return doc
 
+    def requirement_history(self, rid, repository, profile=None):
+        """The release report (18 Oct 2026): `GET /v1/requirements/{id}/history?repository=&limit=200[&profile=]`,
+        this account's stored states of one requirement in one repository, newest check first. Free: listed records
+        only, nothing runs and nothing is charged. With `profile` the answer is {profile, count, entries}."""
+        if not isinstance(rid, str) or not _HISTORY_ID.fullmatch(rid) or not isinstance(repository, str) \
+                or not _HISTORY_REPO.fullmatch(repository):
+            raise Refusal('bad_input', 'a requirement history needs a requirement id and owner/name')
+        query = 'repository=%s&limit=200' % urllib.parse.quote(repository, safe='')
+        if profile is not None:
+            if not isinstance(profile, str) or not ID_RE.fullmatch(profile):
+                raise Refusal('bad_input', 'a requirement history profile must be a profile id')
+            query += '&profile=%s' % profile
+        status, doc = self._call('GET', '/v1/requirements/%s/history?%s' % (rid, query), route='history')
+        if status != 200 or not isinstance(doc, dict) or not isinstance(doc.get('entries'), list):
+            raise Refusal('api_error', 'the requirement history answered without entries')
+        return doc
+
+
+_HISTORY_ID = re.compile(r'[A-Za-z][A-Za-z0-9_.-]{0,63}|req-[0-9a-f]{64}')
+_HISTORY_REPO = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}')
+
 
 # ---------- the allow-list from GET /v1/profiles ----------
 MAX_NAME = 200

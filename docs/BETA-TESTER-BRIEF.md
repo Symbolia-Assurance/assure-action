@@ -4,7 +4,7 @@
 
 You administer one self-hosted PostgreSQL server, major 14 to 18, and you can run a GitHub Actions workflow that reaches it.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI, Django and standard-library http.server repositories with your declaration.
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI, Django and standard-library http.server repositories with your declaration.
 
 **Checking HTTP endpoints.** `http-observed-baseline` reads the response heads you captured for the endpoints you select, offline: give the Action an artefacts folder holding an endpoint manifest and the heads, and it produces the scope binding itself. The steps below are for PostgreSQL.
 
@@ -18,7 +18,7 @@ A reading for each obligation Assure checks: holds, fails, deviates, vacuous, or
 2. Let the runner read the server's configuration files, preferably copies (section 6, option b).
 3. From the runner, test the connection string with `psql` and `sslmode=require` (section 3). Store it as the secret `ASSURE_PG_CONNECTION`, and your key as `ASSURE_API_KEY`.
 4. Add the workflow from section 4. Leave `profile` at its default.
-5. Run it, and read the first line of the job summary. Reports are opt-in: set `report: true` in `mode: api`; unset or `report: false` skips them. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
+5. Run it, and read the first line of the job summary. Reports are opt-in: set `report: true` in `mode: api`; unset or `report: false` skips them. Reports are written for every served profile; a report that states anything the verdict's record does not hold is withheld.
 
 If the key is wrong or revoked, or you hit a rate limit, the API refuses the first request, for the profile list, before anything is collected or sent; the summary's last line says so.
 

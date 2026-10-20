@@ -8,7 +8,7 @@
 > - [ ] The job that runs Assure has `id-token: write` under `permissions:`, or an API key is stored as the repository secret `ASSURE_API_KEY` (section 1).
 > - [ ] `profile` is left at its default, `postgresql-observed-baseline`.
 
-**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`; reports are withheld (`profile_unqualified`) until the writer is qualified for MySQL. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI, Django and standard-library http.server repositories with your declaration.
+**Served today:** five profiles. `postgresql-observed-baseline`: intent-free, from a connection or an artefacts directory. `postgresql-declared-model`: an artefacts directory (`raw/declaration.json`) or a connection with `.assure/declaration.json`. `http-observed-baseline`: an artefacts folder holding an endpoint manifest and captured response heads; the Action produces the scope binding and passes the identity key by pipe. `mysql-declared-model`: a MySQL server, from a mysql:// connection plus your declaration file (`declaration`), or an artefacts directory holding `raw/submission.json`. `python-auth-declared-model`: a Python (Flask) repository, free, from the checkout in one step; the Action proposes a drafted declaration in a pull request the merge accepts; FastAPI, Django and standard-library http.server repositories with your declaration.
 
 Known-vulnerability scanners check your code against a list of what has broken before. Assure checks whether the way your code meets the foundational software it runs on stays inside a regime that can be shown safe and reliable, and says exactly what it could and could not establish.
 
@@ -229,6 +229,81 @@ This workflow uses the intent-free profile, which needs no declaration. To check
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
+**A database your CI builds from your migrations.** This is the default for a private database: the runner never reaches your production database, and CI builds the same schema in a PostgreSQL that lives only for the job. The whole job, with a service container, your bootstrap SQL and your migrator, then the collection role (section 2), then the check:
+
+```yaml
+name: Assure
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  assure:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: <the CI-only superuser password>
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://postgres:<the CI-only superuser password>@localhost:5432/postgres
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Install the PostgreSQL client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - name: Wait for PostgreSQL
+        run: until pg_isready -d "$DATABASE_URL"; do sleep 1; done
+
+      - name: Run the bootstrap SQL
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f <your bootstrap SQL file>
+
+      - name: Apply the migrations
+        run: <your migrator's command, reading DATABASE_URL>
+
+      - name: Create the collection role
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '<the CI-only password>';" -c "GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;"
+
+      - name: Assure check
+        id: assure
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          profile: postgresql-observed-baseline
+          connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>
+          collection-role: assure_collector
+          collection-privileges: pg_read_all_settings,pg_read_all_stats
+          fail-on: fails
+          output: assure-verdict.json
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@<full commit sha of the release you trust>
+        with:
+          name: assure-verdict
+          path: ${{ steps.assure.outputs.verdict-path }}
+```
+
+Leave out a step your CI does not have: with no bootstrap SQL, drop that step. The job grants `contents: write` beside `pull-requests: write` so that the first run proposes its draft: it opens `Assure: proposed intent — review and merge to accept` with the draft at `.assure/postgresql-declared-model.json`, each key to confirm with where it was read. Check each key, fix what is wrong on its branch, and merge it to accept it; the next check then also reads `postgresql-declared-model` beside this reading. GitHub lets the workflow token open the pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". Once it is merged, set `contents: read`.
+
 Checks are free, so the workflow runs `mode: api` from the start. To list problems before the first check, you can run the Action once by hand with `mode: lint`, from a workflow that runs only on `workflow_dispatch`: it reads the same files, sends them to `POST /v1/lint` and lists every problem it finds in your files, profile, scope, `requirements.md` and HTTP heads. Never commit `mode: lint` to the workflow that runs on pull requests: a lint run checks nothing and exits 0 when it finds no problem. The Action collects and checks your files in the runner as for a check, then asks the API to read them. Each problem is a `::warning` annotation and a line in the job summary; the lint record is written to `output`. The outputs are `outcome` (`lint`), `exit-code` (0 when nothing was found, else 2) and `lint-findings` (how many problems it found). It never runs a check and nothing is charged, but it counts against your rate limits. Fix what it lists, then run with `mode: api`.
 
 ## Reading your first result
@@ -414,7 +489,7 @@ A reading with a status you fail on gives exit 1 whatever could not be read, wit
 
 A vacuous reading only says that a domain was empty. A run whose only verdicts are vacuous reads "No verdicts" in the summary, and its first line says "nothing could be established".
 
-The first line counts the machines read out of every machine the profile checks, "5 of 8 machines read, 3 refused" (", K refused" only when a machine was refused): a machine that gave no reading at all is listed as refused with the reason "no readings for this machine". When Assure worked the list out from the readings because the checker did not report it, the count ends "(inferred)". The bounds follow: "declared premises: n" (premises you declared; "none (observed profile)" for an observed profile that has none) and "version pins: major 18" (the server's observed major; "none" when the readings name none). Under the meaning sentence, the summary answers three questions in three short sentences, "Usable readings: u of n. Coverage complete: yes or no. Job stops: no (exit 0 by your fail-on), or yes (exit 1).", followed by the collection time and the loaded state when the collector records them, and lists the obligations the profile version cannot yet check (representation, missing method) under their own heading, "Unsupported by this profile version: n".
+The first line counts the machines read out of every machine the profile checks, "5 of 8 machines read, 3 refused" (", K refused" only when a machine was refused): a machine that gave no reading at all is listed as refused with the reason "no readings for this machine". When Assure worked the list out from the readings because the checker did not report it, the count ends "(inferred)". The bounds follow: "declared premises: n" (premises you declared; "none (observed profile)" for an observed profile that has none) and "version pins: major 18" (the server's observed major; "none" when the readings name none). Under the meaning sentence, the summary answers three questions in three short sentences, "Usable readings: u of n. Coverage complete: yes or no. Job stops: no (exit 0 by your fail-on), or yes (exit 1).", followed by the collection time and the loaded state when the collector records them, and lists the obligations the profile version cannot yet check (representation, missing method) under their own heading, "Unsupported by this profile version: n"; under a green line a representation group's next step there names its rows' own reasons.
 
 If the checker itself fails, the result is the typed outcome `checker_error` (exit 3) under every policy, `never` included. For an API check, read the result's `charged`: failures after the checker started, including `checker_error`, `checker_timeout`, `checker_cpu_limit` and `checker_memory_limit`, are charged unless the answer states an explicit no-charge decision. A refusal before admission, the checker's own internal error (`checker_error` whose `detail.rule` is `internal_error`), a server restart, and a malformed `python-auth-declared-model` bundle refused by its free pipeline are not charged. Local verdicts and failures say `charged: false`; that field is a check accounting flag, not an amount spent. A request refused before the checker starts is never charged, and neither is a check cut short by a server restart; it still counts against your rate limits. A result is returned whenever one can be produced: when the checker's output for one machine is malformed, that machine is listed under "Machines not read" with its reason (`malformed_output: ...`, or `server_fault: ...` when the server could not write it) and the other machines keep their readings. When no result can be produced, the failure's `detail.malformation` says what was malformed: a fixed kind, the file, the line, the field and the expected form, never your text.
 
@@ -439,7 +514,7 @@ Text from the checker or your files is shown as plain text. A web address in it 
 
 ## The report
 
-The report is opt-in: set `report: true` in `mode: api` to ask for it; unset or `report: false` skips it. It is a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. `mode: local` never asks for one. Every plan served today includes the report: a free account draws it from the USD 1 free balance granted with its key or at its GitHub sign-in, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails a fact rule of that check is withheld. A report that passes every fact rule is served as written, even when it misses a style target. Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld and says so.
+The report is opt-in: set `report: true` in `mode: api` to ask for it; unset or `report: false` skips it. It is a plain-language report of the claim tree behind a verdict: what was checked, what holds, what fails and why, and what the check could not decide. `mode: local` never asks for one. Every plan served today includes the report: a free account draws it from the USD 1 free balance granted with its key or at its GitHub sign-in, and without that grant the API refuses it with `allowance_exhausted`; `tier_excludes` is reserved for a plan that excludes the report. A language model writes it from the verdict's record alone, never from your files. A deterministic check then reads it against the record, and a report that fails a fact rule of that check is withheld. A report that passes every fact rule is served as written, even when it misses a style target. Reports are written for every served profile; a report that states anything the verdict's record does not hold is withheld.
 
 - **Written.** The job summary carries the first line, then the report, then a line naming the report page. The page shows the claim tree with each rule's check id, status, reason and evidence. Open it with your API key in the `Authorization` header. The `report-url` output holds its address.
 - **Withheld or refused.** The job summary carries the usual summary and one more line: "The report was withheld: \<reason>." A refused report adds one warning annotation, never an error.
@@ -675,7 +750,7 @@ The last line of the summary says what left your runner:
 | Outcome | Exit | What it means | What to do |
 |---|---|---|---|
 | `bad_input` | 2 | An input is missing or malformed, a required file is absent, both `connection` and `artefacts` were set, `api-key` is missing, or `api-url` is not `https://` (plain `http://` only for a loopback host). | Read the reason and fix the input. |
-| `oversize_input` | 2 | A required file, a checkout source file, the file count or the total size is over the limit (for `artefacts` and local directory collection, a file matching only an optional input is dropped and listed on the ignored line instead). | Remove files the profile does not read. Limits: 4 MiB per file, 2048 files, 8 MiB for the encoded request body. |
+| `oversize_input` | 2 | A required file, a checkout source file, the file count or the total size is over the limit (for `artefacts` and local directory collection, a file matching only an optional input is dropped and listed on the ignored line instead). | Remove files the profile does not read. Limits: 4 MiB per file, 2048 files, 64 MiB for the encoded request body. |
 | `unknown_profile` | 2 | The API serves no profile with that name. | Use a profile the API lists. |
 | `unauthenticated` | 2 | The API key is missing, unknown or revoked. | Check the `ASSURE_API_KEY` secret, or ask Symbolia for a new key. |
 | `key_expired` | 2 | The API key is past its expiry date. | Ask Symbolia for a new key and put it in the `ASSURE_API_KEY` secret. |
@@ -715,7 +790,7 @@ A collection with gaps is still a verdict. Each gap reads **not observed** with 
 - `postgresql-declared-model` checks your server against a declaration you supply in `raw/declaration.json` (and optionally `raw/clients.json`). With `artefacts`, add your declaration under `raw/`. With `connection` (in `mode: api`) the Action collects as for the observed profile and reads `.assure/postgresql-declared-model.json` (else `.assure/declaration.json`, where an earlier proposal was merged) from the checkout (`GITHUB_WORKSPACE`) and places it in the collected bundle as `raw/declaration.json` before the withholding pass and the bundle limits, so its `declared_predicate` string literals are withheld exactly as an artefacts directory's are, with the same numbering as the snapshot; a link, a linked `.assure/` directory, or a file that is not a regular readable file is refused (`bad_input`). The `declaration` input stays refused with a PostgreSQL connection. When the checkout has none and the collector's sidecar names a server major from 14 to 18, the Action drafts one from the collected catalog snapshot (drafted before the withholding, so the draft holds your own literals and reads the same after you merge it), sends the draft, writes `assure-declaration-proposal.json` beside the verdict file (the `mode: api` verdict path) and opens one pull request of its own on `assure/declaration-proposal` proposing `.assure/postgresql-declared-model.json` (it never commits to your branches; the workflow needs `contents: write` and `pull-requests: write`); merging it is the acceptance. Until then the result is bounded by an unaccepted draft and the step output says `declaration=unaccepted-draft`, as on a pull request whose declaration is not yet on the base branch. With no server major to draft from, and in `mode: local`, a connection with this profile still reads `bad_input` for the missing `raw/declaration.json`.
 - `postgresql-observed-baseline` reads your server and compares it with observed facts and pinned public baselines. You declare nothing.
 - `http-observed-baseline` reads the response heads you captured for the HTTP endpoints you select (section 12).
-- `mysql-declared-model` checks a MySQL server against a `mysql://` connection and your declaration file (`declaration`), or against an artefacts directory holding `raw/submission.json`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. A report is withheld with `profile_unqualified` until the report writer is qualified for MySQL.
+- `mysql-declared-model` checks a MySQL server against a `mysql://` connection and your declaration file (`declaration`), or against an artefacts directory holding `raw/submission.json`. Seven machines read it, M1 to M4, M6, M7 and M8, and the check contacts no server. Its report is written as for every served profile.
 
 What each profile claims, and what it does not, is in [SCOPE.md](SCOPE.md) and, for `http-observed-baseline`, in section 12. What is collected and where it goes is in [DATA.md](DATA.md).
 
@@ -850,7 +925,7 @@ Every reading summary carries the profile's three scope notes:
 - Evidence freshness and response authenticity are unverified; same-selection replay is not excluded.
 - Per-endpoint coverage qualifications are not displayed in this report.
 
-A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 3; not established: 6 — top action: declare redirects in raw/HTTP-INTENT.json beside the collected files (docs/customer/VERDICTS.md); requirements.md cannot state an HTTP requirement in this release": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. Its three entries say so: action "TLS is outside this profile (a captured head carries no TLS session); nothing to do", owner `symbolia`, needs "a live capture with TLS (issue #2181)"; they are the top action only when no other entry remains (issue #3222). For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 12; version pins: none; nothing disproven; established: 3 of 12; vacuous: 6; not established: 3 — top action: declare redirects in raw/HTTP-INTENT.json beside the collected files (docs/customer/VERDICTS.md); requirements.md cannot state an HTTP requirement in this release". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red. Those three not-established rows are HTTP-REDIRECT-POLICY, HTTP-RESPONSE-POLICY-ADEQUACY and HTTP-COOKIE-POLICY: an `HTTP-INTENT.json` you write beside `manifest.json` (issue #2381; its shape is in docs/customer/VERDICTS.md) is sent as `raw/HTTP-INTENT.json` and decides each row whose key it carries (`redirects`, `response_headers`, `cookies`) instead of reading it `needs_intent`.
+A full read of the two `https` endpoints above has the first line "green: 2 of 2 endpoints observed; 4 of 5 machines read, 1 refused; declared premises: 16; version pins: none; nothing disproven; established: 4 of 16; deviations: 3; vacuous: 3; not established: 6 — top action: declare redirects in raw/HTTP-INTENT.json beside the collected files (docs/customer/VERDICTS.md); requirements.md cannot state an HTTP requirement in this release": the TLS machine (M2) is refused with "no usable observed machine premise", because a captured head carries no TLS session. That is a bound of the result, so the run exits 0. Its three entries say so: action "TLS is outside this profile (a captured head carries no TLS session); nothing to do", owner `symbolia`, needs "a live capture with TLS (issue #2181)"; they are the top action only when no other entry remains (issue #3222). For `http://` endpoints M2 reads vacuous and the first line is "green: 2 of 2 endpoints observed; 5 of 5 machines read; declared premises: 16; version pins: none; nothing disproven; established: 4 of 16; deviations: 2; vacuous: 7; not established: 3 — top action: declare redirects in raw/HTTP-INTENT.json beside the collected files (docs/customer/VERDICTS.md); requirements.md cannot state an HTTP requirement in this release". A head that carries both `Content-Length` and `Transfer-Encoding` fails `HTTP-FRAMING-CL-TE`, and under the default `fail-on: fails` the job exits 1, red. Those three not-established rows are HTTP-REDIRECT-POLICY, HTTP-RESPONSE-POLICY-ADEQUACY and HTTP-COOKIE-POLICY: an `HTTP-INTENT.json` you write beside `manifest.json` (issue #2381; its shape is in docs/customer/VERDICTS.md) is sent as `raw/HTTP-INTENT.json` and decides each row whose key it carries (`redirects`, `response_headers`, `cookies`) instead of reading it `needs_intent`.
 
 Choose endpoints that answer HEAD with 2xx or 3xx; a 4xx or 5xx endpoint hides policy checks for the whole run and the verdict's `warnings` names them. No HTTP requirement can be stated in this release: a `requirements.md` sentence on this profile cannot hold. HTTP-REDIRECT-POLICY, HTTP-RESPONSE-POLICY-ADEQUACY and HTTP-COOKIE-POLICY ask for the `HTTP-INTENT.json` key that decides each (issue #2381); the other readings inform and ask nothing of you.
 
@@ -886,7 +961,7 @@ A `fails` reading whose findings are all platform-owned keeps the colour red wit
 
 The check reads the file and contacts no server. Seven machines read it: M1, M2, M3, M4, M6, M7 and M8. A machine whose section the submission lacks reads `representation`, with the machine's own reason. A submission that holds a secret, such as a password or a key, is refused before anything is read, and the refusal names the path and the kind, never the value.
 
-A report for this profile is withheld with `profile_unqualified` until the report writer is qualified for MySQL. `/v1/profiles` lists the profile's 50 obligations with the states each can take (`holds`, `not_established`, `disproven`, from what its machine can produce), a `requirements.md` line that quotes an obligation binds to it, and the report page names the MySQL areas. The report stays withheld until the writer qualifies for MySQL. Formalisation is not offered for this profile.
+The report is written for this profile as for every served profile. `/v1/profiles` lists the profile's 50 obligations with the states each can take (`holds`, `not_established`, `disproven`, from what its machine can produce), a `requirements.md` line that quotes an obligation binds to it, and the report page names the MySQL areas. Formalisation is not offered for this profile.
 
 ## 14. Checking a Python (Flask) repository
 
@@ -933,7 +1008,17 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 2000 Python files of 512 KiB each, within 2048 upload entries including manifests and an 8 MiB encoded request body. When `.assure/declaration.json` names `app_roots`, only the Python files under those directories leave the runner, with `requirements.md`, `resource_roots`, and the files the check loads by name from outside them: the modules at the top of the repository and above each root (such as `wsgi.py`, `app.py`, `manage.py` or a module named like a library it imports), each root's package `__init__.py`, and the modules the declaration names; a large repository whose app is one directory (Assure's own declaration names `["serve"]`) fits the request this way. When an entry of `app_objects` names a `factory`, the Action reads the whole checkout as before, because the check reads every place the factory is called (often `tests/conftest.py`). A read that would still pass 8 MiB stops in the runner with `oversize_input`, naming the encoded size, the limit and `app_roots`, the setting that narrows it. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
+The Action reads the checked-out repository: its tracked Python files and `requirements.md`, at most 2000 Python files of 512 KiB each and 48 MiB of Python in total, within 2048 upload entries including manifests and a 64 MiB encoded request body. When `.assure/declaration.json` names `app_roots`, only the Python files under those directories leave the runner, with `requirements.md`, `resource_roots`, and the files the check loads by name from outside them: the modules at the top of the repository and above each root (such as `wsgi.py`, `app.py`, `manage.py` or a module named like a library it imports), each root's package `__init__.py`, and the modules the declaration names; a large repository whose app is one directory (Assure's own declaration names `["serve"]`) fits the request this way. When an entry of `app_objects` names a `factory`, the Action reads the whole checkout as before, because the check reads every place the factory is called (often `tests/conftest.py`). A read that would still pass 64 MiB stops in the runner with `oversize_input`, naming the encoded size, the limit and `app_roots`, the setting that narrows it. It writes `raw/REPOSITORY.json` (each file's bytes, sha256 and git mode, the commit and the tree id) itself.
+
+### Point Assure at your app
+
+Name the folders that hold your app in `app_roots` in `.assure/declaration.json`, for example `"app_roots": ["app"]`. The first run has no declaration yet, so it reads the whole repository; the draft it proposes fills in `app_roots` from where your app is created. Check that list when you review the draft.
+
+With `app_roots` set, only the Python files in those folders leave your runner, with `requirements.md` and the few files the check loads by name from outside them. Without it, every tracked Python file in the repository is sent. The check never needs your tests, fixtures, vendored libraries or virtual environments, so keep them outside the folders you name. An app built by a factory function is read whole, as before, because the check reads every place the factory is called.
+
+What is sent is what is metered: USD 0.10 per million input tokens, at 4 bytes of file per token (the API quick start's metering section). Assure's own repository holds 26,509,232 bytes of Python in 1,856 files, about USD 0.66 a check. With `app_roots` naming `serve`, it sends 68 files and 2,214,630 bytes, about USD 0.06 a check, so USD 5.00 of free credit covers about 90 checks in place of 7.
+
+How much each plan may send, and what a run over that limit says, is in [DATA.md](DATA.md#what-the-python-profile-sends).
 
 **The declaration arrives as a proposal.** The check reads your app against a declaration at `.assure/declaration.json`: your app objects, the session key that means "signed in", your guard decorators, the views that sign people in, raise privilege and sign out, and the routes that are public on purpose. On the first run there is none, so the Action sends the bounded repository bytes to the free declaration proposal route, whose drafter uses the checker's own readers, and runs the check on the returned draft. When the repository's Python files import FastAPI or Django and no other web framework, the Action asks the route for that stack's draft (`stack: python/fastapi` or `python/django`) and the pull request says which stack it was drafted for; any other repository is drafted as Flask, except one whose Python files import none of these frameworks and serve HTTP with the standard library's `http.server`: Assure drafts nothing for it, and the run stops with `bad_input` naming the declaration to write, schema assure.identity.declaration/v1 with `stack` set to `python/stdlib-http` at `.assure/declaration.json` (the API quick start's python-auth-declared-model section lists its fields). A field the bytes do not give remains unread in the proposal for you to review. When your Flask app loads its configuration by name (`from_pyfile`, `from_object`, `from_envvar`) from a file or module the check reads as outside the repository (flaskr's `app.config.from_pyfile("config.py")` with no `instance/config.py`, or `from_envvar`; a `from_pyfile` or `from_object` name that is not a literal is not read, and drafts nothing), the draft proposes `instance_config: "constants-only"` as a field to confirm, read at that call: keep it only if that configuration assigns constants.
 
@@ -946,6 +1031,29 @@ Read the draft in that pull request. Edit any field that is wrong on its branch.
 Until the declaration is on your base branch, the result is bounded by the draft. The log says "bounded by an unaccepted declaration draft", the job summary says where the draft is, and the step output `declaration` is `unaccepted-draft`. After the merge, every run reads the accepted file and the bound goes.
 
 GitHub lets the workflow token open a pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". When the workflow lacks `contents: write` or `pull-requests: write`, that setting is off, or the run is on a pull request from a fork, the check still runs, bounded, and the job summary carries the draft in full with one sentence naming the two permission lines. The summary also carries a **Commit this draft** link: GitHub's prefilled new-file form (`https://github.com/<owner>/<repo>/new/<branch>` with the path and the draft filled in, on the branch the proposal targets: the pull request's base branch, else the repository's default branch), so accepting the draft stays one click with no setting changed. When that branch cannot be read (a push run with no workflow token, or the repository could not be read) or the link would pass 8000 characters, the summary instead names the path at which to commit the draft shown below it. The observed PostgreSQL profile's summary carries such a link only when withholding left its draft unchanged; a draft holding your policy literals gets none, since the summary never shows them.
+
+## Check each release
+
+When you publish a release, the Action can check the release commit and write a release report: every promise in your `requirements.md`, read as holds, broken or not established, and each broken one with its one-line fix. From the second release on, the report compares with the previous release and adds a **Fixed since** section named for the previous release's tag (each promise that went from broken to holds) and a **Newly broken since** section.
+
+Add `release` to the workflow's triggers, beside the triggers it has:
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+```
+
+The job's `permissions:` need `contents: write` for the report to be added to the release notes; the Python route's workflow grants it already. Without it the report is in the job summary only, and the log carries one notice naming the line. The check is the same check as on a pull request, on the commit the release tag names. Checks are free. A release of a commit Assure already checked returns the stored verdict. The notes the maintainer wrote are kept: the report is added after them, and when they cannot be read (the releases list fails to answer and the event carries none) the report stays in the job summary only, with one warning in the log.
+
+The report finds the previous release by its publication time (drafts never count). It reads that release's states from the last line the report left in its notes, a hidden HTML comment. When the notes have no report, it reads the states Assure stored for the previous tag's commit, through `GET /v1/requirements/{id}/history` with the same key. That route is free, and Assure keeps a check for 30 days. A release published more than 30 days after the previous one compares through the notes only. Editing the report's lines in the notes changes what the next release compares with.
+
+A tag pushed with no release (`push` with `tags:`) gets the same report in the job summary. There are no release notes to write it to.
 
 ## Rules for an agent
 
@@ -978,7 +1086,7 @@ Write that JSON to a file in the workflow's working directory and use its path u
 feedback: feedback.json
 ```
 
-A feedback error adds a typed outcome to the job summary; it never changes the check's exit, outputs or verdict file. Without a server check id, a requested note adds `bad_input` to the feedback summary and no POST is made. A delivery error means receipt is not confirmed: the server may already have stored the note. Known input secrets are refused before posting. The note's text is not echoed into commands or the summary. The report is opt-in (`report: true`, `mode: api`). Reports are written for `postgresql-declared-model` verdicts today; for other profiles the report is withheld with `profile_unqualified`, without a model call. `report: false` stops the check record going to OpenRouter. Deliberate feedback is separate: it does not go to a model, and `report: false` does not turn it off.
+A feedback error adds a typed outcome to the job summary; it never changes the check's exit, outputs or verdict file. Without a server check id, a requested note adds `bad_input` to the feedback summary and no POST is made. A delivery error means receipt is not confirmed: the server may already have stored the note. Known input secrets are refused before posting. The note's text is not echoed into commands or the summary. The report is opt-in (`report: true`, `mode: api`). Reports are written for every served profile; a report that states anything the verdict's record does not hold is withheld. `report: false` stops the check record going to OpenRouter. Deliberate feedback is separate: it does not go to a model, and `report: false` does not turn it off.
 
 ### Feedback API
 

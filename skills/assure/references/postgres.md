@@ -189,6 +189,81 @@ This workflow uses the intent-free profile, which needs no declaration. To check
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
+**A database your CI builds from your migrations.** This is the default for a private database: the runner never reaches your production database, and CI builds the same schema in a PostgreSQL that lives only for the job. The whole job, with a service container, your bootstrap SQL and your migrator, then the collection role (section 2), then the check:
+
+```yaml
+name: Assure
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  assure:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: <the CI-only superuser password>
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://postgres:<the CI-only superuser password>@localhost:5432/postgres
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@<full commit sha of the release you trust>
+        with:
+          python-version: "3.14"
+
+      - name: Install the PostgreSQL client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - name: Wait for PostgreSQL
+        run: until pg_isready -d "$DATABASE_URL"; do sleep 1; done
+
+      - name: Run the bootstrap SQL
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f <your bootstrap SQL file>
+
+      - name: Apply the migrations
+        run: <your migrator's command, reading DATABASE_URL>
+
+      - name: Create the collection role
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '<the CI-only password>';" -c "GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;"
+
+      - name: Assure check
+        id: assure
+        uses: Symbolia-Assurance/assure-action@beta
+        with:
+          profile: postgresql-observed-baseline
+          connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>
+          collection-role: assure_collector
+          collection-privileges: pg_read_all_settings,pg_read_all_stats
+          fail-on: fails
+          output: assure-verdict.json
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@<full commit sha of the release you trust>
+        with:
+          name: assure-verdict
+          path: ${{ steps.assure.outputs.verdict-path }}
+```
+
+Leave out a step your CI does not have: with no bootstrap SQL, drop that step. The job grants `contents: write` beside `pull-requests: write` so that the first run proposes its draft: it opens `Assure: proposed intent — review and merge to accept` with the draft at `.assure/postgresql-declared-model.json`, each key to confirm with where it was read. Check each key, fix what is wrong on its branch, and merge it to accept it; the next check then also reads `postgresql-declared-model` beside this reading. GitHub lets the workflow token open the pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". Once it is merged, set `contents: read`.
+
 ## 6. Managed PostgreSQL and configuration files
 
 > - [ ] The runner can read the server's configuration files, or has copies it can read (section 6). Managed PostgreSQL: skip this line.

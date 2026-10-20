@@ -171,10 +171,12 @@ import json
 import os
 import re
 import secrets
+import datetime
 import shutil
 import stat
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -649,6 +651,193 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None):
             break
     ok(github.call('POST', '%s/%d/comments' % (root, number), {'body': body})[0], 'posted')
     return 'posted'
+
+
+# ---------- the release report (the Director, 18 Oct 2026: the launch customer journey) ----------
+RELEASE_ACTIONS = ('published', 'released', 'prereleased', 'created')
+RELEASE_NOTICE = ('the release report was not added to the release notes: GitHub answered 403. To have it added, '
+                  'grant `contents: write` under the job\'s `permissions:`; the job summary carries it either way')
+_REPO = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
+_TAG = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}')
+
+
+def _event_doc(env):
+    path = str(env.get('GITHUB_EVENT_PATH') or '').strip()
+    if not path:
+        return {}
+    try:
+        doc = bundle.parse_json(bundle._read_capped(Path(path), MAX_EVENT_BYTES),
+                                bundle.Limits(body_bytes=MAX_EVENT_BYTES, json_depth=128))
+    except (OSError, Refusal):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def release_event(env):
+    """{tag, release_id, commit, body} on a published release (`release` event, action published, released,
+    prereleased or created) or a tag push (`push` to refs/tags/<tag>, release_id None); None for any other event. The
+    commit is GITHUB_SHA, the commit the tag names. `body` is the release notes the event payload carries
+    (`release.body`), None when it carries none: the reading `release_step` keeps when the releases list cannot be
+    read (issue #4270 r2)."""
+    name = env.get('GITHUB_EVENT_NAME')
+    commit = str(env.get('GITHUB_SHA') or '').strip()
+    if name == 'release':
+        doc = _event_doc(env)
+        rel = doc.get('release') if isinstance(doc.get('release'), dict) else {}
+        tag, rid, body = rel.get('tag_name'), rel.get('id'), rel.get('body')
+        if doc.get('action') not in RELEASE_ACTIONS or not isinstance(tag, str) or not _TAG.fullmatch(tag):
+            return None
+        return {'tag': tag, 'release_id': rid if type(rid) is int and rid > 0 else None, 'commit': commit,
+                'body': body if isinstance(body, str) else None}
+    ref = str(env.get('GITHUB_REF') or '')
+    if name == 'push' and ref.startswith('refs/tags/'):
+        tag = str(env.get('GITHUB_REF_NAME') or ref[len('refs/tags/'):])
+        return {'tag': tag, 'release_id': None, 'commit': commit, 'body': None} if _TAG.fullmatch(tag) else None
+    return None
+
+
+class ReleaseReadError(Exception):
+    """A previous-release reading failed; this is distinct from a readable empty list."""
+
+
+def _releases(github, repo):
+    status, found = github.call('GET', '/repos/%s/releases?per_page=100' % repo)
+    if not 200 <= status < 300 or not isinstance(found, list):
+        raise ReleaseReadError('the releases list could not be read')
+    return found
+
+
+def previous_release(github, repo, tag, releases=None, *, require_current=False, current_id=None):
+    """{tag, commit, body} of the newest published release before the release tagged `tag` (drafts never count), or
+    None when there is none. An unread list or commit raises ReleaseReadError. A release event also needs its
+    current publication boundary; a tag push with no release can compare with the newest published release."""
+    releases = _releases(github, repo) if releases is None else releases
+    if not isinstance(releases, list) or len(releases) >= 100:
+        raise ReleaseReadError('the release history is incomplete')
+    published, tags = [], set()
+    for release in releases:
+        if not isinstance(release, dict) or type(release.get('draft')) is not bool:
+            raise ReleaseReadError('a release row could not be read')
+        if release['draft']:
+            continue
+        name, rid = release.get('tag_name'), release.get('id')
+        if not isinstance(name, str) or not _TAG.fullmatch(name) or type(rid) is not int or rid <= 0 \
+                or name in tags:
+            raise ReleaseReadError('a published release could not be identified')
+        try:
+            at = datetime.datetime.fromisoformat(release.get('published_at'))
+        except (TypeError, ValueError):
+            raise ReleaseReadError('a release publication time could not be read') from None
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ReleaseReadError('a release publication time has no timezone')
+        tags.add(name)
+        published.append((release, at))
+    current = next((item for item in published if item[0]['tag_name'] == tag
+                    and (current_id is None or item[0]['id'] == current_id)), None)
+    before = current[1] if current is not None else None
+    if require_current and before is None:
+        raise ReleaseReadError('the current release publication boundary could not be read')
+    cands = [item for item in published if item[0]['tag_name'] != tag
+             and (before is None or item[1] < before)]
+    if not cands:
+        return None
+    prev, _ = max(cands, key=lambda item: item[1])
+    status, doc = github.call('GET', '/repos/%s/commits/%s' % (repo, urllib.parse.quote(prev['tag_name'], safe='')))
+    sha = doc.get('sha') if 200 <= status < 300 and isinstance(doc, dict) else None
+    if not bundle.commit_ok(sha):
+        raise ReleaseReadError('the previous release commit could not be read')
+    return {'tag': prev['tag_name'], 'commit': sha, 'body': prev.get('body') if isinstance(prev.get('body'), str)
+            else ''}
+
+
+def previous_states(prev, client, repo, profile, rows):
+    """The previous release's states, id -> state: the states line its notes carry (`render.release_states`), else
+    each requirement's stored state at the previous release's commit (`Client.requirement_history`, free). An id the
+    API cannot answer for is left out."""
+    got = render.release_states(prev.get('body'))
+    if got is not None and got['states']:
+        return got['states']
+    states = {}
+    if client is None:
+        return states
+    for r in (rows or [])[:render.MAX_ANNOTATIONS]:
+        rid = r.get('id')
+        try:
+            doc = client.requirement_history(rid, repo, profile)
+        except Exception:  # never the verdict's concern: that promise is compared with nothing
+            continue
+        hit = next((e for e in doc.get('entries') or () if isinstance(e, dict) and e.get('commit') == prev['commit']
+                    and e.get('state') in ('holds', 'disproven', 'not_established')), None)
+        if hit is not None:
+            states[rid] = hit['state']
+    return states
+
+
+def release_step(env, verdict, client, github, say):
+    """On a release event (`release_event`): the release report (`render.release_report_markdown`) compared with the
+    previous release (`previous_release`, `previous_states`), added to the release notes in place
+    (`render.release_body_with`) when the token may write, and returned for the job summary. None on any other
+    event. A 403 is one notice naming `contents: write`; another GitHub failure is one warning; neither changes the
+    verdict, its file or the exit code. The maintainer's notes are kept (issue #4270 r2): the notes written are the
+    ones the releases list carries, else the ones the event payload carries; when neither can be read the notes are
+    not written at all (one warning; the job summary carries the report)."""
+    ev = release_event(env)
+    if ev is None:
+        return None
+    repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
+    repo = repo if _REPO.fullmatch(repo) else None
+    rows = render.requirement_rows(verdict) or []
+    releases, previous, previous_unread, warnings = [], None, True, []
+    if github is not None and repo is not None:
+        try:
+            releases = _releases(github, repo)
+            prev = previous_release(github, repo, ev['tag'], releases,
+                                    require_current=env.get('GITHUB_EVENT_NAME') == 'release',
+                                    current_id=ev['release_id'])
+            if prev is not None:
+                previous = {'tag': prev['tag'], 'states': previous_states(prev, client, repo, verdict.get('profile'),
+                                                                          rows)}
+            previous_unread = False
+        except Exception as e:  # the class name only, never a value
+            warnings.append('the previous release could not be read (%s)' % type(e).__name__)
+    else:
+        warnings.append('the previous release could not be read (GitHub reading is unavailable)')
+    md = render.release_report_markdown(verdict, ev['tag'], repository=repo, commit=ev['commit'], previous=previous,
+                                        previous_unread=previous_unread)
+
+    def finish():
+        if warnings:
+            say('::warning title=Assure release::%s' % _cmd_data('; '.join(warnings)))
+        return md
+
+    if github is None or repo is None:
+        return finish()
+    try:
+        rid = ev['release_id']
+        current = next((r for r in releases if isinstance(r, dict) and (
+            (rid is not None and r.get('id') == rid) or (rid is None and r.get('tag_name') == ev['tag']))), None)
+        if rid is None and current is not None and type(current.get('id')) is int:
+            rid = current['id']
+        if rid is None:
+            return finish()                             # a tag with no release: the job summary carries it
+        if isinstance(current, dict):
+            body = current.get('body')
+        elif isinstance(ev.get('body'), str):           # the list could not be read: the event carries the notes
+            body = ev['body']
+        else:                                           # no reading of the notes at all: never write over them
+            warnings.append(
+                'the release notes could not be read, so the report was not added to them (the job summary '
+                'carries it)')
+            return finish()
+        status, _ = github.call('PATCH', '/repos/%s/releases/%d' % (repo, rid),
+                                {'body': render.release_body_with(body, md)})
+        if status == 403:
+            say('::notice title=Assure release::%s' % _cmd_data(RELEASE_NOTICE))
+        elif not 200 <= status < 300:
+            warnings.append('the release notes could not be updated (GitHub answered %d)' % status)
+    except Exception as e:  # the class name only, never a value
+        warnings.append('the release notes could not be updated (%s)' % type(e).__name__)
+    return finish()
 
 
 def write_proof_tree(verdict, directory, goals=(), text=None, repository=None, commit=None, **layer2):
@@ -1522,10 +1711,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         except (OSError, ValueError) as w:
             say('::error title=Assure::%s' % _cmd_data('the failure file could not be written (%s)' % type(w).__name__))
         d = state['draft']                        # a check refused on a partial draft: propose it and name its gaps
-        unread = declaration_draft.unread_required(d['data']) if d is not None and d['record'] is not None and \
-            e.outcome == 'profile_refused' and e.detail.get('kind') == 'declaration_invalid' else ()
+        partial = d is not None and d['record'] is not None and e.outcome == 'profile_refused' and \
+            e.detail.get('kind') == 'declaration_invalid'
+        unread = declaration_draft.unread_refused(d['data'], e.detail) if partial else ()   # issue #3969: a defaulted
+        # field only while the refusal names it; a draft that left out only such fields is still proposed, with a step
+        # naming none of them (REFUTATION-r5 MEDIUM-2)
         step, decl_line, decl_md, decl_out = '', '', '', ''
-        if unread:
+        if unread or partial and declaration_draft.unread_defaulted(d['data']):
             try:
                 decl_line, decl_md, decl_out = declaration_note()
             except Exception as w:  # the class name only, never a value; the refusal stands as it is
@@ -1719,9 +1911,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if on_base is not True:
                 state['draft'] = {'record': None, 'data': None, 'top': top, 'rel': rel, 'unread': on_base is None}
 
-    def declaration_note():
+    def declaration_note(verdict=False):
         """(log line, summary markdown, output line) for a run bounded by an unaccepted draft, proposing a new draft
-        first; ('', '', '') otherwise. Never changes the verdict, its file or its exit."""
+        first; ('', '', '') otherwise. Never changes the verdict, its file or its exit. `verdict`: the check reached a
+        verdict, so the section of a python/flask draft names each field it left out with what its default read (issue
+        #3969)."""
         d = state['draft']
         if d is None:
             return '', '', ''
@@ -1762,7 +1956,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                         md += commit_line(github, d)
                 return 'Assure: declaration proposal: %s' % _cmd_data(told), md, ''
             md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
-                                                    *(['the collected catalog snapshot'] if d.get('words') else []))
+                                                    *(['the collected catalog snapshot'] if d.get('words') else []),
+                                                    defaulted=declaration_draft.unread_required(d['data']) +
+                                                    declaration_draft.unread_defaulted(d['data'])
+                                                    if verdict and d['record'].get('stack') == declaration_draft.STACK
+                                                    else ())      # REFUTATION-r5 HIGH-1: a Flask draft's defaults only
             if told.startswith('not proposed'):
                 md += commit_line(github, d)
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
@@ -2110,7 +2308,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     except Exception as e:  # the class name only, never a value
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
     observed_draft(verdict)                                     # issue #2934: proposed like the declared draft
-    decl_line, decl_md, decl_out = declaration_note()           # serve-102: the draft bounds this verdict
+    decl_line, decl_md, decl_out = declaration_note(verdict=True)   # serve-102: the draft bounds this verdict
     summary += decl_md + state['kept_md']                       # committed values this run read differently, kept
     summary += declaration_draft.intent_markdown(inputs_profile, drafted=state['draft'] is not None)   # issue #2926
     both = None
@@ -2129,6 +2327,17 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             both = None                        # REFUTATION-r4 LOW: the line sits in its section, under its head
             summary = before + declared_markdown(Refusal('checker_error', 'the declared verdict could not be rendered '
                                                          '(%s)' % type(e).__name__), pid, intent, False)
+    try:                                               # the release report (18 Oct 2026): first, under the upgrade line
+        token = str(env.get('GITHUB_TOKEN') or '').strip()
+        github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token) if token else None
+        release_md = release_step(env, verdict, state.get('client'), github, say)
+        if release_md:
+            up = render.upgrade_markdown(verdict)
+            body = summary[len(up):] if up and summary.startswith(up) else summary
+            summary = up + release_md + '\n' + body
+    except Exception as e:  # the class name only, never a value; never the verdict, its file or its exit
+        say('::warning title=Assure release::%s' % _cmd_data('the release report could not be written (%s)'
+                                                             % type(e).__name__))
     try:
         _write_file(out_path, bundle.dumps(verdict))
     except (OSError, ValueError) as w:
