@@ -111,6 +111,7 @@ text in it stays a code span.
 """
 from __future__ import annotations
 
+import ast
 import datetime
 import html
 import json
@@ -2506,6 +2507,9 @@ def summary_markdown(envelope, now=None):
     meaning = meaning_line(env)                   # DD-073 Addendum 2 (a): what the first line means, in plain words
     if line is not None and meaning:
         out += [_esc_spans(meaning), '']
+    adapter = adapter_step(env)                   # the extension adapter: the customer's coverage route
+    if adapter is not None:
+        out += [_esc_line(adapter_line(adapter)), '']
     shown = warning_texts(env)                    # serve-041: a warning sits right under the headline, in the first 10 lines
     if shown:
         out += ['- Warning: %s' % _esc_line(t) for t in shown[:5]]
@@ -3561,6 +3565,310 @@ PR_UNREAD_NEXT = '**What to do:** nothing in your code. Assure does not read thi
 PR_UNREAD_HEAD = 'Assure could not read your app'
 
 
+# ---------- the extension adapter: the customer's coverage route (the Director, 18 and 20 Oct 2026) ----------
+# A check refuses `<ext>.init_app(app)` for an extension whose init_app the reader does not know:
+# `app_object_escape (<module>, <line>, call_argument <ext>.init_app)`. No declaration field admits that call, so the
+# customer's next step is coverage, not a change to their code or declaration. The verdict then carries
+# `detail.coverage` (`extension_adapter_step`): the receiver, the library it comes from (the refused module's own import
+# lines, followed one hop into a repository module that constructs it; read by `ast`, never run), its path:line, the
+# guide's section, `request` (the one "Request coverage for <library>" sentence) and a `coverage_gap` feedback note
+# pre-filled from the fixed text below for the customer's agent to complete. The note's `coverage` object carries what
+# Symbolia needs to build the coverage (the Director, 20 Oct 2026: coverage is request-based): the library's package
+# index name and the version the runner's record pins, each refused call and its construction as names only (never a
+# literal) with their path:line, and the refusal reason; `formal_model` stays null for the agent to fill. The summary
+# and the pull request comment carry one "Request coverage" line (`adapter_line`). Nothing here changes a reading: the
+# extension stays refused until Symbolia ships an adapter, read from the library's source.
+EXTENSION_ADAPTER = 'extension_adapter'
+ADAPTER_SECTION = 'Extension adapter'
+ADAPTER_GUIDE = 'skills/assure/references/feedback.md'
+ADAPTER_ROUTE = 'POST /v1/feedback'
+_ADAPTER_REASON = re.compile(r'app_object_escape \(([A-Za-z_][A-Za-z0-9_.]{0,199}), ([1-9][0-9]{0,6}), '
+                             r'call_argument (?:([A-Za-z_][A-Za-z0-9_]{0,63}(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3})'
+                             r'\.init_app|([A-Z][A-Za-z0-9_]{0,63}))\)')
+MAX_ADAPTER_MORE = 8
+_ADAPTER_MODULE = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,7}')
+_ADAPTER_AT = re.compile(r'(%s):([1-9][0-9]{0,6})' % REPO_PATH_RE.pattern)
+_ADAPTER_SOURCE_BYTES = 1 << 20
+# the bounds of the feedback route's `coverage` object (serve/feedback.py COVERAGE_*; the serving path never imports it)
+_ADAPTER_CALLS = 4
+_ADAPTER_CALL_BYTES = 128
+_ADAPTER_AT_BYTES = 160
+_ADAPTER_REASON_BYTES = 320
+_ADAPTER_ARGS = 8
+_ADAPTER_PACKAGE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
+_ADAPTER_CALL_AT = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}(?:/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}){0,15}:[1-9][0-9]{0,6}')
+_ADAPTER_VERSION = re.compile(r'[0-9][0-9A-Za-z.+!-]{0,63}')
+_ADAPTER_PIN = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*===?\s*([0-9][0-9A-Za-z.+!-]{0,63})'
+                          r'\s*(?:[;#].*)?$', re.M)
+_ADAPTER_LOCK = re.compile(r'^name\s*=\s*"([^"]+)"\s*\nversion\s*=\s*"([^"]+)"\s*$', re.M)
+_ADAPTER_DEPENDENCY = re.compile(r'(?i)(?:^|/)(?:requirements[^/]*\.(?:txt|in)|constraints[^/]*\.txt|poetry\.lock|uv\.lock)$')
+LIBRARY_VERSIONS = 'raw/LIBRARY-VERSIONS.json'
+ADAPTER_TEXT = ('Coverage request: %(receiver)s (%(library)s) at %(at)s.\n'
+                'Library: %(package)s %(version)s, source <package index link>, '
+                'init_app at <file:line in that version>.\n'
+                'Registers: <one line per route or blueprint: METHODS /path (endpoint), guarded or unguarded>, or none.\n'
+                'Hooks: <before_request, after_request, teardown, dispatch replaced, each with file:line>, or none.\n'
+                'Identity: <every session, g or current_user read or write, with file:line>, or none.\n'
+                'Active when: <the config key that turns init_app into a no-op, its default, and its value in your '
+                'production configuration>, or always.')
+
+
+def _import_origins(tree, name):
+    """The absolute modules `name` is imported from or as, anywhere in the module."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            out |= {node.module for a in node.names if (a.asname or a.name) == name}
+        elif isinstance(node, ast.Import):
+            out |= {a.name if a.asname else a.name.split('.')[0] for a in node.names
+                    if (a.asname or a.name.split('.')[0]) == name}
+    return out
+
+
+def _receiver_library(source, name):
+    """The one module `name` comes from in `source`: imported as that name, or bound by a call of a name imported
+    (`toolbar = DebugToolbarExtension()` names flask_debugtoolbar); None when none or more than one."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    found = _import_origins(tree, name)
+    if not found:
+        for node in ast.walk(tree):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target] \
+                if isinstance(node, ast.AnnAssign) else ()
+            if not (any(isinstance(t, ast.Name) and t.id == name for t in targets)
+                    and isinstance(node.value, ast.Call)):
+                continue
+            f = node.value.func
+            while isinstance(f, ast.Attribute):
+                f = f.value
+            if isinstance(f, ast.Name):
+                found |= _import_origins(tree, f.id)
+    one = next(iter(found)) if len(found) == 1 else None
+    return one if one is not None and _ADAPTER_MODULE.fullmatch(one) else None
+
+
+def _dotted(node):
+    """`a.b.c` of a Name or an Attribute chain of names, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return '.'.join([node.id] + parts[::-1])
+
+
+def _call_text(call):
+    """A call as names only: `toolbar.init_app(app)`, `UserManager(app, db, User)`; an argument that is not a name
+    (a literal, an expression, a keyword) reads `...`, so no literal of the customer's source is ever carried."""
+    func = _dotted(call.func)
+    if func is None or not _ADAPTER_MODULE.fullmatch(func) or func.count('.') > 3:
+        return None
+    args = [_dotted(a) or '...' for a in call.args] + ['...' for _k in call.keywords]
+    args = [a if a == '...' or (a.count('.') <= 3 and _ADAPTER_MODULE.fullmatch(a)) else '...' for a in args]
+    text = '%s(%s)' % (func, ', '.join(args[:_ADAPTER_ARGS]))
+    return text if len(text) <= _ADAPTER_CALL_BYTES else None
+
+
+def _parse(source):
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+
+
+def _call_at(source, line, receiver):
+    """The text (`_call_text`) of the call of `receiver` (`toolbar.init_app`, `UserManager`) on `line`, else None."""
+    tree = _parse(source)
+    for node in ast.walk(tree) if tree is not None else ():
+        if isinstance(node, ast.Call) and getattr(node, 'lineno', None) == line and _dotted(node.func) == receiver:
+            return _call_text(node)
+    return None
+
+
+def _construction(source, name):
+    """(call text, line) of the one `name = <call>` that binds `name` in `source` (`toolbar = DebugToolbarExtension()`),
+    else None."""
+    tree = _parse(source)
+    found = []
+    for node in ast.walk(tree) if tree is not None else ():
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] \
+            if isinstance(node, ast.AnnAssign) else ()
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets) and isinstance(node.value, ast.Call):
+            found.append(node)
+    text = _call_text(found[0].value) if len(found) == 1 else None
+    return (text, found[0].lineno) if text is not None else None
+
+
+def package_name(module):
+    """The package index name of a top-level import (`flask_debugtoolbar` is `flask-debugtoolbar`, the normalised form
+    the index answers for Flask-DebugToolbar)."""
+    return re.sub(r'[-_.]+', '-', module.split('.')[0]).lower()
+
+
+def _pinned_version(files, package):
+    """(version, source) the runner's record pins for `package` (raw/LIBRARY-VERSIONS.json; it records the libraries
+    the checker reads), else the one exact pin a dependency file of the bundle gives (`name==X`, a lock's
+    `[[package]]`; a direct API call may send them as repository files), else ('', None)."""
+    files = files if isinstance(files, dict) else {}
+    try:
+        record = json.loads(bytes(files.get(LIBRARY_VERSIONS) or b'{}').decode('utf-8'))
+    except (ValueError, TypeError, RecursionError):
+        record = {}
+    entry = record.get(package) if isinstance(record, dict) else None
+    if isinstance(entry, dict) and isinstance(entry.get('version'), str) and _ADAPTER_VERSION.fullmatch(entry['version']):
+        return entry['version'], LIBRARY_VERSIONS
+    pins = set()
+    for name in sorted(files):
+        rel = name[len('raw/repository/'):] if isinstance(name, str) and name.startswith('raw/repository/') else None
+        data = files[name] if rel is not None and _ADAPTER_DEPENDENCY.search(rel) else None
+        if not isinstance(data, (bytes, bytearray)) or len(data) > _ADAPTER_SOURCE_BYTES:
+            continue
+        text = bytes(data).decode('utf-8', 'replace')
+        for m in list(_ADAPTER_PIN.finditer(text)) + list(_ADAPTER_LOCK.finditer(text)):
+            if package_name(m.group(1)) == package and _ADAPTER_VERSION.fullmatch(m.group(2)):
+                pins.add((m.group(2), rel))
+    versions = {v for v, _rel in pins}
+    if len(versions) == 1:
+        return next(iter(versions)), sorted(pins)[0][1]
+    return '', None
+
+
+def _repo_source(files, module):
+    """(path, bytes) of the one repository file `module` names in the bundle `files` ({name: bytes}), else None."""
+    rows = [{'path': n} for n in files] if isinstance(files, dict) else ()
+    found = source_candidates(module, rows)
+    path = next(iter(found)) if len(found) == 1 else None
+    if path is None or not REPO_PATH_RE.fullmatch(path):
+        return None
+    data = files.get('raw/repository/' + path)
+    if isinstance(data, str):
+        data = data.encode('utf-8', 'replace')
+    if not isinstance(data, (bytes, bytearray, memoryview)) or len(data) > _ADAPTER_SOURCE_BYTES:
+        return None
+    return path, bytes(data)
+
+
+def extension_adapter_step(env, files):
+    """The `extension_adapter` coverage step of a verdict whose refusal names an unknown extension's init_app, or None:
+    {shape, section, guide, route, receiver, library, in_repository, at, template}. `library` is the module the
+    receiver's name comes from in the refused module; when that module is a file of the bundle (`files`, {name: bytes};
+    `cookiecutter`'s `my_flask_app.extensions`), the module its constructor comes from there, one hop, never more.
+    `template` is a `coverage_gap` feedback note of fixed text for the agent to complete."""
+    env = env if isinstance(env, dict) else {}
+    m = env.get('machines') if isinstance(env.get('machines'), dict) else {}
+    reasons = []
+    for r in list(m.get('refused') or ()) + list(env.get('rows') or ()):
+        reason = r.get('reason') if isinstance(r, dict) else None
+        reason = reason.get('reason') if isinstance(reason, dict) else reason
+        if isinstance(reason, str):
+            reasons.append(reason[:_STRUCTURAL_REASON_CLIP])
+    matches, seen = [], set()
+    for r in reasons:
+        for x in _ADAPTER_REASON.finditer(r):
+            if (x.group(1), x.group(2)) not in seen:
+                seen.add((x.group(1), x.group(2)))
+                matches.append(x)
+    if not matches:
+        return None
+    # a receiver whose constructor no library import names (the app's own `Config.init_app`) is the app's own code,
+    # not an extension: its line keeps the summary's own next step
+    steps = [e for e in (_adapter_entry(x, files) for x in matches) if e['library'] is not None
+             and not e['in_repository']][:MAX_ADAPTER_MORE + 1]
+    if not steps:
+        return None
+    first = steps[0]
+    package = package_name(first['library'])
+    version, version_source = _pinned_version(files, package)
+    words = {'receiver': first['receiver'], 'library': first['library'] or '<library>',
+             'at': first['at'] or first['module_line'], 'package': package,
+             'version': version or '<exact version, from your dependency file>'}
+    calls = [c for e in steps if e['library'] == first['library'] for c in e['calls']]
+    check_id = env.get('check_id') if isinstance(env.get('check_id'), str) and re.fullmatch(
+        r'[0-9a-f]{32}', env['check_id']) else None
+    profile = env.get('profile') if isinstance(env.get('profile'), str) else 'python-auth-declared-model'
+    step = {'shape': EXTENSION_ADAPTER, 'section': ADAPTER_SECTION, 'guide': ADAPTER_GUIDE, 'route': ADAPTER_ROUTE,
+            'receiver': first['receiver'], 'library': first['library'], 'in_repository': first['in_repository'],
+            'at': first['at'], 'package': package, 'version': version, 'version_source': version_source,
+            'more': [{k: e[k] for k in ('receiver', 'library', 'in_repository', 'at')} for e in steps[1:]],
+            'template': {'kind': 'coverage_gap', 'check_id': check_id, 'profile': profile,
+                         'package': {'name': package, 'version': version},
+                         'text': ADAPTER_TEXT % words, 'consent_follow_up': False}}
+    if calls and _ADAPTER_PACKAGE.fullmatch(package):     # the route's closed `coverage` object; else the text alone
+        step['template']['coverage'] = {'library': {'name': package, 'version': version},
+                                        'calls': calls[:_ADAPTER_CALLS],
+                                        'reason': first['reason'][:_ADAPTER_REASON_BYTES], 'formal_model': None}
+    step['request'] = adapter_line(step)
+    return step
+
+
+def _adapter_entry(match, files):
+    """{receiver, library, in_repository, at, module_line} of one refused extension call: `<ext>.init_app(app)`, or a
+    constructor that takes the app (`UserManager(app, db, User)`)."""
+    module, line, ext, ctor = match.group(1), int(match.group(2)), match.group(3), match.group(4)
+    head = (ext or ctor).split('.')[0]
+    refused = _repo_source(files, module)
+    library = _receiver_library(refused[1], head) if refused is not None else None
+    in_repository = False
+    built = _construction(refused[1], head) if refused is not None and ext else None
+    built_at = refused[0] if built is not None else None
+    if library is not None and _repo_source(files, library) is not None:
+        hop_source = _repo_source(files, library)
+        hop = _receiver_library(hop_source[1], head)
+        in_repository = hop is None or _repo_source(files, hop) is not None
+        library = hop if hop is not None else library
+        if built is None and ext:
+            built, built_at = _construction(hop_source[1], head), hop_source[0]
+    at = '%s:%d' % (refused[0], line) if refused is not None else None
+    receiver = '%s.init_app' % ext if ext else ctor
+    calls = []
+    if at is not None:              # the refused call, then the construction of its receiver: names only, never a literal
+        calls.append({'call': _call_at(refused[1], line, receiver) or ('%s(app)' % receiver), 'at': at})
+    if built is not None:
+        calls.append({'call': built[0], 'at': '%s:%d' % (built_at, built[1])})
+    calls = [c for c in calls if len(c['call']) <= _ADAPTER_CALL_BYTES and len(c['at']) <= _ADAPTER_AT_BYTES
+             and _ADAPTER_CALL_AT.fullmatch(c['at']) and '/../' not in '/%s/' % c['at'].rsplit(':', 1)[0]
+             and '/./' not in '/%s/' % c['at'].rsplit(':', 1)[0]]
+    return {'receiver': '%s.init_app' % ext if ext else '%s(app)' % ctor, 'library': library,
+            'in_repository': in_repository, 'at': at, 'module_line': 'module %s line %d' % (module, line),
+            'calls': calls, 'reason': match.group(0)}
+
+
+def adapter_step(envelope):
+    """The verdict's stored `detail.coverage` when it is an extension_adapter step, else None."""
+    d = envelope.get('detail') if isinstance(envelope, dict) else None
+    step = d.get('coverage') if isinstance(d, dict) else None
+    return step if isinstance(step, dict) and step.get('shape') == EXTENSION_ADAPTER else None
+
+
+def adapter_line(step):
+    """The one "Request coverage for <library>" sentence of an extension_adapter step, from its closed fields only: the
+    API's `detail.coverage.request`, and the line of the job summary and of the pull request comment (#5269: one
+    sentence per surface, within `CAP` so no surface clips it)."""
+    receiver = step.get('receiver') if isinstance(step.get('receiver'), str) and re.fullmatch(
+        r'[A-Za-z_][A-Za-z0-9_.]{0,300}', step['receiver']) else 'this extension\'s init_app'
+    library = step.get('library') if isinstance(step.get('library'), str) and _ADAPTER_MODULE.fullmatch(
+        step['library']) else None
+    at = step.get('at') if isinstance(step.get('at'), str) and _ADAPTER_AT.fullmatch(step['at']) else None
+    more = step.get('more') if isinstance(step.get('more'), list) else []
+    others = (' (and %d more, in detail.coverage.more)' % len(more)) if more else ''
+    package = step.get('package') if isinstance(step.get('package'), str) and _ADAPTER_MODULE.fullmatch(
+        step['package'].replace('-', '_')) else package_name(library) if library else 'this extension'
+    head = 'Request coverage for %s: Assure does not read what %s registers yet%s%s' % (
+        package, receiver, ', at %s' % at if at else '', others)
+    tail = ('; your agent can send the request pre-filled under detail.coverage.template with %s after it asks you'
+            % ADAPTER_ROUTE)
+    for line in ('%s, and no declaration field admits it%s (%s section, %s).' % (head, tail, ADAPTER_SECTION,
+                                                                                 ADAPTER_GUIDE),
+                 '%s, and no declaration field admits it%s (%s section).' % (head, tail, ADAPTER_SECTION),
+                 '%s%s (%s section).' % (head, tail, ADAPTER_SECTION)):
+        if len(line) <= CAP:
+            return line
+    return line
+
+
 def _pr_unread(env):
     """[(what, 'path:line')] for the lines a refused check names as unread (`machines.refused` reasons, then the rows'
     reasons), each module resolved to the one repository file the manifest holds for it (`source_candidates`; none or
@@ -4226,6 +4534,9 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
         out += [_pr_unread_words(rd['unread'], lambda loc: _pr_where(loc, repository, commit)), '']
         if rd['app_unread']:                  # issue #3174: one next step, then the footer (`_pr_footer`)
             out += [PR_UNREAD_NEXT, '']
+            step = adapter_step(env)
+            if step is not None:              # the extension adapter: the customer's coverage route
+                out += [esc(adapter_line(step)), '']
             return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names) + pr_verify_more(env)) + '\n'
     elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']

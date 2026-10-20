@@ -90,10 +90,13 @@ FIELD_WORDS = {
     'elevation_writers': 'where a session is given raised access',
     'signout_views': 'where users sign out',
     'libraries': 'which sign-in libraries your app uses',
+    'unconfirmed_libraries': 'which libraries Assure drafted as adding no route, session value or pre-view hook, '
+                             'until you confirm them',
     'public_routes': 'which routes anyone may open without signing in',
     'registrations_complete': 'whether Assure read every route your app registers',
     'requirements_file': 'where your requirements file is',
     'instance_config': 'how your app loads its instance configuration',
+    'config_surfaces': 'which configuration values you state for your app',   # #5289: stated config facts
 }
 BOOKKEEPING = ('schema', 'id', 'language', 'idiom') + tuple(FLAGS)
 # Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
