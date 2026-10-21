@@ -76,7 +76,7 @@ inputs:
     required: false
     default: pipe
   report:
-    description: On by default on the free plan while the free balance lasts (unset asks for it when the verdict says the account is free and its balance is not spent); it sends the verdict record through OpenRouter to a third-party model under zero data retention; report true, in api mode, asks for it on any plan and makes the job summary and the pull request comment carry the plain-language report of the check's claim tree (your account's plan must include it), or the reason it was withheld; false skips it, and local mode never asks for one. The verdict, its file and the exit code never change.
+    description: The plain-language report of the check's claim tree, on by default in api mode (your account's plan must include it). It sends the verdict record, never your files, through OpenRouter to a model, asking for zero data retention, and the job summary and the pull request comment carry the report or the reason it was withheld. Set report to false to turn it off; local mode never asks for one. When the report cannot be written (your report balance or allowance is spent, no zero-retention endpoint can take the request, or the written text fails the deterministic fact check), the job summary keeps the deterministic verdict. The verdict, its file and the exit code never change.
     required: false
     default: ''
   allow-overage:
@@ -88,7 +88,7 @@ inputs:
     required: false
     default: ''
   requirements:
-    description: "A requirements file to send with the check, api mode only (a path relative to the workspace). The upload is opt-in: empty (the default) sends no requirements text and prints no notice, even with a requirements.md at the repository root; name it (requirements.md) to send it. A file is sendable within 65536 bytes, 256 lines and 8192 bytes per line, as a regular UTF-8 file that is not a symbolic link. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements."
+    description: "A requirements file to send with the check, api mode only (a path relative to the workspace). Unset (the default), the Action reads the repository-root requirements.md by default and sends its text; with no such file it sends none and says nothing, and a root file it cannot send (a symbolic link, beyond the bounds, not UTF-8 text) is not sent: the check runs and one notice says why. A file is sendable within 65536 bytes, 256 lines and 8192 bytes per line, as a regular UTF-8 file that is not a symbolic link. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements."
     required: false
     default: ''
   compile-requirements:

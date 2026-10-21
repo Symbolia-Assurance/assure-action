@@ -466,6 +466,7 @@ class Bound:
         self.resource_roots = resource_roots
         self.named = named
         self.loaded = set()
+        self.follow_imports = False       # the plan's app subset (below): every in-repository module the kept ones import
         self.dirs = set()
         for r in roots + resource_roots:
             self.dirs |= _ancestors(r)
@@ -499,6 +500,27 @@ class Bound:
                         self.loaded.add(cand)
                         todo.append(cand)
         return self
+
+    def imports(self, top, tracked, cap):
+        """The plan's app subset (the Director, 19 Oct 2026): add to `loaded` each tracked Python module a kept module
+        imports (absolute from the checkout's top or a directory above a root, or relative to its package), and in
+        turn what those import, to a fixed point, so no in-repository code the app reaches is left out. Returns
+        whether anything was added."""
+        tset = set(tracked)
+        search = {''} | self.dirs
+        todo = [t for t in tracked if t.endswith('.py') and self.keeps(t)]
+        seen, added = set(), False
+        while todo:
+            rel = todo.pop()
+            if rel in seen:
+                continue
+            seen.add(rel)
+            for cand in _import_candidates(Path(top) / rel, rel, search, cap):
+                if cand in tset and not self.keeps(cand):
+                    self.loaded.add(cand)
+                    todo.append(cand)
+                    added = True
+        return added
 
     def under(self, rel):
         return _under(rel, self.roots) or _under(rel, self.resource_roots)
@@ -561,9 +583,58 @@ def _config_candidates(kind, value, dirs):
     return out
 
 
+def _module_paths(base, parts):
+    """The files a dotted module path `parts` may be under `base`: each prefix's package `__init__.py`, the module
+    itself and its package form."""
+    out = set()
+    for k in range(1, len(parts) + 1):
+        stem = posixpath.join(base, *parts[:k]) if base else '/'.join(parts[:k])
+        out.update((stem + '.py', stem + '/__init__.py'))
+    return out
+
+
+def _import_candidates(path, rel, search, cap):
+    """The repository paths the imports of the module at `path` (`rel` in the checkout) may load."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            return set()
+        tree = ast.parse(path.read_bytes())
+    except (OSError, SyntaxError, ValueError):
+        return set()
+    here = posixpath.dirname(rel)
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                for d in search:
+                    out |= _module_paths(d, a.name.split('.'))
+        elif isinstance(n, ast.ImportFrom):
+            names = [a.name for a in n.names if a.name != '*']
+            if n.level:
+                base = here
+                for _ in range(n.level - 1):
+                    base = posixpath.dirname(base)
+                parts = n.module.split('.') if n.module else []
+                bases = [base]
+            else:
+                parts = n.module.split('.') if n.module else []
+                bases = sorted(search)
+            for d in bases:
+                if parts:
+                    out |= _module_paths(d, parts)
+                for name in names:
+                    out |= _module_paths(d, parts + [name])
+    return out
+
+
 def send_bound(top, cap):
     """The `Bound` of the checkout's declaration, or None to read the checkout as before."""
-    doc = _declaration(top, cap)
+    return bound_of(_declaration(top, cap))
+
+
+def bound_of(doc):
+    """The `Bound` of a declaration object, or None to read the checkout as before."""
     roots = _roots(doc.get('app_roots')) if doc is not None else None
     if roots is None:
         return None
@@ -630,7 +701,10 @@ def _declared_stack(data):
         return None
     return doc['stack']
 
-def from_checkout(top, allow, limits, env):
+_UNSET = object()
+
+
+def from_checkout(top, allow, limits, env, bound=_UNSET):
     """serve-102 (DD-156 item 3, one step): the repository read from the checkout itself, when profile python-auth is
     given neither artefacts nor a connection. Every tracked regular file at HEAD's index (`git ls-files -s -z`, read
     only) that is Python source or requirements.md becomes `raw/repository/<path>`; other tracked files are not read.
@@ -640,28 +714,21 @@ def from_checkout(top, allow, limits, env):
     with `app_roots`, the kept modules are parsed first for config loaded by name (`Bound.config_loads`).
     Returns (bundle.Collected, {path: git mode}). A name the profile does not admit is listed in `ignored`."""
     from serve import bundle
-    child_env = {k: env[k] for k in ('PATH', 'HOME', 'SYSTEMROOT') if env.get(k)}
-    child_env.setdefault('PATH', '/usr/bin:/bin')
-    try:
-        p = subprocess.run(['git', '-C', str(top), 'ls-files', '-s', '-z'], env=child_env, stdin=subprocess.DEVNULL,
-                           capture_output=True, timeout=GIT_TIMEOUT_S)
-    except (OSError, subprocess.SubprocessError):
-        p = None
-    if p is None or p.returncode != 0:
-        raise Refusal('bad_input', 'profile %s with neither artefacts nor connection reads the checkout: run '
-                      'actions/checkout before this step' % PROFILE)
-    bound = send_bound(top, limits.file_bytes)
+    listing = _ls_files(top, env)
+    bound = send_bound(top, limits.file_bytes) if bound is _UNSET else bound
     roots = bound.roots if bound is not None else None
     if bound is not None:
         tracked = []
-        for row in p.stdout.split(b'\0'):
+        for row in listing.split(b'\0'):
             try:
                 tracked.append(row.partition(b'\t')[2].decode('utf-8'))
             except UnicodeDecodeError:
                 continue
         bound.resolve(tracked).config_loads(top, tracked, limits.file_bytes)
+        while bound.follow_imports and bound.imports(top, tracked, limits.file_bytes):
+            bound.config_loads(top, tracked, limits.file_bytes)
     out, modes, chosen, encoded, locks = bundle.Collected(), {}, [], REQUEST_OVERHEAD, []
-    for row in p.stdout.split(b'\0'):
+    for row in listing.split(b'\0'):
         if not row:
             continue
         meta, _tab, path = row.partition(b'\t')
@@ -700,11 +767,11 @@ def from_checkout(top, allow, limits, env):
             raise Refusal('oversize_input', 'the checkout holds %d tracked Python files that encode to %d bytes; the '
                           'limit is %d bytes: name the directories your app runs from in app_roots in %s (for example '
                           '"app_roots": ["app"]) and only the files under them are sent'
-                          % (python, encoded, limits.body_bytes, CHECKOUT_DECLARATION))
+                          % (python, encoded, limits.body_bytes, CHECKOUT_DECLARATION), measure='total')
         raise Refusal('oversize_input', 'the %d tracked Python files the read selects (under app_roots %s, and those the '
                       'checker loads by name outside them) encode to %d bytes; the limit is '
                       '%d bytes: narrow app_roots in %s to the directories your app runs from'
-                      % (python, json.dumps(roots), encoded, limits.body_bytes, CHECKOUT_DECLARATION))
+                      % (python, json.dumps(roots), encoded, limits.body_bytes, CHECKOUT_DECLARATION), measure='total')
     for name, rel, mode, full in chosen:
         out.files[name] = full.read_bytes()
         modes[rel] = mode
@@ -722,5 +789,176 @@ def from_checkout(top, allow, limits, env):
         out.files[LIBRARY_VERSIONS] = library_versions_bytes(record)
     out.ignored.sort()
     return out, modes
+
+
+
+def _ls_files(top, env):
+    """`git ls-files -s -z` of the checkout at `top` (read only), as bytes; the typed refusal when it is no checkout."""
+    child_env = {k: env[k] for k in ('PATH', 'HOME', 'SYSTEMROOT') if env.get(k)}
+    child_env.setdefault('PATH', '/usr/bin:/bin')
+    try:
+        p = subprocess.run(['git', '-C', str(top), 'ls-files', '-s', '-z'], env=child_env, stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        p = None
+    if p is None or p.returncode != 0:
+        raise Refusal('bad_input', 'profile %s with neither artefacts nor connection reads the checkout: run '
+                      'actions/checkout before this step' % PROFILE)
+    return p.stdout
+
+
+def _tracked_python(listing):
+    """The tracked regular Python files (and requirements.md) of a `_ls_files` listing, as relative paths."""
+    out = []
+    for row in listing.split(b'\0'):
+        if not row:
+            continue
+        meta, _tab, path = row.partition(b'\t')
+        mode = meta.split(b' ', 1)[0]
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if mode in (b'100644', b'100755') and (rel.endswith('.py') or rel == 'requirements.md'):
+            out.append(rel)
+    return out
+
+
+# The plan's app subset (#4907, final round): where the Flask app object is created, found in the runner the way the
+# drafter finds app objects (the identity engine's Flask proposal reader `_read`; no engine code is imported here):
+# a call named `Flask` (or of a module-level subclass of it), in a module outside these directories and test-only
+# files (anything under tests/ or test/, test_*.py, *_test.py, conftest.py).
+SUBSET_SKIP_DIRS = frozenset({'tests', 'test', 'docs', 'migrations'})
+SUBSET_SCAN_SKIP = frozenset({'.git', '.hg', '.svn', 'venv', '.venv', 'virtualenv', 'env', 'site-packages',
+                              'dist-packages', 'node_modules', '__pycache__', '.tox', '.nox', '.mypy_cache',
+                              '.pytest_cache', '.eggs'})
+
+
+def _test_only(rel):
+    parts = rel.split('/')
+    name = parts[-1]
+    return any(x in ('tests', 'test') for x in parts[:-1]) or name.startswith('test_') or name.endswith('_test.py') \
+        or name == 'conftest.py'
+
+
+def _skipped(rel):
+    return _test_only(rel) or any(x in SUBSET_SKIP_DIRS or x in SUBSET_SCAN_SKIP for x in rel.split('/')[:-1])
+
+
+def _builds_flask(trees):
+    """The modules (paths) of `trees` ({rel: ast.Module}) that create a Flask app object: a call named `Flask`, or a
+    call of a class defined at module level in the repository whose base is `Flask` / `flask.Flask`."""
+    def callname(c):
+        f = c.func
+        return f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+    ctors = {'Flask'}
+    for tree in trees.values():
+        for n in tree.body:
+            if isinstance(n, ast.ClassDef) and any(
+                    (isinstance(b, ast.Name) and b.id == 'Flask')
+                    or (isinstance(b, ast.Attribute) and b.attr == 'Flask') for b in n.bases):
+                ctors.add(n.name)
+    return {rel for rel, tree in trees.items()
+            if any(isinstance(n, ast.Call) and callname(n) in ctors for n in ast.walk(tree))}
+
+
+def app_subset_roots(top, tracked, cap):
+    """The plan's app subset (#4907, final round): the `app_roots` of the checkout's Flask app, found in the runner
+    before any request, as the drafter finds them: in order, a top-level package holding the app construction, the
+    outermost nested package holding one, a top-level directory without `__init__.py` holding one (a `src/` layout),
+    else the root-level module holding one (a single-file app; `Bound.imports` follows what it imports). Returns
+    (roots, candidates): `roots` is the one app's roots, or None when the subset cannot be computed soundly, and
+    `candidates` the modules that create an app object (none: no app object found; the rule that applies yielding
+    more than one root: several candidates). A module over `cap` bytes or not Python 3 is not parsed."""
+    trees = {}
+    for rel in sorted(tracked):
+        if not rel.endswith('.py') or _skipped(rel):
+            continue
+        path = Path(top) / rel
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+                continue
+            trees[rel] = ast.parse(path.read_bytes())
+        except (OSError, SyntaxError, ValueError):
+            continue
+    building = _builds_flask(trees)
+    if not building:
+        return None, []
+    candidates = sorted(building)
+    dirs = sorted({rel.split('/')[0] for rel in trees if '/' in rel})
+    packages = {rel for rel in tracked if rel.endswith('/__init__.py')}
+
+    def holds(d):
+        return any(p.startswith(d + '/') for p in building)
+
+    roots = [d for d in dirs if d not in SUBSET_SKIP_DIRS and d + '/__init__.py' in packages and holds(d)]
+    if not roots:
+        pkgs = sorted({p.rsplit('/', 1)[0] for p in packages if p.count('/') >= 2})
+        tops = [d for d in pkgs if d.rsplit('/', 1)[0] + '/__init__.py' not in packages and not _skipped(d + '/x.py')]
+        roots = [d for d in tops if holds(d)]
+    if not roots:
+        roots = [d for d in dirs if d not in SUBSET_SKIP_DIRS and d not in SUBSET_SCAN_SKIP
+                 and d + '/__init__.py' not in packages and holds(d)]
+    if not roots:
+        roots = sorted(p for p in building if '/' not in p)
+    if len(roots) != 1:
+        return None, candidates
+    return roots, candidates
+
+
+def checkout_for_plan(top, allow, limits, env, *, draft):
+    """The plan's app subset (the Director, 19 Oct 2026; #4907, final round). `from_checkout` under `limits` (the
+    plan's, as `GET /v1/profiles` publishes them), returning (collected, modes, None). When that read is over the
+    limit and the checkout's declaration names no `app_roots` (a first run has none), the app subset is computed in
+    the runner, before any request (`app_subset_roots`: the directories where the Flask app object is created, found
+    as the drafter finds app objects; `Bound` adds what the checker loads by name outside them and, `Bound.imports`,
+    every in-repository module they import). Only that subset is read under the plan's limit, `draft(subset files,
+    library versions bytes)` drafts its declaration from it (the record `declaration_draft` gives; the drafted
+    `app_roots` come back), and the check runs on the same files. Returns (collected, modes, {roots, sent_bytes,
+    whole_bytes, record, candidates}).
+
+    Refused before any upload, typed `oversize_input` with `measure: total` (the Action adds the plan's sentence:
+    the plan, its limit, app_roots and the plan that reads more), never a partial app sent silently: no app object
+    found (`app_subset: none`); app objects in several places (`app_subset: several`, with `candidates`); the app's
+    own subset still over the limit (`from_checkout`'s refusal naming the roots, `app_subset: over`)."""
+    try:
+        collected, modes = from_checkout(top, allow, limits, env)
+        return collected, modes, None
+    except Refusal as e:
+        first = e
+        if (e.outcome != 'oversize_input' or e.detail.get('measure') != 'total'
+                or app_roots(top, limits.file_bytes) is not None):
+            raise
+    tracked = _tracked_python(_ls_files(top, env))
+    whole = 0
+    for rel in tracked:
+        try:
+            st = os.lstat(Path(top) / rel)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            whole += st.st_size
+    roots, candidates = app_subset_roots(top, tracked, limits.file_bytes)
+    if roots is None and not candidates:
+        raise Refusal('oversize_input', '%s; Assure found no Flask app object in the checkout, so it could not send '
+                      'only your app' % first.reason, **dict(first.detail, app_subset='none'))
+    if roots is None:
+        raise Refusal('oversize_input', '%s; Assure found a Flask app object in several places (%s), so it could not '
+                      'pick one app to send' % (first.reason, ', '.join(candidates)),
+                      **dict(first.detail, app_subset='several', candidates=candidates))
+    bound = Bound(list(roots), [], set())
+    bound.follow_imports = True
+    try:
+        collected, modes = from_checkout(top, allow, limits, env, bound=bound)
+    except Refusal as e:
+        if e.outcome == 'oversize_input' and e.detail.get('measure') == 'total':
+            raise Refusal(e.outcome, e.reason, **dict(e.detail, app_subset='over', roots=list(roots))) from None
+        raise
+    repo = {n[len(PREFIX):]: d for n, d in collected.files.items() if n.startswith(PREFIX)}
+    record = draft(repo, collected.files.get(LIBRARY_VERSIONS))
+    sent = sum(len(d) for d in repo.values())
+    return collected, modes, {'roots': list(roots), 'sent_bytes': sent, 'whole_bytes': whole, 'record': record,
+                              'candidates': candidates}
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

@@ -296,6 +296,7 @@ class Client:
         else:
             self._auth = 'Bearer ' + api_key
         self.key_expires = None                     # issue #1262: the last answer's Assure-Key-Expires, when it had one
+        self.plan_bytes = None                      # #4907: the plan's input limit the last listing published, or None
         self._rate_slept = 0.0                      # issue #2456: seconds the last `_call` slept in rate_limited waits
         self._busy_slept = 0.0                      # issue #2475: seconds it slept in honoured server_busy waits
         self._unavailable_slept = 0.0               # REG-045..059: seconds it slept while the API was unavailable
@@ -377,7 +378,8 @@ class Client:
     @staticmethod
     def _typed(doc, status, route):
         """The Refusal for a failure envelope. A known outcome carries `detail.answered = route`, the request the API
-        answered: 'profiles' (`GET /v1/profiles`, before anything is collected or sent), 'check' (`POST /v1/checks`,
+        answered: 'profiles' (`GET /v1/profiles`, before anything is collected or sent), 'precheck' (the size
+        pre-check `GET /v1/profiles?request_bytes=`, #4907: nothing of the upload was sent), 'check' (`POST /v1/checks`,
         the upload left the runner) or 'poll' (`GET /v1/checks/{id}`, the check was sent). It is set last, so the
         server's own detail can neither unset nor change it; a server `sent_check_id` is dropped (only the client's
         own 202 gives one) (refutation-010 G1, round 2 G1)."""
@@ -519,8 +521,24 @@ class Client:
     def profiles(self):
         """The `GET /v1/profiles` answer (the served profiles' input allow-lists and the global limits)."""
         status, doc = self._call('GET', '/v1/profiles', route='profiles')
+        lim = doc.get('limits') if isinstance(doc, dict) else None
+        n = lim.get('body_bytes') if isinstance(lim, dict) else None
+        self.plan_bytes = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
         if status != 200:
             raise Refusal('api_error', 'the profile list answered %d' % status)
+        return doc
+
+    def precheck(self, body):
+        """#4907 (the Director, 19 Oct 2026): the size pre-check before a file-carrying upload (`submit`,
+        `declaration_proposal`). When the listing published the plan's limit (`plan_bytes`) and `body` is over it, the
+        byte count alone is sent first, `GET /v1/profiles?request_bytes=<n>`, and the API's answer decides: its
+        `oversize_input` (the plan, its limit, the next step and the free tier's upgrade link) is raised here, before
+        any content byte leaves the runner; a listing (the plan reads it) lets the upload proceed. A body within the
+        published limit is sent as today, with no second request; with no listing read, the server's body limit
+        bounds the upload (the backstop)."""
+        if self.plan_bytes is None or len(body) <= self.plan_bytes:
+            return None
+        status, doc = self._call('GET', '/v1/profiles?request_bytes=%d' % len(body), route='precheck')
         return doc
 
     def declaration_proposal(self, files, stack='python/flask', *, library_versions=None):
@@ -534,6 +552,7 @@ class Client:
         body = bundle.request_body('python-auth-declared-model', sent)
         if stack != 'python/flask':
             body = json.dumps(dict(json.loads(body), stack=stack), separators=(',', ':')).encode('ascii')
+        self.precheck(body)                       # #4907: the size first; nothing of the repository on a refusal
         status, doc = self._call('POST', '/v1/declaration-proposal', body, route='declaration_proposal')
         if (status != 200 or doc.get('schema') != 'assure.identity.declaration-proposal/v1'
                 or doc.get('stack') != stack or not isinstance(doc.get('declaration'), dict)
@@ -580,6 +599,7 @@ class Client:
                              compile_requirements=compile_requirements, requirement_goals=requirement_goals)
         else:
             idem = secrets.token_hex(16)
+        self.precheck(body)                          # #4907: the size first; nothing of the upload on a refusal
         self._unavailable_waited = 0                 # REG-045..059: one budget of unavailability waits for this check
         status, doc = self._call('POST', path, body, {'Idempotency-Key': idem}, route='check')
         started += self._rate_slept                  # issue #2456: the check's wait starts after the rate_limited waits

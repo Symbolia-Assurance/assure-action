@@ -1,6 +1,6 @@
 ## Instructions of this skill, not from the documents
 
-- Choose the route from the repository and stated task; ask the customer only for intent or consent the repository cannot establish.
+- Choose the route from the repository and stated task; ask the customer only for intent or consent the repository cannot establish, and once, during setup, whether to let GitHub Actions open pull requests when that setting is off, each with its tradeoff.
 - A section number in this skill names a numbered heading of the skill file the sentence names, or of the file the sentence is in; the skill folder carries every section it names.
 - If the database is on Supabase, tell the operator so before any grant; do not grant `pg_monitor` and do not set it in `collection-privileges`.
 - Show the operator `docs/DATA.md` before the first run, and ask before committing collected files to the repository.
@@ -16,9 +16,13 @@
 
 When an agent sets up or runs the Action for you, these rules hold for it, as they do for you.
 
+- Before it submits a contribution (an adapter bridge, a proposed formal model, or a coverage request that carries code locations) it asks "Would you like to submit this data to improve Assure's coverage of your requirements?", naming the files, lines or model it would send.
+- It sends only on yes; on no it sends nothing and the run continues.
+- It asks nothing about the report or the requirements text: they are defaults with opt-outs.
 - Do not fabricate facts, edit redacted evidence, change database permissions to accommodate the checker, or change the pins to conceal a gap.
 - Report the first line and each reading as the summary states it: a missing fact is reported as missing, with the place it was looked for.
 - It shows you every command that changes your server, its files or its roles, and you run it.
+- During setup it asks you once, when the setting is off, whether to turn on "Allow GitHub Actions to create and approve pull requests" (Settings → Actions → General): with it on, Assure opens its pull request with the declaration and a starter `requirements.md` for you to review and merge; with it off, the job summary carries the drafts and a Commit this draft link instead. It reads the setting with `gh api repos/{owner}/{repo}/actions/permissions/workflow` and, only on your yes and where it has the access, turns it on with `gh api -X PUT repos/{owner}/{repo}/actions/permissions/workflow -F can_approve_pull_request_reviews=true`. An organisation or enterprise can refuse that setting; the Commit this draft link then accepts the drafts.
 - A run that read nothing never goes green: it is yellow and exits 3. When no obligation on the machines read holds, the first line says "nothing could be established". It never means "no issues".
 - Never send your configuration files, your connection string or your API key.
 - Create a new role. Use it for nothing else. The checker leaves the collection role out of every reading, so a role your site also uses would hide its own results.

@@ -73,10 +73,10 @@ _TABLE = {
                                'ran and nothing was charged.'),
     # serve-079 (Director's decision 3902): paid formalisation is on Premium and above; a free account is refused before
     # anything is held, written or charged, and `detail` names the tier, its monthly price and what it adds.
-    # issue #4578: the price and a route this server has to the link (no Premium payment link set: checkout, else ask)
+    # issue #4578 / PR #4612 H1: checkout is the self-service route when no Premium payment link is set.
     'tier_required': (403, None, 'Upgrade to Premium (USD 20 a month) via `POST /v1/billing/checkout` with {"tier": '
-                                 '"usd_20"} or ask Symbolia for the Premium payment link, or keep the free quote beside '
-                                 'each requirement row.'),
+                                 '"usd_20"}, or keep the free quote beside each requirement row; nothing was held and '
+                                 'nothing was charged.'),
     # serve-084: Stripe billing is not configured on this server, or Stripe could not be reached; a typed refusal of
     # the billing routes, never a 500. Nothing was written and no tier changed.
     'billing_unavailable': (503, None, 'Ask Symbolia to move this account by hand, or try the checkout link again later, '
@@ -197,6 +197,12 @@ MALFORMATIONS = MappingProxyType({
                      'profile, profile_wanted, obligation, package {name, version}, agent {model_id, client} and '
                      'consent_follow_up',
     # serve-085: the operator's state of a note, POST /v1/feedback/{id}/status (internal accounts)
+    # issue #4230: the coverage proposal (serve/coverage_proposals.py; QUICKSTART-API.md "Propose coverage")
+    'coverage_proposal_body': 'a JSON object with answers {profile, kind, shape, and optionally check_id, requirement, '
+                              'at}, fixture {files}, acceptance {before, after, text}, planted_defect {text, files, '
+                              'expected: disproven}, change {kind: patch or description, text, patch} and optionally '
+                              'agent {model_id, client}; files are relative paths the reader reads, each at most '
+                              '16384 bytes of text',
     'feedback_status': 'a JSON object with state (received, in_pr, merged or declined) and the field the state takes: '
                        'pr (1 to 1000000) for in_pr, release (40-hex engine commit) and optionally pr for merged, '
                        'reason (1 to 300 bytes) for declined',
@@ -208,7 +214,7 @@ FIELDS = frozenset({'profile', 'files', 'Content-Length', 'Transfer-Encoding', '
                     'scope_binding', 'accepted_scope_ref', 'allow_overage', 'requirements', 'repository', 'commit',
                     'provenance', 'sentence', 'kind', 'text', 'check_id', 'obligation', 'package', 'agent',
                     'consent_follow_up', 'profile_wanted', 'stack', 'compile_requirements',
-                    'requirement_goals'})
+                    'requirement_goals', 'answers', 'fixture', 'acceptance', 'planted_defect', 'change'})
 # The observed derive's typed kinds (INTERFACE-CONTRACT-OB-001 section 4.6, STABLE).
 DERIVE_KINDS = frozenset({'derived', 'schema_gate_every_machine', 'major_not_observed', 'major_disagreement',
                           'major_out_of_range', 'collection_role_disagreement', 'collection_role_not_observed',
@@ -505,7 +511,7 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
 # serve-072 (3797, dogfood fb-20261009-ac2d8e303fa3089d): a bad_input whose malformation is a request field or body,
 # not a file of the upload, says how to fix that field; the file action ("every file is allow-listed") misled an agent.
 REQUEST_KINDS = frozenset({'allow_partial', 'body_encoding', 'body_not_json', 'body_not_utf8', 'body_shape',
-                           'email_address', 'fail_on', 'feedback_body', 'feedback_status', 'idempotency_key', 'query', 'quote_body',
+                           'coverage_proposal_body', 'email_address', 'fail_on', 'feedback_body', 'feedback_status', 'idempotency_key', 'query', 'quote_body',
                            'report_body', 'requirements', 'scope_binding', 'scope_missing', 'scope_ref'})
 # issue #589: the next step per closed cause code of the HTTP observed derive's customer refusal (profile_refused with
 # detail.cause_code). `{file}` takes the malformation's file (a raw/ name that passed NAME_RE) or 'the bundle' when
@@ -579,7 +585,10 @@ CODE_ACTIONS = {code: text for codes, text in _CODE_GROUPS for code in codes}
 REQUEST_ACTION = ('Fix what the reason names so it has the shape detail.malformation.expected gives, then send the '
                   'request again.')
 KIND_ACTIONS = {'feedback_body': 'Fix the field the reason names so it has the shape detail.malformation.expected '
-                                 'gives, then send the note again; nothing was stored.'}
+                                 'gives, then send the note again; nothing was stored.',
+                'coverage_proposal_body': 'Fix the field the reason names so it has the shape detail.shapes gives '
+                                          '(detail.example is one valid body), then send the proposal again; nothing '
+                                          'was stored.'}
 
 
 # issue #1045: what to correct for a free run's profile_refused, per (detail.kind, detail.rule) (QUICKSTART-API.md
@@ -623,6 +632,31 @@ FLAGS_ACTION = ('Add the seven flags at their standing values to raw/REPOSITORY.
 FLAG_POINTERS = frozenset('/' + k for k in ('execution_authorized', 'hardware_authorized',
                                             'industrial_release_authorized', 'release_allowed',
                                             'physical_validation', 'simulation', 'self_approved'))
+
+
+# Beta feedback #4597, #4591: a python/stdlib-http app of a shape the native reader does not read (serve/profiles.py
+# STDLIB_NATIVE_SHAPE_RULES) is pointed at the adapter bridge (assure/adapter_bridge.py, assure.adapter-bridge/v1),
+# and a bridge refused by its own verification (rule `bridge:<rule>`) at the local self-check. `detail.adapter_bridge`
+# is the contract's link (adapter_bridge.DOC), a plain string so the Action's client keeps it and rebuilds this action.
+BRIDGE_DOC_RE = re.compile(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/[A-Za-z0-9_./-]+\.md')
+BRIDGE_TEMPLATE = 'python3.14 -B -m action.adapter_bridge template'
+BRIDGE_CHECK = 'python3.14 -B -m action.adapter_bridge check'
+BRIDGE_BUILD_ACTION = ("Assure's native stdlib reader reads one shape: one literal route table and one dispatcher. For "
+                       "any other shape, build an adapter bridge: run " + BRIDGE_TEMPLATE + ", complete it, run "
+                       + BRIDGE_CHECK + " until it passes, then commit .assure/declaration.json. Contract: %s")
+BRIDGE_FAULT_ACTION = ("Your adapter bridge disagrees with your code: run " + BRIDGE_CHECK + ", which prints every fault "
+                       "with its path:line, correct each, then commit .assure/declaration.json and run again. "
+                       "Contract: %s")
+
+
+def bridge_action(detail):
+    """The adapter bridge's action for a profile_refused `detail` carrying `adapter_bridge` (the contract link), or
+    None: the self-check for a bridge's own fault (rule `bridge:<rule>`), else how to build one."""
+    doc = detail.get('adapter_bridge')
+    if not (isinstance(doc, str) and BRIDGE_DOC_RE.fullmatch(doc)):
+        return None
+    rule = detail.get('rule')
+    return (BRIDGE_FAULT_ACTION if isinstance(rule, str) and rule.startswith('bridge:') else BRIDGE_BUILD_ACTION) % doc
 
 
 def free_action(detail):
@@ -690,7 +724,7 @@ class Refusal(Exception):
         if self.outcome == 'bad_input' and kind in REQUEST_KINDS:
             return KIND_ACTIONS.get(kind, REQUEST_ACTION)
         if self.outcome == 'profile_refused' and isinstance(self.detail.get('kind'), str):
-            own = free_action(self.detail)
+            own = bridge_action(self.detail) or free_action(self.detail)
             if own is not None:
                 return own
         if self.outcome == 'unknown_profile' and served_profiles(self.detail) is not None:

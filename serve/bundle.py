@@ -106,6 +106,36 @@ class Limits:
 
 LIMITS = Limits()
 
+# Per-plan input limits (the Director, 19 Oct 2026): the request body a plan reads, measured as `body_bytes` is (the
+# encoded request, from Content-Length), applied after the key is verified on the file-carrying routes. LIMITS.body_bytes
+# stays the wire ceiling every request meets first. An unknown tier reads as free.
+MIB = 2 ** 20
+PLAN_INPUT_BYTES = {'free': 6 * MIB, 'usd_20': 24 * MIB, 'usd_200': 64 * MIB, 'usage': 64 * MIB, 'enterprise': 64 * MIB,
+                    'internal': 64 * MIB}
+PLAN_NAMES = {'free': 'Free', 'usd_20': 'Premium', 'usd_200': 'Pro', 'usage': 'usage', 'enterprise': 'Enterprise',
+              'internal': 'internal'}
+PLAN_NEXT = {'free': 'usd_20', 'usd_20': 'usd_200'}
+APP_ROOTS_STEP = "set app_roots in %s to send only your app's files"     # the caller names the declaration file
+
+
+def plan_input_bytes(tier):
+    """The request body `tier` reads, in bytes."""
+    return PLAN_INPUT_BYTES.get(tier, PLAN_INPUT_BYTES['free'])
+
+
+def plan_sentence(tier, declaration):
+    """The plan, its limit and the next step: app_roots in `declaration` (the checkout path of the declaration file),
+    then the plan that reads more (Enterprise past Pro)."""
+    tier = tier if tier in PLAN_INPUT_BYTES else 'free'
+    s = 'your %s plan reads up to %d MiB: %s' % (PLAN_NAMES[tier], plan_input_bytes(tier) // MIB,
+                                                 APP_ROOTS_STEP % declaration)
+    nxt = PLAN_NEXT.get(tier)
+    if nxt is not None:
+        return s + ', or %s reads up to %d MiB' % (PLAN_NAMES[nxt], plan_input_bytes(nxt) // MIB)
+    if tier in ('usd_200', 'usage'):
+        return s + ', or, beyond %d MiB, talk to us about Enterprise' % (plan_input_bytes(tier) // MIB)
+    return s
+
 
 @dataclass
 class Collected:
@@ -598,7 +628,8 @@ def check_files(files, profile, limits=LIMITS):
             raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (name, len(data), cap))
         total += len(data)
     if total > limits.body_bytes:
-        raise Refusal('oversize_input', 'the files total %d bytes; the limit is %d' % (total, limits.body_bytes))
+        raise Refusal('oversize_input', 'the files total %d bytes; the limit is %d' % (total, limits.body_bytes),
+                      measure='total')
     for rule in profile.required:
         if rule.path not in files:
             raise Refusal('bad_input', 'missing required file %s' % rule.path, path=rule.path,
@@ -710,7 +741,8 @@ def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=
             doc[key] = value
     body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')
     if len(body) > limits.body_bytes:
-        raise Refusal('oversize_input', 'the encoded upload is %d bytes; the limit is %d' % (len(body), limits.body_bytes))
+        raise Refusal('oversize_input', 'the encoded upload is %d bytes; the limit is %d' % (len(body), limits.body_bytes),
+                      measure='total')
     return body
 
 # execution_authorized false; hardware_authorized false; industrial_release_authorized false; release_allowed false; physical_validation false; simulation true; self_approved false.

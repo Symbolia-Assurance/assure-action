@@ -127,6 +127,88 @@ READS_INTENT_NOTE = ('`%s` reads the declaration supplied with the run; Assure d
                      'run with no `' + CHECKOUT_PATH + '` in the checkout, and proposes it in its own pull request.')
 
 
+# Issue #4395: a repository with no requirements.md gets a starter one in the same proposal, drafted from the
+# declaration: each promise is the free catalogue's own sentence (the checker's REQUIREMENT_PHRASES, held equal by
+# test), so the free check decides every line; a promise is drafted only when the declaration shows the app has the
+# thing it is about. The bearer-route promise is never drafted: the free check never reads it as holding.
+STARTER_PATH = 'requirements.md'
+STARTER_PHRASES = (
+    ('AUTH-1', 'No route outside the declared public routes is reachable without signing in.'),
+    ('AUTH-2', 'Routes that carry a declared role guard are reachable only by that role.'),
+    ('AUTH-3', 'The signed-in identity is set only after second-factor verification.'),
+    ('AUTH-4', 'Signing out always returns to the signed-out state.'),
+    ('AUTH-5', 'Elevated sessions start only from a signed-in admin.'),
+)
+STARTER_TITLE = '# What this app promises'
+# a heading: no reader takes it for a promise, and it holds no promise number
+STARTER_INVITE = ('## Add your own promises below, one per line. Premium checks the ones the free catalogue cannot '
+                  'decide.')
+
+
+def _starter_ids(decl):
+    """The catalogue ids a starter drafts for `decl`, in catalogue order."""
+    guards = [g for g in decl.get('guards') or () if isinstance(g, dict)]
+    if not isinstance(decl.get('session_identity_key'), str) or not guards:
+        return []
+    out = []
+    if any(g.get('requires') != 'actor_role' for g in guards):
+        out.append('AUTH-1')
+    if any(g.get('requires') == 'actor_role' for g in guards):
+        out.append('AUTH-2')
+    if decl.get('second_factor_keys'):
+        out.append('AUTH-3')
+    if decl.get('signout_views'):
+        out.append('AUTH-4')
+    if decl.get('session_elevation_keys'):
+        out.append('AUTH-5')
+    return out
+
+
+def starter_requirements(decl):
+    """Issue #4395: the starter requirements.md bytes for a drafted declaration `decl`, or None when it gives no
+    promise the free check decides (no sign-in key or no guard read)."""
+    if not isinstance(decl, dict):
+        return None
+    phrases = dict(STARTER_PHRASES)
+    ids = _starter_ids(decl)
+    if not ids:
+        return None
+    lines = [STARTER_TITLE, ''] + ['- R%d [auth]: %s' % (n, phrases[oid]) for n, oid in enumerate(ids, 1)]
+    return ('\n'.join(lines + ['', STARTER_INVITE]) + '\n').encode('utf-8')
+
+
+# #4398 r2: the checker's REQUIREMENT_LINE_STRICT, held equal by test; a customer's own line on the proposal branch
+# ("one per line") that is not in this form is no promise, and never an error (the next run after a served check)
+STARTER_LINE = re.compile(r'^- R([0-9]+)(?: \[([\x20-\x5a\x5c\x5e-\x7e]*)\])?: (.+)$', re.S)
+
+
+def starter_promises(data):
+    """The promise sentences of starter bytes `data`, in order: the lines in the strict house form. Any other line
+    (a customer's own words, non-UTF-8 bytes) is not a promise and raises nothing."""
+    out = []
+    for line in bytes(data).decode('utf-8', 'replace').split('\n'):
+        m = STARTER_LINE.match(line)
+        if m is not None:
+            out.append(m.group(3))
+    return out
+
+
+def starter_section(data):
+    """Issue #4395: the proposal body's section for the starter requirements.md."""
+    lines = [_SECTION % STARTER_PATH, '', 'Assure also drafted `%s`, the promises your app makes, from what it read in '
+             'your code. Every run checks them once this pull request is merged:' % STARTER_PATH, '']
+    lines += ['- %s' % p for p in starter_promises(data)]
+    lines += ['', 'Add your own promises to it on this branch, one per line. The free check decides the ones above; '
+              'Premium checks the promises it cannot decide yet.']
+    return '\n'.join(lines) + '\n'
+
+
+def starter_markdown(data):
+    """Issue #4395: the job summary's lines for a starter that was not proposed."""
+    return ('\nAssure also drafted a starter `%s` (the promises above it can check on every run):\n\n```markdown\n%s```\n'
+            % (STARTER_PATH, bytes(data).decode('utf-8')))
+
+
 _IMPORT = re.compile(rb'(?m)^[ \t]*(?:from|import)[ \t]+(flask|fastapi|django)\b')
 FRAMEWORK_STACKS = {b'fastapi': 'python/fastapi', b'django': 'python/django'}   # issue #3376; flask is STACK
 
@@ -137,7 +219,9 @@ STDLIB_STACK = 'python/stdlib-http'
 STDLIB_REASON = ('this repository serves HTTP with the standard library (http.server) and imports no web framework; '
                  'Assure drafts declarations for Flask, FastAPI and Django only, so write the declaration: '
                  'schema assure.identity.declaration/v1 with stack python/stdlib-http, committed at '
-                 + CHECKOUT_PATH + ' (QUICKSTART-API.md, the python-auth-declared-model section, lists its fields)')
+                 + CHECKOUT_PATH + '. Assure reads one standard-library shape natively (a literal route table and '
+                 'one dispatcher that calls one guard); any other shape maps onto it with an adapter bridge in that '
+                 'file: https://github.com/Symbolia-Assurance/assure-action/blob/main/docs/ADAPTER-BRIDGE.md')
 
 
 def stack_of(files):
@@ -210,6 +294,15 @@ def on_base(top, rel, data, env):
         return None
     shown = _git(top, env, 'show', 'FETCH_HEAD:' + rel)
     return shown == bytes(data)
+
+
+def base_has(top, rel, env):
+    """On a pull request: does the base branch's tree carry `rel`? None when it cannot be read."""
+    base = str(env.get('GITHUB_BASE_REF') or '').strip()
+    if not base or not _fetch(top, env, base):
+        return None
+    listed = _git(top, env, 'ls-tree', '--name-only', 'FETCH_HEAD', '--', rel)
+    return None if listed is None else bool(listed.strip())
 
 
 def is_pull_request(env):
@@ -311,14 +404,17 @@ def _parent(top, env, commit):
     return next((line[7:].strip() for line in raw.split('\n') if line.startswith('parent ')), None)
 
 
-def pull_request_body(record, rel, source='this repository', kept=(), lead=None):
+def pull_request_body(record, rel, source='this repository', kept=(), lead=None, starter=None):
     """The proposal pull request's body: what it is, how to accept it, and one section per proposed file naming each
     field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
     collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927);
-    `lead` replaces the first sentence of `rel`'s section (issue #2934)."""
+    `lead` replaces the first sentence of `rel`'s section (issue #2934). Issue #4395: `starter`, the starter
+    requirements.md bytes this proposal carries, adds its section after `rel`'s."""
+    what = rel if starter is None else '%s and %s' % (rel, STARTER_PATH)
     head = ('Read each draft and edit any field that is wrong, on this branch. %s This run is proposing %s; merging the '
-            'pull request commits it.\n' % (NEVER_COMMITS, rel))         # issue #3153: this proposal's own path
-    return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)])
+            'pull request commits %s.\n' % (NEVER_COMMITS, what, 'it' if starter is None else 'them'))   # issue #3153
+    tail = [] if starter is None else [starter_section(starter)]
+    return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)] + tail)
 
 
 PUSH_REFUSED = 'the push to'      # issue #2934: the observed profile reads a refused push as `contents: read`
@@ -340,13 +436,17 @@ def proposal_base(env, github, repo):
     return base
 
 
-def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository', lead=None):
+def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository', lead=None,
+            starter=None):
     """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
     default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
     the customer works on is ever written. Returns {branch, commit, number, url, created}; raises Refusal naming the
     reason (the permission lines when the token, the push or the pull request is refused) and leaves no proposal
-    branch it created behind. `github` is action.client.GitHub, or None when no workflow token reached the Action."""
+    branch it created behind. `github` is action.client.GitHub, or None when no workflow token reached the Action.
+    Issue #4395: `starter` (bytes) is also written at STARTER_PATH in the same commit when the base branch's tip has no
+    file there; when the proposal branch already carries that file, its bytes are kept (the customer's edits on the
+    branch); the result's `starter` says whether the proposal carries it."""
     if github is None:
         raise _missing('no workflow token reached the Action')
     repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
@@ -371,6 +471,9 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     parent = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip()
     if not re.fullmatch(r'[0-9a-f]{40,64}', parent):
         raise Refusal('api_error', 'the base branch tip could not be read')
+    if starter is not None and _git(top, env, 'cat-file', '-e', '%s:%s' % (parent, STARTER_PATH)) is not None:
+        starter = None                               # issue #4395: the base branch has one; propose nothing for it
+    mine = {rel} if starter is None else {rel, STARTER_PATH}
     existing = None
     if _fetch(top, env, branch):
         existing = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip() or None
@@ -381,25 +484,32 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     if existing and _parent(top, env, existing) == parent:
         on_branch = set((_git(top, env, 'diff', '--name-only', parent, existing) or b'').decode('utf-8', 'replace')
                         .split('\n')) - {''}
-        if on_branch - {rel} <= _named(open_pr.get('body') if open_pr else None):
+        if on_branch - mine <= _named(open_pr.get('body') if open_pr else None):
             seed = existing
     named = {n for n in _named(open_pr.get('body') if open_pr else None) if n.startswith('.assure/')}
     carry = _carried(top, env, existing, parent, rel, named) if existing and seed != existing and named else {}
-    blob = (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip()
+    files = [(rel, (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip())]
+    if starter is not None:                          # issue #4395: the branch's own requirements.md is kept
+        kept_starter = _git(top, env, 'cat-file', 'blob', '%s:%s' % (existing, STARTER_PATH)) if existing else None
+        starter = kept_starter if kept_starter is not None else bytes(starter)
+        carry.pop(STARTER_PATH, None)
+        files.append((STARTER_PATH, (_git(top, env, 'hash-object', '-w', '--stdin', data=starter) or b'')
+                      .decode().strip()))
+    blob = all(b for _p, b in files)
     index = {'GIT_INDEX_FILE': str(Path(scratch) / 'assure-proposal.index')}
     tree = None
     if blob and _git(top, env, 'read-tree', seed, extra=index) is not None and all(
             _git(top, env, 'update-index', '--add', '--cacheinfo', '100644,%s,%s' % (b, path), extra=index) is not None
-            for path, b in [*sorted(carry.items()), (rel, blob)]):
+            for path, b in [*sorted(carry.items()), *files]):
         tree = (_git(top, env, 'write-tree', extra=index) or b'').decode().strip()
     if not tree:
         raise Refusal('api_error', 'the proposal commit could not be built')
     kept = ()
     if open_pr is not None and seed == existing:    # the other files' sections, while their files stay on the branch
-        kept = _kept_sections(open_pr.get('body'), on_branch - {rel})
+        kept = _kept_sections(open_pr.get('body'), on_branch - mine)
     elif open_pr is not None and carry:             # issue #3153: and those of the drafts carried to the new tip
         kept = _kept_sections(open_pr.get('body'), set(carry))
-    body = pull_request_body(record, rel, source, kept, lead)
+    body = pull_request_body(record, rel, source, kept, lead, starter)
     commit = existing
     same = existing and seed == existing and (_git(top, env, 'rev-parse', existing + '^{tree}') or b'').decode().strip() \
         == tree
@@ -417,7 +527,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
                                   {'title': title, 'body': body})
         doc = doc if status == 200 and isinstance(doc, dict) else open_pr
         return {'branch': branch, 'commit': commit, 'number': open_pr['number'], 'url': str(doc.get('html_url') or ''),
-                'created': False}
+                'created': False, 'starter': starter is not None}
     status, doc = github.call('POST', '/repos/%s/pulls' % repo,
                               {'title': title, 'head': branch, 'base': base, 'body': body})
     if status != 201 or not isinstance(doc, dict) or not isinstance(doc.get('number'), int):
@@ -425,7 +535,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
             _git(top, env, 'push', '--quiet', 'origin', ':refs/heads/%s' % branch)
         raise _missing('the pull request could not be opened (HTTP %d)' % status)
     return {'branch': branch, 'commit': commit, 'number': doc['number'], 'url': str(doc.get('html_url') or ''),
-            'created': True}
+            'created': True, 'starter': starter is not None}
 
 
 COMMIT_URL_MAX = 8000   # issue #2249: past this a prefilled new-file link is too long for a browser; the draft stays below

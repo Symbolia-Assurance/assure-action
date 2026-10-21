@@ -43,9 +43,9 @@ connection or a runner token.
   between runs.
   `report` (serve-014, DD-103: `true` or `false`; unset is on in api mode and off in local mode; any other word is `bad_input` before anything is read): after
   a verdict envelope comes back, the Action asks for its claim-tree report (`Client.report`: POST, then GET while 202,
-  bounded). The job summary then carries the verdict's first line, the written body and the line naming the report
-  page; for a withheld report, or one the API refused (`tier_excludes`, a delivery failure), it carries the
-  deterministic summary and "The report was withheld: <reason>." (`serve.render.report_withheld_line`), with the page
+  bounded). The job summary keeps the complete deterministic reading, then the written body, appendix and the line
+  naming the report page; for a withheld report, or one the API refused (`tier_excludes`, a delivery failure), it
+  carries the deterministic summary and "The report was withheld: <reason>." (`serve.render.report_withheld_line`), with the page
   line when a record came back. A refused report is one `::warning`, never an error. The verdict file, the exit code
   and the `outcome` output are the verdict's whatever the report did; the outputs add `report-status` (written,
   withheld, refused, or running when the poll ran out while the report was written: serve-015, with the page line)
@@ -155,7 +155,9 @@ before. On a pull request, a checkout declaration not yet on the base branch bou
 
 Issue #2189: on a pull_request event with GITHUB_TOKEN set, after the job summary is written, the verdict is also
 posted as one pull request comment (`post_pr_comment`, the body `serve.render.pr_comment_markdown`, decided from the
-summary's own red findings), found again by its marker and updated in place on each later run. A 403 (the job's token
+summary's own red findings), found again by its marker and updated in place on each later run. F10 (#4994): on the
+setup run (`setup_run`: the pull request's base branch has no `.github/workflows/assure.yml`) the comment says what
+Assure found in your code, not what the change does. A 403 (the job's token
 lacks `pull-requests: write`) is one `::notice` naming the line to add; any other GitHub refusal is one `::warning`; the
 verdict file, the outputs and the exit never change.
 
@@ -286,6 +288,41 @@ _FROZEN = object()
 KEEP_ENV = ('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TZ', 'SYSTEMROOT', 'HTTPS_PROXY', 'https_proxy',
             'NO_PROXY', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR')
 
+
+
+def subset_line(subset, tier):
+    """The plan's app subset (the Director, 19 Oct 2026): what was checked, of how much, and what the plan reads."""
+    mib = bundle.MIB
+    tier = tier if tier in bundle.PLAN_INPUT_BYTES else 'free'
+    s = 'Checked your app (%.1f MiB of %.1f MiB). Your %s plan reads up to %d MiB' % (
+        subset['sent_bytes'] / mib, subset['whole_bytes'] / mib, bundle.PLAN_NAMES[tier],
+        bundle.plan_input_bytes(tier) // mib)
+    nxt = bundle.PLAN_NEXT.get(tier)
+    if nxt is not None:
+        return s + '; %s reads your whole repository up to %d MiB.' % (bundle.PLAN_NAMES[nxt],
+                                                                      bundle.plan_input_bytes(nxt) // mib)
+    if tier in ('usd_200', 'usage'):
+        return s + '; beyond %d MiB, talk to us about Enterprise.' % (bundle.plan_input_bytes(tier) // mib)
+    return s + '.'
+
+
+def with_lead(body, line):
+    """A PR comment `body` (the marker line first) with `line` as its first paragraph; `body` itself without one."""
+    if not line:
+        return body
+    marker, sep, rest = body.partition('\n')
+    return '%s\n%s\n\n%s' % (marker, line, rest) if sep else body
+
+
+def with_plan_line(refusal, plan):
+    """The per-plan input limits (the Director, 19 Oct 2026): an `oversize_input` on the whole upload (`measure:
+    total`) that the server did not already word for the plan carries the plan's sentence (`bundle.plan_sentence`):
+    the plan and its limit, app_roots, and the plan that reads more. Anything else, or no published plan, unchanged."""
+    if (refusal.outcome != 'oversize_input' or refusal.detail.get('measure') != 'total' or 'plan' in refusal.detail
+            or not isinstance(plan, dict) or not isinstance(plan.get('tier'), str)):
+        return refusal
+    return Refusal(refusal.outcome, '%s; %s' % (refusal.reason, bundle.plan_sentence(plan['tier'], declaration_draft.CHECKOUT_PATH)),
+                   **dict(refusal.detail, plan=plan['tier']))
 
 def _cmd_data(value, cap=300):
     s = '' if value is None else str(value)
@@ -534,6 +571,11 @@ SKIPPED_HOW = {
     'encoding': ('it is not UTF-8 text', 'To send it, save it as UTF-8; '),
     'bounds': (None, 'To send it, shorten it to within the bounds; '),
 }
+# Issue #4395: on python-auth's checkout run, a `requirements` input naming the repository-root requirements.md that is
+# not there yet sends no text and says so; the run goes on and drafts, and Assure's pull request proposes a starter.
+NOT_YET_NOTICE = ('requirements.md is not in the repository yet, so this check sent no requirements. When Assure drafts '
+                  'your declaration, its pull request also proposes a starter requirements.md; once it is merged, every '
+                  'check reads it.')
 LOCAL_REQUIREMENTS_NOTICE = ('requirements are read in api mode only: local mode did not read or send requirements.md')
 
 
@@ -611,7 +653,21 @@ def _pull_number(env):
     return n if type(n) is int and n > 0 else None
 
 
-def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, report=None, verdict_file=None):
+# F10 (#4994): the workflow file Assure's setup adds; a pull request whose base branch lacks it is the setup run
+SETUP_WORKFLOW = '.github/workflows/assure.yml'
+
+
+def setup_run(env, cwd):
+    """F10: True when this pull request is Assure's setup run: its base branch's tree has no SETUP_WORKFLOW, so the
+    pull request adds Assure's own workflow. False on any other run, and when the base cannot be read."""
+    if not declaration_draft.is_pull_request(env):
+        return False
+    top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd), env)
+    return top is not None and declaration_draft.base_has(top, SETUP_WORKFLOW, env) is False
+
+
+def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, lead=None, setup=False, report=None,
+                    verdict_file=None):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
     looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
@@ -620,8 +676,9 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, r
     footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`).
     Issue #3149: each quoted rule names the `requirements` input it was read from (`render.pr_requirements_file`).
     Issue #3168: `body` (a `mode: lint` run's LINT_PREFLIGHT) is posted in place of the verdict's comment, under the
-    same marker, so the one Assure comment says no check ran. readable-report-001: a written `report` record leads
-    the comment under its heading (`render.pr_with_report`), with the trace line naming `verdict_file`."""
+    same marker, so the one Assure comment says no check ran. F10: `setup` (`setup_run`) words the broken rules as
+    found in your code. readable-report-001: a written `report` record leads the comment under its heading
+    (`render.pr_with_report`), with the trace line naming `verdict_file`."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
         return None
     repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
@@ -632,8 +689,9 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, r
     else:
         body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
                                           tree_bases=tree_bases, requirements_file=render.pr_requirements_file(
-                                              env.get('INPUT_REQUIREMENTS'), env.get('GITHUB_WORKSPACE')))
+                                              requirements_named(env), env.get('GITHUB_WORKSPACE')), setup=setup)
         body = render.pr_with_report(body, report, verdict, verdict_file)
+        body = with_lead(body, lead)      # the plan's app subset: what was checked leads the comment
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
@@ -881,28 +939,59 @@ def pr_tree(verdict, tree):
     return out
 
 
-def requirements_upload(env, cwd, goals=None, source=None):
+def requirements_named(env):
+    """Issue #2174 (the Director, 18 Oct 2026): the requirements file a run reads, as the `requirements` input names
+    it: the input when set ('none' included), else REQUIREMENTS_FILE when the checkout root (GITHUB_WORKSPACE) holds an
+    entry of that name, else ''."""
+    named = str(env.get('INPUT_REQUIREMENTS') or '').strip()
+    if named:
+        return named
+    workspace = str(env.get('GITHUB_WORKSPACE') or '').strip()
+    return REQUIREMENTS_FILE if workspace and os.path.lexists(os.path.join(workspace, REQUIREMENTS_FILE)) else ''
+
+
+def requirements_upload(env, cwd, goals=None, source=None, not_yet_ok=False):
     """serve-019 (coordination 2136): ({requirements?, repository?, commit?, provenance?}, notice or None). The text is
     the `requirements` input's file (relative to the working directory): one that is missing, unreadable, a link,
     not a regular file, beyond the bounds or not UTF-8 is `bad_input` before anything is collected or sent. The input
     `none` (NONE_SENTINEL) sends no text and prints no notice; a file named `none` is then reached as `./none`. Issue
-    #2174: with the input empty no text is sent and no notice is printed, whatever the repository root holds; the
-    upload is opt-in (name the file, e.g. `requirements.md`). GITHUB_REPOSITORY and the head commit (`_head_commit`)
+    #2174 (the Director, 18 Oct 2026: requirements.md is read by default): with the input empty, the checkout root's
+    requirements.md (GITHUB_WORKSPACE) is sent when it is a regular file within the bounds; a missing one is silent;
+    REFUTATION-034 F1: one that cannot be sent (a link, beyond the bounds, ...) is not sent, the check goes on, and the
+    notice says why (`skipped_notice`), so a file the operator never named never stops the run. GITHUB_REPOSITORY and the head commit (`_head_commit`)
     go as repository and commit with `provenance: runner`; the API reads them as metadata, never as authority.
     Issue #1186: a sent file with the draft's typed companion beside it goes through `typed_requirements`, and the
     notice then names the lines changed since they were compiled, if any; `goals`, a list when given, receives the
     goals sent, and `source`, a list when given, the requirements text as read, before any goal was expanded (issue
     #2651: the proof tree's goal lines). With goals sent, `requirement_goals` carries their goal map
     (`proof_tree.goal_map`: each goal's sentence, its line in the text as read and its children's ids and plain
-    sentences), which the API keeps with the check for its proof tree."""
+    sentences), which the API keeps with the check for its proof tree. Issue #4395: with `not_yet_ok` (python-auth's
+    checkout run), an input naming the repository-root requirements.md when no such entry exists sends no text and the
+    notice is NOT_YET_NOTICE; a link or any other unreadable file is refused as before."""
     out, notice, sent, text = {}, None, [], None
     named = _plain(env, 'INPUT_REQUIREMENTS')
+    root = Path(str(env.get('GITHUB_WORKSPACE') or '').strip() or cwd or os.getcwd())
     if named == NONE_SENTINEL:                       # REFUTATION-034-R2 N5: send no text, print no notice
         pass
+    elif named and not_yet_ok and not os.path.lexists(root / REQUIREMENTS_FILE) and os.path.realpath(
+            Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named) == os.path.realpath(
+            root / REQUIREMENTS_FILE):
+        notice = NOT_YET_NOTICE
     elif named:
         path = Path(named) if Path(named).is_absolute() else Path(cwd or os.getcwd()) / named
         text = _read_requirements(path)
         out['requirements'], notice, sent = typed_requirements(text, path.parent)
+    elif requirements_named(env) == REQUIREMENTS_FILE:     # issue #2174: read by default
+        workspace = Path(str(env.get('GITHUB_WORKSPACE')).strip())
+        try:
+            text = _read_requirements(workspace / REQUIREMENTS_FILE)
+        except Refusal as e:
+            kind = e.detail.get('kind', 'bounds')
+            why = e.reason.replace('requirements are ', '', 1).replace('requirements ', '', 1) \
+                if kind == 'bounds' else None        # "400 lines; the limit is 256", "line 3 is longer than ..."
+            notice = skipped_notice(kind, why)
+        else:
+            out['requirements'], notice, sent = typed_requirements(text, workspace)
     if sent and 'requirements' in out:       # issue #2651: the goal map, so the served proof tree shows the goals
         try:                                 # a map beyond the bounds is not sent; the check runs as before
             out['requirement_goals'] = bundle.check_goals(proof_tree.goal_map(sent, text), out['requirements'])
@@ -1061,13 +1150,15 @@ def parse_allow_partial(text):
 
 
 def parse_report(text, mode='api'):
-    """serve-014, DD-103: the `report` input: 'false' or '0' is False; 'true' or '1' is True (case-insensitive); else
-    bad_input. Unset or '' is 'auto' in api mode (readable-report-001, the Director, 18 Oct 2026: on by default for a
-    free account's first runs, within its free balance; `report_wanted` decides once the verdict says which account
-    it is) and False in every other mode."""
+    """serve-014, DD-103: the `report` input. Unset or '' is True in `api` mode: the plain-language report is on by
+    default (the Director, 18 Oct 2026, confirmed 20 Oct; #4994), reversing issue #2174's opt-in (the requirements
+    text is read by default too, the Director, 20 Oct 2026; #4441 carries it). Unset or '' is False in every other
+    mode: local and lint never ask for a report. `report_wanted` (readable-report-001) passes True through, so
+    the default asks on every plan. 'false' or '0' is False and 'true' or '1' is True in every mode
+    (case-insensitive); else bad_input."""
     v = (text or '').strip().lower()
     if v == '':
-        return 'auto' if mode == 'api' else False
+        return mode == 'api'
     if v in ('false', '0'):
         return False
     if v in ('true', '1'):
@@ -1148,9 +1239,14 @@ def _with_report(summary, report, url, first_checked_at=None, trace=None):
     line, and `trace` (`render.trace_line`) follows the report."""
     tail = _usage_tail(report, first_checked_at)
     if isinstance(report, dict) and report.get('status') == 'written':
-        head = summary.split('\n', 1)[0]
-        return (head + '\n\n' + render.report_markdown(report.get('body_md')) + '\n\n'
-                + (trace + '\n\n' if trace else '') + render.report_page_line(url) + '\n' + tail, 'written', url)
+        # #4624: keep the readable steps and agents' fold when a written report is added.
+        parts = [summary.rstrip('\n'), render.report_markdown(report.get('body_md'))]
+        appendix = render.report_markdown(report.get('appendix_md'))
+        if appendix:
+            parts.append(appendix)
+        if trace:                     # readable-report-001: the trace line follows the report
+            parts.append(trace)
+        return ('\n\n'.join(parts) + '\n\n' + render.report_page_line(url) + '\n' + tail, 'written', url)
     if isinstance(report, dict):
         fallback = report.get('fallback') if isinstance(report.get('fallback'), dict) else {}
         return (summary + '\n' + render.report_withheld_line(fallback.get('reason')) + '\n'
@@ -1752,7 +1848,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             say(decl_line)
         if state['mode'] != 'lint':      # assure-on-itself-001 (requirements.md A2): the refusal on the pull request too
             try:                         # never changes the failure file or the exit; pr_comment types its own faults
-                named = str(env.get('INPUT_REQUIREMENTS') or '').strip() not in ('', NONE_SENTINEL)
+                named = requirements_named(env) not in ('', NONE_SENTINEL)   # issue #2174: the default too
                 body = render.pr_refusal_markdown(doc, (state['requirements_text'] or [None])[0], step or None,
                                                   _head_commit(env), named=named, reason=not step)
                 pr_comment(None, body=body.split('\n', 1)[1].rstrip('\n'))
@@ -1902,7 +1998,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             say('Assure: %s written in the runner: %d repository file(s), commit %s, tree %s' % (
                 repository_manifest.NAME, len(written['files']), written['commit'], written['tree']))
 
-    def declaration(collected, where, target, checkout, data=None):
+    def declaration(collected, where, target, checkout, data=None, drafted=None):
         """serve-102 (DD-150, DD-156): python-auth with no declaration runs on a draft, bounded by it; on a pull
         request, a checkout's declaration that is not yet on the base branch is the same unaccepted draft. `data` is
         the checkout's bytes when the bundle holds them withheld (issue #2435)."""
@@ -1912,13 +2008,17 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if declaration_draft.NAME not in collected.files:
             repo = {n[len(repository_manifest.PREFIX):]: d for n, d in collected.files.items()
                     if n.startswith(repository_manifest.PREFIX)}
-            record = declaration_draft.draft(repo, client=state['client'],
-                                             library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
+            record = drafted if drafted is not None else declaration_draft.draft(
+                repo, client=state['client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
             data = declaration_draft.dumps(record['declaration'])
             collected.files[declaration_draft.NAME] = data
             state['draft'] = {'record': record, 'data': data, 'top': top, 'rel': rel}
             say('Assure: %s drafted in the runner from %d repository file(s); %d field(s) to confirm' % (
                 declaration_draft.NAME, len(repo), len(record['confirm'])))
+            # issue #4395: no requirements.md in the files read: a starter one goes in the same proposal
+            if checkout and declaration_draft.STARTER_PATH not in repo and record.get('stack', declaration_draft.STACK) \
+                    == declaration_draft.STACK:
+                state['draft']['starter'] = declaration_draft.starter_requirements(record['declaration'])
         elif checkout and declaration_draft.is_pull_request(env) and top is not None:
             # tri-state: True is a known match; False is a known absence; None is an unknown reading, bounded too
             on_base = declaration_draft.on_base(
@@ -1948,10 +2048,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 token = str(env.get('GITHUB_TOKEN') or '').strip()
                 github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token) if token else None
                 got = declaration_draft.propose(d['top'], d['rel'], d['data'], d['record'], env, tmp, github,
-                                                **d.get('words', {}))
+                                                **d.get('words', {}),
+                                                **({'starter': d['starter']} if d.get('starter') else {}))
                 told = 'proposed in pull request #%d (%s), from %s into the base branch (commit %s); merging it %s' % (
                     got['number'], got['url'] or 'no link returned', got['branch'], got['commit'][:12],
                     'commits the declaration' if d.get('observed') else 'accepts it')
+                if got.get('starter'):              # issue #4395
+                    told += '; it also proposes a starter %s' % declaration_draft.STARTER_PATH
                 state['proposed'] = True
                 state['proposal_number'] = got['number']        # issue #3118: the next step names it
             except Refusal as e:
@@ -1979,6 +2082,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if told.startswith('not proposed'):
                 md += commit_line(github, d)
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
+                if d.get('starter'):                # issue #4395: the starter, and its own one-click commit
+                    md += declaration_draft.starter_markdown(d['starter'])
+                    md += commit_line(github, dict(d, rel=declaration_draft.STARTER_PATH, data=d['starter']))
         return ('Assure: declaration: %s: %s' % (declaration_draft.BOUNDED, _cmd_data(told)), md,
                 declaration_draft.OUTPUT_BOUNDED + '\n')
 
@@ -2097,7 +2203,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if not _FAIL_ON_SHAPE.fullmatch(inputs['fail_on']):
             raise Refusal('bad_input', 'fail-on must be a short comma list of statuses, or never')
         upload, state['requirements_notice'] = requirements_upload(env, cwd, state['goals'],
-                                                                   state['requirements_text'])   # serve-019: before anything is sent
+                                                                   state['requirements_text'],   # serve-019: before anything is sent
+                                                                   not_yet_ok=bool(inputs.get('checkout')))
         if 'requirements' in upload and not state['compile_requirements']:   # issue #2252: sent only when off
             upload['compile_requirements'] = False
         if state['requirements_notice']:
@@ -2106,7 +2213,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         key = raw_key.strip() or oidc_sign_in(url)            # issue #1263: no api-key, the GitHub OIDC sign-in
         client = (client_factory or Client)(url, key)
         state['client'] = client
-        allow = allow_list(client.profiles(), inputs['profile'])
+        listing = client.profiles()
+        state['plan'] = listing.get('plan') if isinstance(listing, dict) else None   # the Director, 19 Oct 2026
+        allow = allow_list(listing, inputs['profile'])
         if inputs['scope'] is not None and allow.scope is None:     # serve-007 F2: refused before collection
             raise Refusal('bad_input', 'profile %s checks a fixed scope and takes no scope' % inputs['profile'],
                           malformation=malformation('scope_missing'))
@@ -2141,7 +2250,16 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
         elif inputs.get('checkout'):              # serve-102: python-auth from the checkout, in one step
             top = Path(env.get('GITHUB_WORKSPACE') or cwd)
-            collected, modes = repository_manifest.from_checkout(top, allow, lim, env)
+            drafted = {}
+
+            def plan_draft(repo, library_versions):         # the plan's app subset: drafted from the whole read
+                drafted['record'] = declaration_draft.draft(repo, client=state['client'],
+                                                            library_versions=library_versions)
+                return drafted['record']
+            collected, modes, subset = repository_manifest.checkout_for_plan(top, allow, lim, env, draft=plan_draft)
+            if subset is not None:
+                state['subset'] = subset
+                say('Assure: ' + subset_line(subset, (state.get('plan') or {}).get('tier')))
             line = repository_manifest.bound_line(top, collected.files, lim.file_bytes)
             if line is not None:                  # issue #3841: the declaration bounds what leaves the runner
                 say(line)
@@ -2150,7 +2268,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if os.path.isfile(target) and not os.path.islink(target):
                 collected.files[declaration_draft.NAME] = target.read_bytes()
             manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
-            declaration(collected, top, target, checkout=True)
+            declaration(collected, top, target, checkout=True, drafted=drafted.get('record'))
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             art = art if art.is_absolute() else Path(cwd) / art
@@ -2223,6 +2341,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS or not str(env.get('GITHUB_TOKEN') or '').strip():
             return
         try:
+            if kw.get('body') is None:
+                kw['setup'] = setup_run(env, cwd)           # F10: the setup run's broken rules are in your code
             post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
                                                  str(env.get('GITHUB_TOKEN')).strip()), **kw)
         except Refusal as e:
@@ -2283,7 +2403,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
             inputs_profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
         except Refusal as e:
-            return failed(e)
+            return failed(with_plan_line(e, state.get('plan')))
         except Exception as e:  # typed, never a traceback; the class name only, never a value
             outcome = 'api_error' if state['mode'] == 'api' else 'checker_error'
             return failed(Refusal(outcome, 'the Action failed unexpectedly (%s)' % type(e).__name__))
@@ -2326,6 +2446,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         return failed(Refusal(unrenderable, 'the verdict could not be rendered (%s)' % type(e).__name__))
     observed_draft(verdict)                                     # issue #2934: proposed like the declared draft
     decl_line, decl_md, decl_out = declaration_note(verdict=True)   # serve-102: the draft bounds this verdict
+    subset_lead = subset_line(state['subset'], (state.get('plan') or {}).get('tier')) if state.get('subset') else None
+    if subset_lead:                     # the plan's app subset: what was checked, first after the upgrade line
+        up = render.upgrade_markdown(verdict)
+        rest = summary[len(up):] if up and summary.startswith(up) else summary
+        summary = up + '**' + render.esc(subset_lead) + '**\n\n' + rest
     summary += decl_md + state['kept_md']                       # committed values this run read differently, kept
     summary += declaration_draft.intent_markdown(inputs_profile, drafted=state['draft'] is not None)   # issue #2926
     both = None
@@ -2422,7 +2547,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say('::notice title=Assure::%s' % _cmd_data('Assure: ' + both, cap=None))
     client = state.get('client')
     pr_comment(verdict, tree=pr_tree(verdict, state['tree']),
-               tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()),
+               tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()), lead=subset_lead,
                report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name)
     for line in notes:
         say(line)

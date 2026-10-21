@@ -43,7 +43,7 @@ red: 8 of 8 machines read; declared premises: none (observed profile); version p
 The declared profile on the same image (the proof fixture's recorded readings), `fail-on: fails`. Three of eight machines were read and none of their 15 obligations holds, so the line says in words that nothing could be established, then the action that would establish the most frequent kind of gap.
 
 ```text
-green: 3 of 8 machines read, 5 refused; declared premises: 0; version pins: none; nothing could be established (0 of 15 obligations hold); not established: 15 — top action: collect the facts REP-1 reads
+green: 3 of 8 machines read, 5 refused; declared premises: 0; version pins: none; nothing could be established (0 of 15 obligations hold); not established: 15 — top action: collect the facts Each standby connects as a dedicated replication login (REP-1) reads
 ```
 
 ## What each colour means, per profile

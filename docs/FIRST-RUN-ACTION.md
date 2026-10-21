@@ -122,13 +122,13 @@ The summary lists every reading under its status, with its text. The verdict fil
 
 The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days; on the Premium tier a sealed copy of the collected facts is kept for the formal shadow (see [DATA.md](DATA.md)).
 
-With no inputs the Action uploads no `requirements.md`, and asks for the report only when the verdict says your account is on the free plan with its free balance not spent; the report sends the verdict's record to a third-party model, which keeps none of it (zero data retention; "The report"). Set `report: false` to keep the record from the model, set `report: true` to ask for the report on a paid plan, and name the file in the `requirements` input (for example `requirements: requirements.md`) to send its text. To turn either on, add it under `with:` in step 4:
+The report is on by default in `mode: api`: after a verdict the Action asks for it, which sends the verdict record (never your files) through OpenRouter to a model, asking for zero data retention, and `report: false` turns it off; the Action reads the repository-root `requirements.md` by default and sends its text, your own promises; name another file in the `requirements` input, or set `requirements: none` to send none. To turn either off, add it under `with:` in step 4:
 
 ```yaml
-          report: true
-          requirements: requirements.md
+          report: false
+          requirements: none
 ```
 
-In `mode: api` the Action also sends your repository name and the commit; the server keeps them, and any requirements text you send, with the check for 30 days.
+In `mode: api` the Action also sends your repository name and the commit; the server keeps them, and any requirements text it sends, with the check for 30 days.
 
 For more detail, see [QUICKSTART-ACTION.md](QUICKSTART-ACTION.md), "What is sent, and what is never read", "6. Managed PostgreSQL and configuration files" (for managed servers, poolers and configuration files) and "7. The fail-on policy and exit codes".
