@@ -2265,8 +2265,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 say(line)
             collected = withhold.apply(collected, allow)
             target = top / declaration_draft.CHECKOUT_PATH
-            if os.path.isfile(target) and not os.path.islink(target):
-                collected.files[declaration_draft.NAME] = target.read_bytes()
+            checked = repository_manifest.checkout_path(top, declaration_draft.CHECKOUT_PATH)   # issue #5736
+            if isinstance(checked, Path):
+                collected.files[declaration_draft.NAME] = checked.read_bytes()
             manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
             declaration(collected, top, target, checkout=True, drafted=drafted.get('record'))
         elif inputs['artefacts']:

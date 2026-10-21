@@ -65,7 +65,9 @@ For `python-auth-declared-model` the Action sends Python source files and `requi
 
 Your tests, fixtures, vendored libraries and virtual environments are never needed for the check. Keep them outside the folders you name, and they stay in your runner.
 
-**Setup by an agent (`POST /v1/setup`).** Before the first workflow run, an agent can ask Assure to draft the setup. The `assure` skill asks you first, then sends the Python files and dependency files the drafter reads, with `requirements.md` if there is one, and nothing else from your repository. The server drafts in a separate process from what it receives and answers with the declaration, `requirements.md` and the workflow. It writes no file, keeps no copy of what you sent and charges nothing. The request log keeps its one line for the call (below), under the account name `keyless`. Your address is held only in memory, for the minute rate limit.
+A tracked file the Action would reach through a symbolic link (the file itself, or a folder above it), or one that resolves outside your repository, is never opened or sent, and its contents are not read for `raw/LIBRARY-VERSIONS.json` either; the job log lists it among the names not read.
+
+**Setup by an agent (`POST /v1/setup`).** Before the first workflow run, an agent can ask Assure to draft the setup. The `assure` skill asks you first, then sends the Python files and dependency files the drafter reads, with `requirements.md` if there is one, and nothing else from your repository. The server drafts in a separate process from what it receives and answers with the declaration, `requirements.md` and the workflow. It writes no file, keeps no copy of what you sent and charges nothing. The request log keeps its one line for the call (below), under the account name `keyless`. Your address is held only in memory, for the minute rate limit. That one question is the only one: it also names the routes the setup treats as public, and your yes covers sending the files, those routes and opening the setup pull request, which you review and merge.
 
 Each plan sets how much one check may send:
 

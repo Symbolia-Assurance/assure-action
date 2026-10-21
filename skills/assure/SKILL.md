@@ -1,17 +1,17 @@
 ---
 name: assure
-description: Set up Assure on a GitHub repository so every pull request is checked. Assure checks the software your code runs on. One workflow file, no key to store.
+description: Set up Assure on a GitHub repository so every pull request is checked. One workflow file, no key to store.
 ---
 
 # Assure
 
-Assure checks the software your code runs on. Every pull request gets a comment: what the change breaks, what holds, what was not checked.
+Assure checks the software your code runs on. Every pull request gets a comment.
 
 BASE is `https://api.symbolia.ai` unless the person or the environment (`ASSURE_API`) names another.
 
 ## 1. Detect the stack
 
-Read the repository and pick one check:
+Pick one check:
 
 - **A Flask, FastAPI or Django app:** the sign-in check, `python-auth-declared-model`. Free; it never runs your code. Steps 2 to 4.
 - **A PostgreSQL database the app uses:** `postgresql-observed-baseline`, from a connection or a CI database. Skip to step 5.
@@ -23,10 +23,10 @@ Standard-library http.server: the same check with a declaration you write (refer
 
 Pick the files the drafter reads: Python files, except tests (tests/ and test/ folders, test_x.py, x_test.py, conftest.py), docs/, migrations/, virtual environments and vendored code; the dependency files (requirements.txt, pyproject.toml, lock files); requirements.md if there is one. Count them and their bytes. If the request would pass 6 MiB (base64 adds a third), send nothing: use the fallback.
 
-Ask the person once:
+LIST: each route with no sign-in guard (method, path). Ask the person once:
 
 ```text
-Assure drafts your setup from your app's Python files. Send N files (X KB) to BASE? Nothing else leaves the repo. (DATA.md)
+Send N files (X KB) to BASE? Later runs send only what DATA.md lists. Public: LIST; every other route needs sign-in. One yes sets up and opens a pull request. Yes, or edit the list?
 ```
 
 No: send nothing; offer the fallback (its first run sends these files from the runner). Yes: POST this JSON to BASE/v1/setup, with no key. For FastAPI or Django, add the key stack, python/fastapi or python/django. At most 10 calls a minute from one address.
@@ -46,19 +46,13 @@ setup.requirements.text -> setup.requirements.path (requirements.md)
 setup.workflow.text     -> setup.workflow.path (.github/workflows/assure.yml)
 ```
 
-If setup.requirements is null, keep the repository's own requirements.md. Under the Assure step's `with:`, add `report: true` (a plain report of each verdict, DATA.md; on by default in api mode, `report: false` turns it off; requirements.md is read by default, `requirements: none` turns that off), and `api-url` with BASE if BASE is not the default. Change `main` if the default branch has another name. Never give the Assure job the name of a required status check: it would stand in for that check.
+If setup.requirements is null, keep the repository's own requirements.md. Under the Assure step's `with:`, add `report: true` (a plain report of each verdict, DATA.md; on by default in api mode, `report: false` turns it off; requirements.md is read by default, `requirements: none` turns that off), and `api-url` with BASE if BASE is not the default. Change `main` if the default branch has another name. Never give the Assure job the name of a required status check.
 
-## 4. Confirm the public routes, then open the pull request
+## 4. Open the pull request
 
-Show the person one list: declaration.public_routes, each to_confirm row (method, path, note), and every other route you find with no sign-in guard. Ask once:
+Ask nothing more. LIST, with their edits, goes into declaration.public_routes. Each to_confirm row (method, path, note) is applied by default and listed in the pull request body. Do not ask about requirements.md: the workflow names it.
 
-```text
-These routes are public; every other route needs sign-in. Yes, or edit the list?
-```
-
-Write their edits into public_routes. Do not ask about requirements.md: the workflow names it.
-
-Commit the three files on a new branch and open a pull request with your own GitHub access (gh pr create). No repository setting changes. Fix any other field confirm lists, at the file and line sources gives. Then merge.
+Commit the three files on a new branch and open a pull request with your own GitHub access (gh pr create). No repository setting changes. Fix any other field confirm lists, at the file and line sources gives. After the first Assure comment, give the person the link and its first line, and stop. Never merge: the person reviews and merges.
 
 | Omitted | Default |
 |---|---|
@@ -70,7 +64,7 @@ Commit the three files on a new branch and open a pull request with your own Git
 
 - **PostgreSQL only: the connection.** They create a read-only role and store the connection as the secret `ASSURE_PG_CONNECTION` (references/postgres.md, sections 2 and 3). Show each command; they run it. Yes: Assure reads settings, roles and policies, never table contents. No: check the CI database, or skip the database.
 
-Then write the workflow in references/postgres.md, section 4, pinned as the workflow at the end, and open its pull request as in step 4. The runner must reach the database. A private database: by default, the one your migrations build in CI (references/postgres.md, section 4), or collect it and pass the folder as `artefacts` in place of `connection` (references/postgres-local.md).
+Then write the workflow in references/postgres.md, section 4, pinned as the workflow at the end, and open its pull request as in step 4. A private database: by default, the one your migrations build in CI (references/postgres.md, section 4), or collect it and pass the folder as `artefacts` in place of `connection` (references/postgres-local.md).
 
 Ask nothing else. Sign-in uses the workflow's GitHub identity: no key. If the repository requires SHA pins, pin the commit `@beta` resolves to (references/running.md).
 
@@ -81,7 +75,7 @@ Success: the next pull request gets a comment from Assure, headed "Assure: N rul
 If a run stops, read the first line of its job summary.
 
 - **Red:** a rule this change breaks.
-- **Yellow:** Assure could not read part of the app or the setup. If it names the setup, fix that and push again. If it names your code, that is Assure's gap: do not rewrite working code or silence the job. Ask the contribution question (references/agent.md). Send the summary's first line as feedback (references/feedback.md) on a yes, and tell the person.
+- **Yellow:** Assure could not read part of the app or the setup. If it names the setup, fix that and push again. If it names your code, that is Assure's gap: do not rewrite working code or silence the job. Ask the contribution question (references/agent.md). At most one more question: every gap of that run in one message, with the coverage note. Send the summary's first line as feedback (references/feedback.md) on a yes, and tell the person.
 
 Never commit `mode: lint`: a lint run checks nothing. Never store a key or guess a commit.
 
@@ -121,7 +115,7 @@ jobs:
           # requirements: requirements.md   # once you have one
 ```
 
-Its first run opens `Assure: proposed intent — review and merge to accept`. GitHub may hold its check until someone clicks **Approve and run**; ask the person to. Review and merge it as in step 4.
+Its first run opens `Assure: proposed intent — review and merge to accept`. GitHub may hold its check until someone clicks **Approve and run**; ask the person to, then stop: they review and merge it.
 
 ## References
 

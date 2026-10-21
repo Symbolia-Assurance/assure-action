@@ -382,10 +382,41 @@ def library_versions_bytes(record):
     return (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
 
 
+#: checkout_path's answer for a path absent from the working tree (deleted after it was tracked): skipped as before.
+ABSENT = 'absent'
+
+
+def checkout_path(top, rel):
+    """Issue #5736 (with #5727's codex-journey 3272): the path to open tracked file `rel` at, never through a link and
+    never outside the checkout. Every component under the resolved checkout root is lstat'ed: none may be a link (the
+    file, or any directory above it), each one above it must be a directory and the file a regular file, and its
+    resolved path must lie inside the resolved root. Returns a Path to read, ABSENT when a component does not exist,
+    or None to refuse `rel` by name. Nothing is followed."""
+    root = os.path.realpath(top)
+    cur, parts, st = root, rel.split('/'), None
+    if any(p in ('', '.', '..') for p in parts):
+        return None
+    for i, part in enumerate(parts):
+        cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            return ABSENT
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode) or (i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode)):
+            return None
+    if st is None or not stat.S_ISREG(st.st_mode) or not os.path.realpath(cur).startswith(root + os.sep):
+        return None
+    return Path(cur)
+
+
 def _declaration(top, cap):
     """The checkout's `.assure/declaration.json` under `top` as a JSON object; None when absent, a link, over `cap`
     bytes or not a JSON object."""
-    path = Path(top) / CHECKOUT_DECLARATION
+    path = checkout_path(top, CHECKOUT_DECLARATION)      # issue #5736: never through a linked `.assure`
+    if not isinstance(path, Path):
+        return None
     try:
         st = os.lstat(path)
         if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
@@ -494,7 +525,7 @@ class Bound:
             if rel in seen:
                 continue
             seen.add(rel)
-            for kind, value in _config_loads_in(Path(top) / rel, cap):
+            for kind, value in _config_loads_in(checkout_path(top, rel), cap):
                 for cand in _config_candidates(kind, value, dirs):
                     if cand in tset and not self.keeps(cand):
                         self.loaded.add(cand)
@@ -515,7 +546,7 @@ class Bound:
             if rel in seen:
                 continue
             seen.add(rel)
-            for cand in _import_candidates(Path(top) / rel, rel, search, cap):
+            for cand in _import_candidates(checkout_path(top, rel), rel, search, cap):
                 if cand in tset and not self.keeps(cand):
                     self.loaded.add(cand)
                     todo.append(cand)
@@ -539,7 +570,10 @@ _IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 
 def _config_loads_in(path, cap):
-    """(loader, literal) for each `<x>.from_object("...")` / `<x>.from_pyfile("...")` in the module at `path`."""
+    """(loader, literal) for each `<x>.from_object("...")` / `<x>.from_pyfile("...")` in the module at `path`
+    (`checkout_path`'s answer: anything but a checked Path is not opened, issue #5736)."""
+    if not isinstance(path, Path):
+        return []
     try:
         st = os.lstat(path)
         if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
@@ -594,7 +628,10 @@ def _module_paths(base, parts):
 
 
 def _import_candidates(path, rel, search, cap):
-    """The repository paths the imports of the module at `path` (`rel` in the checkout) may load."""
+    """The repository paths the imports of the module at `path` (`rel` in the checkout) may load. `path` is
+    `checkout_path`'s answer: anything but a checked Path is not opened (issue #5736)."""
+    if not isinstance(path, Path):
+        return set()
     try:
         st = os.lstat(path)
         if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
@@ -749,7 +786,12 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         except Refusal:
             out.ignored.append(name)
             continue
-        full = Path(top) / rel
+        full = checkout_path(top, rel)
+        if full is ABSENT:
+            continue
+        if full is None:                         # issue #5736: a link on its path, or outside the checkout
+            out.ignored.append(name)
+            continue
         try:
             st = os.lstat(full)
         except OSError:
@@ -777,7 +819,9 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         modes[rel] = mode
     read = {}
     for rel in locks:
-        full = Path(top) / rel
+        full = checkout_path(top, rel)           # issue #5736: the derived record reads no file through a link
+        if not isinstance(full, Path):
+            continue
         try:
             st = os.lstat(full)
         except OSError:
@@ -874,7 +918,9 @@ def app_subset_roots(top, tracked, cap):
     for rel in sorted(tracked):
         if not rel.endswith('.py') or _skipped(rel):
             continue
-        path = Path(top) / rel
+        path = checkout_path(top, rel)          # issue #5736: never parsed through a link
+        if not isinstance(path, Path):
+            continue
         try:
             st = os.lstat(path)
             if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
@@ -933,8 +979,11 @@ def checkout_for_plan(top, allow, limits, env, *, draft):
     tracked = _tracked_python(_ls_files(top, env))
     whole = 0
     for rel in tracked:
+        checked = checkout_path(top, rel)        # issue #5736: the whole-checkout size counts only checked files
+        if not isinstance(checked, Path):
+            continue
         try:
-            st = os.lstat(Path(top) / rel)
+            st = os.lstat(checked)
         except OSError:
             continue
         if stat.S_ISREG(st.st_mode):

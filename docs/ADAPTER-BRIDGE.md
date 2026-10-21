@@ -61,6 +61,8 @@ The bridge names things. It never says that a route is protected: Assure reads t
 
 Any disagreement is a fault. A fault refuses the check: the run reads yellow, names the rule and the place, and never reads as holding.
 
+If the next step names a shape this contract cannot map, [Extend Assure's coverage](EXTEND-COVERAGE.md) compares a coverage request with the bridge and a supported configuration premise. Keep the refused reading until its named gap is resolved.
+
 ## Faults
 
 Each fault names its rule, the file and line or the field, what Assure expected and what it found.
