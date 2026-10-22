@@ -65,7 +65,7 @@ collected/
 
 ```yaml
       - name: Check declared database intent
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-declared-model

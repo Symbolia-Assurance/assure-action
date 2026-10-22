@@ -66,7 +66,7 @@ Commit on a new branch; open a pull request with your own GitHub access. No repo
 
 Use references/postgres.md, section 4; open its pull request (step 4). For a private database, prefer the one migrations build in CI or collect it and pass the folder as `artefacts` in place of `connection` (references/postgres-local.md).
 
-Ask nothing else. Use GitHub identity: no key. For SHA pins, pin the commit `@beta` resolves to (references/running.md).
+Ask nothing else. Use GitHub identity: no key. For SHA pins, pin the commit `@v0` resolves to (references/running.md).
 
 ## 6. Every pull request gets a comment
 
@@ -81,9 +81,9 @@ Never commit `mode: lint`: a lint run checks nothing. Never store a key or guess
 
 ## Fallback: the setup draft is not served
 
-Use it after a 404 (`not_found`) from POST /v1/setup or files over its limit, only after the data yes in step 2. Without app_roots, the first run sends all tracked Python, root requirements.md, records and Django/FastAPI pins (DATA.md); Flask dependency files stay local. Keep LIST. After data yes, ask about workflow permission:
+Use it after a 404 (`not_found`) from POST /v1/setup or files over its limit, only after the data yes in step 2. Without app_roots, the first run sends all tracked Python, root requirements.md, records, Django/FastAPI pins and Flask's non-lock dependency files (DATA.md). Keep LIST. After data yes, ask about workflow permission:
 
-- **Let GitHub Actions open pull requests?** Settings, Actions, General: "Allow GitHub Actions to create and approve pull requests". Yes: Assure opens it. No: the job summary carries the drafts and a Commit this draft link instead, and checks still run.
+- **Let GitHub Actions open pull requests?** Ask only when Settings, Actions, General: "Allow GitHub Actions to create and approve pull requests" is off, read with `gh api repos/{owner}/{repo}/actions/permissions/workflow`. Yes: turn it on with `gh api -X PUT repos/{owner}/{repo}/actions/permissions/workflow -F can_approve_pull_request_reviews=true`; Assure opens it. No: the job summary carries the drafts and a Commit this draft link instead, and checks still run.
 
 This is GitHub permission, not data consent. A data no permits no sending workflow. After a data yes, push this workflow; once merged, set `contents: read`.
 
@@ -108,7 +108,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.14"
-      - uses: Symbolia-Assurance/assure-action@beta
+      - uses: Symbolia-Assurance/assure-action@v0
         with:
           profile: python-auth-declared-model
           report: true
@@ -128,6 +128,6 @@ When permitted, the first run opens `Assure: proposed intent — review and merg
 - [adapter-bridge.md](references/adapter-bridge.md)
 - [running.md](references/running.md)
 - [results.md](references/results.md)
-- [feedback.md](references/feedback.md)
+- [feedback.md](references/feedback.md): one JSON object, or a JSON list of up to 10 objects
 - [references/coverage.md](references/coverage.md)
 - [agent.md](references/agent.md)

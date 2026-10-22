@@ -1,0 +1,1075 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Assure check answer",
+  "version": "1",
+  "description": "Focused description of the check answer: POST /v1/checks and GET /v1/checks/{check_id}, and the profile listing they take their profile ids and file names from, GET /v1/profiles (issue #2072), and the free pre-flight POST /v1/lint. The verdict's own fields are described in VERDICTS.md; this contract names the envelope and the optional upgrade object a free account's answer can carry."
+ },
+ "servers": [
+  {
+   "url": "https://api.symbolia.ai"
+  }
+ ],
+ "security": [
+  {
+   "bearerAuth": []
+  }
+ ],
+ "paths": {
+  "/v1/checks": {
+   "post": {
+    "operationId": "submitCheck",
+    "description": "Submit collected files for one profile (QUICKSTART-API.md, section 4). 200 with the verdict when the check finishes within 20 seconds of the request (its upload and admission included; an admission past 19.5 seconds leaves the check half a second), else 202 with the check id to poll.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Verdict"
+     },
+     "202": {
+      "$ref": "#/components/responses/Running"
+     },
+     "default": {
+      "$ref": "#/components/responses/Failure"
+     }
+    }
+   }
+  },
+  "/v1/checks/{check_id}": {
+   "get": {
+    "operationId": "getCheck",
+    "parameters": [
+     {
+      "name": "check_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^[0-9a-f]{32}$"
+      }
+     }
+    ],
+    "description": "The verdict of one of your checks, readable for 30 days; 202 while it runs.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Verdict"
+     },
+     "202": {
+      "$ref": "#/components/responses/Running"
+     },
+     "default": {
+      "$ref": "#/components/responses/Failure"
+     }
+    }
+   }
+  },
+  "/v1/profiles": {
+   "get": {
+    "operationId": "listProfiles",
+    "parameters": [
+     {
+      "name": "request_bytes",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "description": "The size pre-check (QUICKSTART-API.md, section 7): the byte count of the encoded body you are about to send to POST /v1/checks or POST /v1/declaration-proposal. Over your plan's limit the answer is the oversize_input refusal (413) that body would get, before any of it is sent; within it, the listing."
+     }
+    ],
+    "description": "The served profiles, each with its input allow-list, byte caps and fail_on words, plus the global limits, the engine that answers, the planned profiles not served and the route table (QUICKSTART-API.md, section 6, the GET /v1/profiles row). Free.",
+    "responses": {
+     "200": {
+      "description": "The profile listing",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ProfileListing"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Failure"
+     }
+    }
+   }
+  },
+  "/v1/lint": {
+   "post": {
+    "operationId": "lintUpload",
+    "description": "The free pre-flight of an upload (QUICKSTART-API.md, section 6, the POST /v1/lint row): the body of POST /v1/checks, with the same optional fail_on and allow_partial query. It runs the checks that come before a check is admitted and answers 200 with the lint record; each problem lint finds in the upload is a finding in that record. It never runs a check, a model or a provider and is never charged. A body over the size limit is oversize_input (413) and a missing key is 401.",
+    "parameters": [
+     {
+      "name": "fail_on",
+      "in": "query",
+      "required": false,
+      "description": "As for POST /v1/checks: one of the words fail_on.accepted lists for the profile (GET /v1/profiles).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "allow_partial",
+      "in": "query",
+      "required": false,
+      "description": "As for POST /v1/checks.",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "description": "The body of POST /v1/checks (QUICKSTART-API.md, section 4): the profile id, the collected files and, for a profile whose scope you select, scope and scope_binding.",
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The lint record (serve/lint.py; VERDICTS.md section 11)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/LintRecord"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Failure"
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "bearerAuth": {
+    "type": "http",
+    "scheme": "bearer"
+   }
+  },
+  "responses": {
+   "Verdict": {
+    "description": "The check finished",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Verdict"
+      }
+     }
+    }
+   },
+   "Running": {
+    "description": "The check is still running",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Running"
+      }
+     }
+    }
+   },
+   "Failure": {
+    "description": "A typed outcome (QUICKSTART-API.md, section 9)",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Failure"
+      }
+     }
+    }
+   }
+  },
+  "schemas": {
+   "Verdict": {
+    "type": "object",
+    "required": [
+     "schema",
+     "check_id",
+     "profile",
+     "outcome",
+     "policy"
+    ],
+    "additionalProperties": true,
+    "description": "The verdict envelope (VERDICTS.md). Fields not listed here are described there.",
+    "properties": {
+     "charged": {
+      "type": "boolean",
+      "description": "The check accounting flag on newly written server answers. Historical stored answers may omit it; a read-back preserves their bytes."
+     },
+     "schema": {
+      "const": "assure.serve.verdict/v1"
+     },
+     "check_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+     },
+     "profile": {
+      "type": "string"
+     },
+     "outcome": {
+      "type": "string"
+     },
+     "policy": {
+      "type": "object",
+      "required": [
+       "exit"
+      ],
+      "properties": {
+       "exit": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 125
+       },
+       "fail_on": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "reason": {
+        "type": "string"
+       }
+      }
+     },
+     "upgrade": {
+      "$ref": "#/components/schemas/Upgrade"
+     },
+     "not_established": {
+      "type": "array",
+      "description": "One entry per obligation not established (VERDICTS.md section 9).",
+      "items": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "because": {
+         "type": "object",
+         "required": [
+          "gate",
+          "premise",
+          "source"
+         ],
+         "description": "Issue #1813, on postgresql-observed-baseline and python-auth-declared-model: which input sent the entry here. gate machine: the machine was refused or not read (premise the refusal reason, source the raw file it names); gate reading: the reading was not established (premise the declaration field or unobserved premise, an informational premise skipped, source raw/declaration.json#<field> or the raw file). A part nothing names is null.",
+         "properties": {
+          "gate": {
+           "enum": [
+            "machine",
+            "reading"
+           ]
+          },
+          "premise": {
+           "type": [
+            "string",
+            "null"
+           ]
+          },
+          "source": {
+           "type": [
+            "string",
+            "null"
+           ]
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "Upgrade": {
+    "type": "object",
+    "required": [
+     "url",
+     "line"
+    ],
+    "additionalProperties": false,
+    "description": "Present only when the account is on the free plan and the server has a Premium payment link, or when a gifted plan ends within 30 days and the server has that link. Absent on every other paid plan; its presence changes no other field. The Action prints it as the first line of the job summary.",
+    "properties": {
+     "url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://buy\\.stripe\\.com/",
+      "description": "The Premium Stripe Payment Link with your account id, URL-encoded, as client_reference_id"
+     },
+     "line": {
+      "type": "string",
+      "description": "One plain sentence that ends with url"
+     },
+     "notice": {
+      "type": "string",
+      "description": "Present only when the free plan's USD 1 balance, shared by reports and requirement compiling, is spent, or when a gifted plan ends within 30 days (\"Your gifted Premium plan ends on <date>.\", and line is \"To keep it, upgrade at <url>\"): one plain sentence, printed at the start of the upgrade line"
+     }
+    },
+    "example": {
+     "url": "https://buy.stripe.com/<link id>?client_reference_id=gh-acme",
+     "line": "The proof tree for this run is on Assure Premium. Upgrade for USD 20 a month to see it: https://buy.stripe.com/<link id>?client_reference_id=gh-acme"
+    }
+   },
+   "Running": {
+    "type": "object",
+    "required": [
+     "check_id",
+     "status"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "check_id": {
+      "type": "string"
+     },
+     "status": {
+      "const": "running"
+     }
+    }
+   },
+   "Failure": {
+    "type": "object",
+    "required": [
+     "schema",
+     "outcome",
+     "reason",
+     "action"
+    ],
+    "additionalProperties": true,
+    "properties": {
+     "charged": {
+      "type": "boolean",
+      "description": "The check accounting flag on newly written server answers. Historical stored answers may omit it; a read-back preserves their bytes."
+     },
+     "upgrade": {
+      "$ref": "#/components/schemas/Upgrade",
+      "description": "Issue #4577: present only on a free account's allowance_exhausted refusal with detail.rule once_balance (a quote past what is left of its free USD 1) when the server has a Premium payment link, with notice when detail.allowance_remaining is 0 or less; the Action prints it in the job summary and the pull request comment."
+     },
+     "schema": {
+      "const": "assure.serve.failure/v1"
+     },
+     "request_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "The X-Request-Id of the request, on a refusal answered before a check was admitted (check_id null; issue #1101); absent when the envelope names a check_id."
+     },
+     "detail": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "served_from": {
+        "enum": [
+         "handler",
+         "store"
+        ],
+        "description": "Where the API served this failure from (issue #1665): handler when minted while answering this request, store when it is the admitted check's stored failure, first answered or read back."
+       }
+      }
+     },
+     "outcome": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "action": {
+      "type": "string"
+     },
+     "build": {
+      "type": "object",
+      "required": [
+       "commit",
+       "release_sha256",
+       "checkers_sha256"
+      ],
+      "properties": {
+       "commit": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "release_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "checkers_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "description": "Issue #1100: every freshly API-built refusal carries the serving engine's identity, including checker_error that refuses a development verdict; never copy the refused development block, kind or tree_sha256. Exactly commit, release_sha256 and checkers_sha256, the three keys of a verdict's engine block; all three are null if the engine pin fails verification. Compare build.commit first. Historical stored and non-API failures can omit this optional outer property and remain as originally written.",
+      "additionalProperties": false
+     }
+    }
+   },
+   "ProfileListing": {
+    "type": "object",
+    "required": [
+     "profiles",
+     "limits",
+     "engine",
+     "not_served",
+     "routes",
+     "image"
+    ],
+    "additionalProperties": true,
+    "description": "The GET /v1/profiles answer (serve/api.py public_profiles). Keys not listed here may be added; none listed is removed.",
+    "properties": {
+     "build": {
+      "type": "object",
+      "required": [
+       "commit",
+       "release_sha256",
+       "checkers_sha256"
+      ],
+      "properties": {
+       "commit": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "release_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "checkers_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "description": "Issue #1100: the top-level serving engine identity, exactly commit, release_sha256 and checkers_sha256, the three keys of a verdict's engine block. Compare build.commit first to distinguish a deploy lag from a changed answer. All three values are null if the engine pin cannot be verified; no kind or tree_sha256 is served here. This block is beside profiles and limits and changes no profile row.",
+      "additionalProperties": false
+     },
+     "profiles": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/ProfileRow"
+      }
+     },
+     "limits": {
+      "type": "object",
+      "required": [
+       "body_bytes",
+       "file_bytes",
+       "files",
+       "json_depth"
+      ],
+      "additionalProperties": true,
+      "properties": {
+       "body_bytes": {
+        "type": "integer",
+        "description": "The encoded request body your plan reads on POST /v1/checks and POST /v1/lint: Free 6 MiB, Premium 24 MiB, Pro 64 MiB."
+       },
+       "file_bytes": {
+        "type": "integer"
+       },
+       "files": {
+        "type": "integer"
+       },
+       "json_depth": {
+        "type": "integer"
+       }
+      }
+     },
+     "engine": {
+      "type": "object",
+      "description": "{commit, release}: the build that answers; both null while /healthz answers 503 engine_digest_mismatch."
+     },
+     "not_served": {
+      "type": "array",
+      "description": "[{id, stack, waits_on}]: the planned profiles this server knows about and does not serve."
+     },
+     "routes": {
+      "type": "array",
+      "description": "[{template, methods, free, rate_window, reads}]: the route table this server matches."
+     },
+     "image": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "description": "{files, manifest_sha256} of the built tree the server runs from, or null in a checkout."
+     },
+     "served": {
+      "type": "object",
+      "description": "Bounded possible statuses per obligation, keyed by served profile id. Obligations follow the profile order and reachable statuses follow its precedence order. Profiles without computable obligations are omitted.",
+      "additionalProperties": {
+       "type": "object",
+       "required": [
+        "obligations"
+       ],
+       "properties": {
+        "obligations": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "required": [
+           "id",
+           "reachable"
+          ],
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "reachable": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "plan": {
+      "type": "object",
+      "description": "The account's plan and the request body it reads (the Director, 19 Oct 2026: Free 6 MiB, Premium 24 MiB, Pro 64 MiB); input_bytes equals limits.body_bytes.",
+      "properties": {
+       "tier": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "input_bytes": {
+        "type": "integer"
+       }
+      }
+     }
+    }
+   },
+   "ProfileRow": {
+    "type": "object",
+    "required": [
+     "id",
+     "version",
+     "inputs",
+     "fail_on",
+     "bias_default",
+     "bias_classes",
+     "obligations",
+     "collector_pin",
+     "progress_notes",
+     "stacks"
+    ],
+    "additionalProperties": true,
+    "description": "One served profile. The postgresql-declared-model row is pinned byte for byte (DIGEST-BASE) and carries stacks (issue #2650) but none of readings_shape, profile_sha256, collector, checker or docs. Keys not listed here may be added.",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "version": {
+      "description": "The profile row's version."
+     },
+     "inputs": {
+      "type": "object",
+      "required": [
+       "required",
+       "optional"
+      ],
+      "description": "required: [{path, max_bytes}]; optional: [{path or pattern, max_bytes}]. A pattern must match the whole name."
+     },
+     "fail_on": {
+      "type": "object",
+      "required": [
+       "accepted",
+       "default",
+       "not_collected"
+      ],
+      "properties": {
+       "excluded_by_design": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        },
+        "description": "The statuses the profile can emit that not_collected leaves out by design (needs_intent); absent from the postgresql-declared-model row."
+       }
+      },
+      "description": "The words ?fail_on= takes for this profile, the default, the statuses not collected and the statuses excluded by design."
+     },
+     "bias_default": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "refute or prove, or null when the checker declares no bias classes."
+     },
+     "bias_classes": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "obligations": {
+      "type": "array",
+      "description": "[{id, machine, bias, security, observable_at_pin, class}]."
+     },
+     "collector_pin": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "progress_notes": {
+      "description": "No served derive emits one; the 202 poll is the signal."
+     },
+     "description": {
+      "type": "string",
+      "description": "The profile's words, when the row has them."
+     },
+     "canonical_statements": {
+      "type": "array",
+      "description": "The declared profiles' canonical statements."
+     },
+     "checker_entry_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "requirement_states": {
+      "description": "mysql-declared-model only: the states each obligation can take."
+     },
+     "scope": {
+      "type": "object",
+      "description": "{max_ids, binding[, records]}: only for a profile whose scope you select."
+     },
+     "method_forms": {
+      "type": "array",
+      "description": "python-auth-declared-model only: [{form, lean_decidable, lean_decidable_when, consumers}]."
+     },
+     "stacks": {
+      "type": [
+       "array",
+       "null"
+      ],
+      "description": "The identity stacks the registry wires to the profile's checker (for python-auth-declared-model also to the python/fastapi, python/django (issue #266) and python/stdlib-http (issue #3840) adapters its free route runs; for a checker that runs a shared identity adapter as its leg, that adapter's row, issue #3495), or the database/endpoint kind (database/postgresql, database/mysql, endpoint/http) for the PostgreSQL, MySQL and HTTP profiles; on every row, the pinned one included (issue #2650). null for a registry-wired row when the server holds no readable adapter registry."
+     },
+     "readings_shape": {
+      "enum": [
+       "wrapped",
+       "flat"
+      ],
+      "description": "How scope_binding is sent; absent from the pinned row."
+     },
+     "profile_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The sha256 of the profile row file's bytes: the same digest a verdict for this profile carries as profile_sha256 (issue #2072). Absent from the pinned row."
+     },
+     "collector": {
+      "type": "object",
+      "required": [
+       "status",
+       "file"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "status": {
+        "enum": [
+         "pinned",
+         "none",
+         "malformed"
+        ]
+       },
+       "file": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "description": "The registered collector claim: pinned, none or malformed, with its file when known. Absent from the pinned PostgreSQL row."
+     },
+     "checker": {
+      "type": "object",
+      "required": [
+       "id",
+       "package",
+       "derive_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "package": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "derive_path": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "description": "The checker registry id, package and server derive path. Absent from the pinned PostgreSQL row."
+     },
+     "docs": {
+      "type": "object",
+      "required": [
+       "quickstart_section"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "quickstart_section": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 999
+       }
+      },
+      "description": "The quick-start section named by the profile row, when present. Absent from the pinned PostgreSQL row."
+     }
+    }
+   },
+   "LintRecord": {
+    "type": "object",
+    "description": "The lint record: every problem lint can find before a paid check, so all can be fixed first. ok true is not a clean bill: stages, stages_run, stages_skipped and not_checked say what ran and what was not checked.",
+    "required": [
+     "schema",
+     "ok",
+     "profile",
+     "findings",
+     "requirements",
+     "would_run",
+     "would_charge",
+     "stages",
+     "stages_run",
+     "stages_skipped",
+     "not_checked",
+     "inputs_judged",
+     "build",
+     "request_id",
+     "execution_authorized",
+     "hardware_authorized",
+     "industrial_release_authorized",
+     "release_allowed",
+     "physical_validation",
+     "simulation",
+     "self_approved"
+    ],
+    "properties": {
+     "schema": {
+      "const": "assure.serve.lint/v1"
+     },
+     "ok": {
+      "type": "boolean",
+      "description": "True when the record holds no finding (a notice included)."
+     },
+     "profile": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "The profile id linted; null when the body names no known profile."
+     },
+     "findings": {
+      "type": "array",
+      "description": "One object per problem, an unknown profile first, then in stage order. Each carries stage, outcome, severity (refusal or notice), a predicted charged, kind and text, and file, line or field where located.",
+      "items": {
+       "type": "object",
+       "required": [
+        "stage",
+        "outcome",
+        "severity",
+        "charged",
+        "kind",
+        "text"
+       ],
+       "properties": {
+        "stage": {
+         "enum": [
+          "body",
+          "query",
+          "profile",
+          "fail_on",
+          "scope",
+          "files",
+          "collector",
+          "requirements",
+          "http"
+         ]
+        },
+        "kind": {
+         "type": "string"
+        },
+        "outcome": {
+         "type": "string"
+        },
+        "severity": {
+         "enum": [
+          "refusal",
+          "notice"
+         ]
+        },
+        "charged": {
+         "type": "boolean"
+        },
+        "text": {
+         "type": "string"
+        },
+        "file": {
+         "type": "string"
+        },
+        "line": {
+         "type": "integer"
+        },
+        "field": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "requirements": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "description": "requirements.md read row by row; null when no profile or no requirements text could be read.",
+      "required": [
+       "rows",
+       "problems",
+       "row_details",
+       "counts"
+      ],
+      "properties": {
+       "rows": {
+        "type": "integer"
+       },
+       "problems": {
+        "type": "integer"
+       },
+       "row_details": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "line",
+          "id",
+          "state",
+          "reason_class"
+         ],
+         "properties": {
+          "line": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "id": {
+           "type": [
+            "string",
+            "null"
+           ]
+          },
+          "state": {
+           "enum": [
+            "matched",
+            "free_text",
+            "problem"
+           ]
+          },
+          "reason_class": {
+           "type": [
+            "string",
+            "null"
+           ]
+          },
+          "obligations": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       },
+       "counts": {
+        "type": "object",
+        "required": [
+         "rows",
+         "problems",
+         "matched",
+         "free_text"
+        ],
+        "properties": {
+         "rows": {
+          "type": "integer"
+         },
+         "problems": {
+          "type": "integer"
+         },
+         "matched": {
+          "type": "integer"
+         },
+         "free_text": {
+          "type": "integer"
+         }
+        }
+       },
+       "matching": {
+        "type": "string",
+        "description": "Present when the checker publishes no obligation statements or they could not be read; begins \"none:\"."
+       }
+      }
+     },
+     "would_run": {
+      "type": "boolean",
+      "description": "True when no finding is a refusal, so the same body would run to a result."
+     },
+     "would_charge": {
+      "type": "boolean",
+      "description": "True when the same body would run, or would be refused by the checker once started."
+     },
+     "stages": {
+      "type": "array",
+      "description": "Each of the nine stages with its state.",
+      "items": {
+       "type": "object",
+       "required": [
+        "name",
+        "state"
+       ],
+       "properties": {
+        "name": {
+         "enum": [
+          "body",
+          "query",
+          "profile",
+          "fail_on",
+          "scope",
+          "files",
+          "collector",
+          "requirements",
+          "http"
+         ]
+        },
+        "state": {
+         "enum": [
+          "ran",
+          "skipped",
+          "not_applicable"
+         ]
+        }
+       }
+      }
+     },
+     "stages_run": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "stages_skipped": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "not_checked": {
+      "type": "array",
+      "description": "The admission checks this lint did not perform.",
+      "items": {
+       "type": "string"
+      }
+     },
+     "inputs_judged": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "description": "The profile inputs the checker readers judged; null when the readers did not run.",
+      "properties": {
+       "required": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "optional_present": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "optional_absent": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "build": {
+      "type": "object",
+      "description": "The serving engine: compare build.commit first between answers; all null while the engine pin fails.",
+      "required": [
+       "commit",
+       "release_sha256",
+       "checkers_sha256"
+      ],
+      "properties": {
+       "commit": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "release_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "checkers_sha256": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      }
+     },
+     "request_id": {
+      "type": "string",
+      "description": "The X-Request-Id of this answer, the citation for a free lint (a lint has no check_id)."
+     },
+     "execution_authorized": {
+      "const": false
+     },
+     "hardware_authorized": {
+      "const": false
+     },
+     "industrial_release_authorized": {
+      "const": false
+     },
+     "release_allowed": {
+      "const": false
+     },
+     "physical_validation": {
+      "const": false
+     },
+     "simulation": {
+      "const": true
+     },
+     "self_approved": {
+      "const": false
+     }
+    },
+    "additionalProperties": true
+   }
+  }
+ }
+}

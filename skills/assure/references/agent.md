@@ -5,7 +5,7 @@
 - If the database is on Supabase, tell the operator so before any grant; do not grant `pg_monitor` and do not set it in `collection-privileges`.
 - Show the operator `docs/DATA.md` before the first run, and ask before committing collected files to the repository.
 - Never guess a data directory or a configuration directory: ask the server with `psql -c 'SHOW data_directory'`, `psql -c 'SHOW config_file'` and `psql -c 'SHOW hba_file'`.
-- If this folder was copied without its checkout, install the Action at `@beta`; never guess a commit.
+- If this folder was copied without its checkout, install the Action at `@v0`; never guess a commit.
 - Replace the example endpoint values with the operator's own; keep the top-level keys and the seven flags as shown.
 - Before the run, check that the first line of each captured head begins with `HTTP/1.1`.
 - Set up the Assure GitHub Action on a repository and read its result.

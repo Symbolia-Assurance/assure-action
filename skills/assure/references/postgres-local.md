@@ -43,7 +43,7 @@ The collector is `action/collector/collect_pg.py` in the `Symbolia-Assurance/ass
 
 ```sh
 git clone https://github.com/Symbolia-Assurance/assure-action assure-action
-git -C assure-action checkout beta
+git -C assure-action checkout v0
 ```
 
 Set the standard libpq variables for the server (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`). Find the data directory first: ask the server with `psql -c 'SHOW data_directory'` ("A server on your own machine", below), and give that directory, as this machine sees it, in place of `<data directory>`. Then run:
@@ -135,7 +135,7 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
 
 ```yaml
       - name: Assure check from collected files
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-declared-model
@@ -187,7 +187,7 @@ jobs:
 
       - name: Assure check from collected files
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: postgresql-observed-baseline

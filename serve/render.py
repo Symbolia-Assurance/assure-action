@@ -4756,6 +4756,26 @@ def _free_upgrade_url(block):
 # a complete ending-gift block can instead carry its separate renewal notice and link.
 PR_VERIFY_MORE = 'Verify more of your requirements.'
 
+# The Premium footer cases (chief of staff 4967/4973): one fixed line per comment, chosen by the account (the server's
+# `upgrade` block: a free account carries one, a paid account none) and by whether the run decided. Never in a row.
+PREMIUM_DECIDES_MORE = 'Premium decides more checks.'
+PREMIUM_MAY_COVER = ("Premium may cover this. We're building priority coverage for premium customers continuously. "
+                     "Cancel any time.")
+PREMIUM_NOT_YET = ("Premium could not decide this yet. We're building priority coverage for premium customers "
+                   "continuously.")
+
+
+def premium_case_line(envelope, decided):
+    """The comment's one Premium footer line: PREMIUM_DECIDES_MORE (free, decided), PREMIUM_MAY_COVER (free, refused
+    or unread), PREMIUM_NOT_YET (no free block: a paid account, refused or unread), or None (paid and decided)."""
+    env = envelope if isinstance(envelope, dict) else {}
+    free = _free_upgrade_url(env.get('upgrade')) is not None or (
+        'upgrade' not in env and isinstance(env.get('detail'), dict)
+        and _free_upgrade_url(env['detail'].get('upgrade')) is not None)
+    if free:
+        return PREMIUM_DECIDES_MORE if decided else PREMIUM_MAY_COVER
+    return None if decided else PREMIUM_NOT_YET
+
 
 def pr_verify_more(envelope):
     """['', PR_VERIFY_MORE, '', <the upgrade line>] for a verdict or failure envelope carrying a free account's
@@ -5229,7 +5249,8 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
                          'Sending a request changes no reading until a reader ships.'), '']
             else:
                 out += [PR_UNREAD_NEXT, '']
-            return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names)) + '\n'
+            return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names,
+                                               decided=False)) + '\n'
     elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']
 
@@ -5237,10 +5258,11 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     covered = coverage_line(env) if rd['no_reading'] is None and not rd['unread'] else None
     if covered is not None:                      # issue #4230: the rows a coverage proposal could decide, read runs only
         out += [esc(covered, COVERAGE_CAP), '']
-    return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, names=names)) + '\n'
+    return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, names=names,
+                                       decided=rd['no_reading'] is None and not rd['unread'])) + '\n'
 
 
-def _pr_footer(env, commit, tree, tree_bases, read=True, names=None):
+def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=True):
     """The comment's footer, the same lines whether or not the app was read (refs #3201 r4): the engine line, the spent
     line, the rule, the tree line, the formal-model line, the building line and the closing (`read` False: it claims
     nothing read, issue #3174)."""
@@ -5251,6 +5273,9 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None):
     # the Director, 20 Oct 2026 (#4994): exactly one upgrade link per free comment, in the footer, none in a row. A free
     # account's Premium proof-tree line (issue #4576) carries it; the spent line (14 Oct 2026) then says its words only
     premium = premium_tree_line(env) if pr_tree_line(tree, tree_bases) is None else None
+    case = premium_case_line(env, decided)       # chief 4967: the one Premium footer line, first in the footer
+    if case is not None:
+        out += [case, '']
     spent = pr_spent_line(env)                   # the Director, 14 Oct 2026: the spent free balance, above the footer
     if spent is not None:
         out += [_esc_line(PR_SPENT_WORDS) if premium is not None else spent, '']
@@ -5352,6 +5377,9 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
         closing = ['', PR_VERIFY_MORE, '', upgrade]
     elif upgrade:                                  # the validated ending-gift block also belongs in the final footer
         closing = ['', upgrade]
+    case = premium_case_line(f, decided=False)     # chief 4967: a refused run is never decided; the line sits
+    if case is not None:                           # above the closing, so the payment link stays the final line
+        closing = ['', case] + closing
     return '\n'.join(out + closing) + '\n'
 
 # ---------- readable-report-001 (the Director, 18 Oct 2026): the report leads the pull request comment ----------

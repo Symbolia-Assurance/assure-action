@@ -11,7 +11,7 @@ Choose one kind:
 
 ## Feedback input
 
-The Action's `feedback` input defaults to `''`: off. Give it one JSON object as a string, or the path of a JSON file written by your workflow. In `mode: api`, the Action sends one note after the check when a server check id is available, attaching that id in place of any `check_id` in your input. It does not retry. Without a server check id, it sends no note. `mode: local` and `mode: lint` send no feedback.
+The Action's `feedback` input defaults to `''`: off. Give it one JSON object, or a JSON list of up to 10 objects, as a string, or the path of a JSON file written by your workflow. In `mode: api`, the Action sends each note in order after the check when a server check id is available, attaching that id in place of any `check_id` in your input. Each note is one request; it does not retry, and the first note not confirmed stops the rest. Every note is checked before any is sent. The job summary has one `Feedback:` line per note sent and, for a list, a closing `Feedback: <n> of <m> notes confirmed.` line. Without a server check id, it sends no note. `mode: local` and `mode: lint` send no feedback.
 
 After trimming surrounding whitespace, an input beginning with an opening brace, opening bracket, double quote, minus or digit, or a `true`, `false`, `null`, `NaN` or `Infinity` token, is treated as JSON even when malformed. Use an explicit path such as `./null` to select a filename resembling a JSON literal. A final feedback file that is a symbolic link or nonregular file is refused with a fixed `bad_input` feedback summary; the check's exit, outputs and verdict file stay unchanged.
 

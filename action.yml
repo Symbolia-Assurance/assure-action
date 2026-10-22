@@ -84,7 +84,7 @@ inputs:
     required: false
     default: 'false'
   feedback:
-    description: A deliberate feedback note as one JSON object or a plain path to a UTF-8 JSON file written by the workflow, at most 16384 bytes. Empty is off. In api mode, after the check the Action sends one note with its server check id attached. A feedback error adds only a typed outcome to the job summary and never changes the verdict, outputs or exit. Local and lint modes do not read or send it.
+    description: Deliberate feedback as one JSON object, or a JSON list of up to 10 objects, or a plain path to a UTF-8 JSON file written by the workflow, at most 16384 bytes. Empty is off. In api mode, after the check the Action sends each note in order, one request each, with its server check id attached; the first note not confirmed stops the rest. A feedback error adds only a typed outcome to the job summary and never changes the verdict, outputs or exit. Local and lint modes do not read or send it.
     required: false
     default: ''
   requirements:

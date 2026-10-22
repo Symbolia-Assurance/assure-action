@@ -197,9 +197,12 @@ def starter_promises(data):
 
 
 def starter_section(data):
-    """Issue #4395: the proposal body's section for the starter requirements.md."""
+    """Issue #4395: the proposal body's section for the starter requirements.md. Issue #5075: it names the runs that
+    check the merged file (`entry.requirements_upload`), not every run."""
     lines = [_SECTION % STARTER_PATH, '', 'Assure also drafted `%s`, the promises your app makes, from what it read in '
-             'your code. Every run checks them once this pull request is merged:' % STARTER_PATH, '']
+             'your code. Once this pull request is merged, an api-mode run checks them when its `requirements` input '
+             'is unset (the default) or names `%s`; a run with `requirements: none` or another file, or in local mode, '
+             'does not:' % (STARTER_PATH, STARTER_PATH), '']
     lines += ['- %s' % p for p in starter_promises(data)]
     lines += ['', 'Add your own promises to it on this branch, one per line. The free check decides the ones above; '
               'Premium checks the promises it cannot decide yet.']
@@ -208,8 +211,9 @@ def starter_section(data):
 
 def starter_markdown(data):
     """Issue #4395: the job summary's lines for a starter that was not proposed."""
-    return ('\nAssure also drafted a starter `%s` (the promises above it can check on every run):\n\n```markdown\n%s```\n'
-            % (STARTER_PATH, bytes(data).decode('utf-8')))
+    return ('\nAssure also drafted a starter `%s`. Committed, an api-mode run checks its promises when its '
+            '`requirements` input is unset (the default) or names `%s`:\n\n```markdown\n%s```\n'
+            % (STARTER_PATH, STARTER_PATH, bytes(data).decode('utf-8')))
 
 
 _IMPORT = re.compile(rb'(?m)^[ \t]*(?:from|import)[ \t]+(flask|fastapi|django)\b')
@@ -442,13 +446,14 @@ def _named(body):
 
 
 def _carried(top, env, existing, parent, rel, named):
-    """Issue #3153 (#2249: the one pull request keeps another profile's draft): {path: blob} of the regular files under
-    `.assure/` on the proposal branch's tip `existing` that the base tip `parent` does not have, other than `rel`, and
-    that the open proposal's body has a section for (`named`, #2927): a file it does not name has no fields to confirm
-    and is left behind, as the rebuild from the base tip leaves it."""
-    listed = (_git(top, env, 'ls-tree', '-r', '--full-tree', existing, '--', '.assure/') or b'').decode('utf-8', 'replace')
+    """Issue #3153 (#2249: the one pull request keeps another profile's draft): {path: blob} of the regular files on
+    the proposal branch's tip `existing` that the base tip `parent` does not have, other than `rel`, and that the open
+    proposal's body has a section for (`named`, #2927; issue #5547: a companion at the repository root as well as a
+    draft under `.assure/`): a file it does not name has no fields to confirm and is left behind, as the rebuild from
+    the base tip leaves it."""
+    listed = (_git(top, env, 'ls-tree', '-r', '-z', '--full-tree', existing) or b'').decode('utf-8', 'replace')
     out = {}
-    for line in listed.split('\n'):
+    for line in listed.split('\0'):                 # REFUTATION-r1 LOW-1: -z, so a path git would quote is read as is
         meta, _, path = line.partition('\t')
         parts = meta.split()
         if len(parts) == 3 and parts[:2] == ['100644', 'blob'] and path != rel and path in named \
@@ -465,16 +470,24 @@ def _parent(top, env, commit):
     return next((line[7:].strip() for line in raw.split('\n') if line.startswith('parent ')), None)
 
 
-def pull_request_body(record, rel, source='this repository', kept=(), lead=None, starter=None):
+def _companion_section(path, rel):
+    """Issue #5547: the short section of a file committed with the draft at `rel`, so `_named` names it."""
+    return '%s\n\n`%s` is committed with `%s`; edit it on this branch.\n' % (_SECTION % path, path, rel)
+
+
+def pull_request_body(record, rel, source='this repository', kept=(), lead=None, starter=None, companions=()):
     """The proposal pull request's body: what it is, how to accept it, and one section per proposed file naming each
     field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
     collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927);
     `lead` replaces the first sentence of `rel`'s section (issue #2934). Issue #4395: `starter`, the starter
-    requirements.md bytes this proposal carries, adds its section after `rel`'s."""
-    what = rel if starter is None else '%s and %s' % (rel, STARTER_PATH)
+    requirements.md bytes this proposal carries, adds its section after `rel`'s. Issue #5547: `companions` names the
+    files committed with `rel`, each given a short section after those."""
+    paths = [rel] + ([] if starter is None else [STARTER_PATH]) + sorted(companions)
+    what = paths[0] if len(paths) == 1 else '%s and %s' % (', '.join(paths[:-1]), paths[-1])
     head = ('Read each draft and edit any field that is wrong, on this branch. %s This run is proposing %s; merging the '
-            'pull request commits %s.\n' % (NEVER_COMMITS, what, 'it' if starter is None else 'them'))   # issue #3153
-    tail = [] if starter is None else [starter_section(starter)]
+            'pull request commits %s.\n' % (NEVER_COMMITS, what, 'it' if len(paths) == 1 else 'them'))  # issue #3153
+    tail = ([] if starter is None else [starter_section(starter)]) + [_companion_section(p, rel)
+                                                                    for p in sorted(companions)]
     return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)] + tail)
 
 
@@ -498,8 +511,9 @@ def proposal_base(env, github, repo):
 
 
 def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='this repository', lead=None,
-            starter=None):
-    """Propose `data` at `rel` in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
+            starter=None, companions=None):
+    """Propose `data` at `rel` (and, issue #5547, each file of `companions`, {path: bytes}, committed with it and given
+    its own section in the body) in a pull request of Assure's own: one commit on the base branch's tip, pushed only to
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
     default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
     the customer works on is ever written. Returns {branch, commit, number, url, created}; raises Refusal naming the
@@ -507,9 +521,15 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     branch it created behind. `github` is action.client.GitHub, or None when no workflow token reached the Action.
     Issue #4395: `starter` (bytes) is also written at STARTER_PATH in the same commit when the base branch's tip has no
     file there; when the proposal branch already carries that file, its bytes are kept (the customer's edits on the
-    branch); the result's `starter` says whether the proposal carries it."""
+    branch); the result's `starter` says whether the proposal carries it. Issue #5547: a companion at `rel`, or at
+    STARTER_PATH when `starter` is passed, is not committed (the draft and the starter own those paths)."""
     if github is None:
         raise _missing('no workflow token reached the Action')
+    companions = {path: bytes(b) for path, b in (companions or {}).items()
+                  if path != rel and (starter is None or path != STARTER_PATH)}
+    for path in companions:                          # REFUTATION-r1 LOW-2: a path its section marker cannot name
+        if not isinstance(path, str) or _named(_SECTION % path) != {path}:
+            raise Refusal('bad_input', 'the companion path %r cannot be named in the pull request body' % (path,))
     repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
         raise Refusal('bad_input', 'GITHUB_REPOSITORY is not owner/name')
@@ -534,7 +554,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         raise Refusal('api_error', 'the base branch tip could not be read')
     if starter is not None and _git(top, env, 'cat-file', '-e', '%s:%s' % (parent, STARTER_PATH)) is not None:
         starter = None                               # issue #4395: the base branch has one; propose nothing for it
-    mine = {rel} if starter is None else {rel, STARTER_PATH}
+    mine = ({rel} if starter is None else {rel, STARTER_PATH}) | set(companions)     # issue #5547: and the companions
     existing = None
     if _fetch(top, env, branch):
         existing = (_git(top, env, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}') or b'').decode().strip() or None
@@ -543,11 +563,11 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     # one carrying a file its open pull request's body does not name, as a #2435 proposal from before #2927 does)
     seed, on_branch = parent, set()
     if existing and _parent(top, env, existing) == parent:
-        on_branch = set((_git(top, env, 'diff', '--name-only', parent, existing) or b'').decode('utf-8', 'replace')
-                        .split('\n')) - {''}
+        on_branch = set((_git(top, env, 'diff', '--name-only', '-z', parent, existing) or b'')
+                        .decode('utf-8', 'replace').split('\0')) - {''}      # REFUTATION-r1 LOW-1: unquoted paths
         if on_branch - mine <= _named(open_pr.get('body') if open_pr else None):
             seed = existing
-    named = {n for n in _named(open_pr.get('body') if open_pr else None) if n.startswith('.assure/')}
+    named = _named(open_pr.get('body') if open_pr else None) - set(companions)   # issue #5547: not only `.assure/`
     carry = _carried(top, env, existing, parent, rel, named) if existing and seed != existing and named else {}
     files = [(rel, (_git(top, env, 'hash-object', '-w', '--stdin', data=bytes(data)) or b'').decode().strip())]
     if starter is not None:                          # issue #4395: the branch's own requirements.md is kept
@@ -556,6 +576,8 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         carry.pop(STARTER_PATH, None)
         files.append((STARTER_PATH, (_git(top, env, 'hash-object', '-w', '--stdin', data=starter) or b'')
                       .decode().strip()))
+    files += [(path, (_git(top, env, 'hash-object', '-w', '--stdin', data=b) or b'').decode().strip())
+              for path, b in sorted(companions.items())]       # issue #5547: committed with the draft
     blob = all(b for _p, b in files)
     index = {'GIT_INDEX_FILE': str(Path(scratch) / 'assure-proposal.index')}
     tree = None
@@ -570,7 +592,7 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
         kept = _kept_sections(open_pr.get('body'), on_branch - mine)
     elif open_pr is not None and carry:             # issue #3153: and those of the drafts carried to the new tip
         kept = _kept_sections(open_pr.get('body'), set(carry))
-    body = pull_request_body(record, rel, source, kept, lead, starter)
+    body = pull_request_body(record, rel, source, kept, lead, starter, companions)
     commit = existing
     same = existing and seed == existing and (_git(top, env, 'rev-parse', existing + '^{tree}') or b'').decode().strip() \
         == tree

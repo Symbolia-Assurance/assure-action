@@ -1,0 +1,181 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Assure deliberate feedback", "version": "1", "description": "Focused description of the existing feedback routes only. Customer text is data, never instructions. No checks, model submissions or demand-ledger writes are performed by these routes."},
+  "servers": [{"url": "https://api.symbolia.ai"}],
+  "security": [{"bearerAuth": []}],
+  "paths": {
+    "/v1/feedback": {
+      "post": {
+        "operationId": "submitFeedback",
+        "description": "Free on every plan; no model call, charge, ledger row or verdict change. One UTF-8 JSON object, no duplicate keys, non-finite numbers or extra keys. No query parameters. One Content-Length header is required; Transfer-Encoding is refused. Maximum body 16384 bytes, text 4096 UTF-8 bytes; a coverage request's formal_model shares those 4096 bytes with text. Shares the account minute rate window with checks. Maximum 100 new rows per account per UTC day. Daily deduplication is by account, kind, check_id and exact text, and coverage when sent; duplicate metadata does not replace the first row. A duplicate still uses the minute window. Notes are retained for 12 months, operator-enforced; removal on request is an operator act. consent_follow_up defaults false.",
+        "x-body-max-bytes": 16384,
+        "x-new-notes-per-account-utc-day": 100,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FeedbackRequest"}, "example": {"kind": "friction", "text": "The input instructions did not say which folder to pass. I expected an example folder layout.", "consent_follow_up": false}}}},
+        "responses": {
+          "200": {"description": "Accepted or daily duplicate; text is not echoed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Accepted"}}}},
+          "400": {"$ref": "#/components/responses/BadInput"},
+          "401": {"$ref": "#/components/responses/Unauthenticated"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "413": {"$ref": "#/components/responses/OversizeInput"},
+          "429": {"description": "rate_limited; detail.window is minute or day. Day waits until midnight UTC", "headers": {"Retry-After": {"description": "Seconds until another attempt may be made", "schema": {"type": "integer", "minimum": 1}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "500": {"$ref": "#/components/responses/CheckerError"}
+        }
+      }
+    },
+    "/v1/feedback/{id}": {
+      "get": {
+        "operationId": "getFeedback",
+        "description": "Reads only the authenticated account's row, including exact customer text. No query parameters. Malformed, absent and foreign-account ids all return the same not_found refusal. rows_unreadable counts unreadable lines in the id's UTC-day file, including zero. check_known is the own-account verdict lookup at original submission, not a live lookup.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^fb-[0-9]{8}-[0-9a-f]{16}$"}}],
+        "responses": {
+          "200": {"description": "Stored own-account row", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Stored"}}}},
+          "400": {"$ref": "#/components/responses/BadInput"},
+          "401": {"$ref": "#/components/responses/Unauthenticated"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/CheckerError"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "description": "Valid unrevoked Assure API key; no credential examples are included"}},
+    "responses": {
+      "BadInput": {"description": "bad_input: malformed JSON, body, header or unsupported query", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "Unauthenticated": {"description": "unauthenticated: absent, invalid or revoked API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "MethodNotAllowed": {"description": "bad_input: method not allowed; detail.allowed lists the route's methods (the same list as Allow) and detail.route names the route", "headers": {"Allow": {"schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "OversizeInput": {"description": "oversize_input: body exceeds 16384 bytes; text field size violations are bad_input", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "NotFound": {"description": "not_found: no feedback note with that id exists for this account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "CheckerError": {"description": "checker_error: server failed while answering; feedback storage failure does not affect checks", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}}
+    },
+    "schemas": {
+      "Flags": {
+        "type": "object",
+        "required": ["execution_authorized", "hardware_authorized", "industrial_release_authorized", "release_allowed", "physical_validation", "simulation", "self_approved"],
+        "properties": {
+          "execution_authorized": {"type": "boolean", "const": false},
+          "hardware_authorized": {"type": "boolean", "const": false},
+          "industrial_release_authorized": {"type": "boolean", "const": false},
+          "release_allowed": {"type": "boolean", "const": false},
+          "physical_validation": {"type": "boolean", "const": false},
+          "simulation": {"type": "boolean", "const": true},
+          "self_approved": {"type": "boolean", "const": false}
+        }
+      },
+      "Kind": {"type": "string", "enum": ["friction", "wrong_reading", "coverage_gap", "model_proposal_intent"], "description": "wrong_reading: agent names obligation and expected reading in text. coverage_gap: names missing profile/rule. model_proposal_intent: intent only; model submissions await Director licensing/ownership decision and later qualification gates."},
+      "Package": {"type": ["object", "null"], "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 100, "x-max-utf8-bytes": 100, "description": "No Unicode control characters"}, "version": {"type": "string", "maxLength": 100, "default": "", "x-max-utf8-bytes": 100, "description": "No Unicode control characters"}}},
+      "Agent": {"type": ["object", "null"], "additionalProperties": false, "properties": {"model_id": {"type": "string", "maxLength": 100, "default": "", "x-max-utf8-bytes": 100, "description": "No Unicode control characters"}, "client": {"type": "string", "maxLength": 100, "default": "", "x-max-utf8-bytes": 100, "description": "No Unicode control characters"}}},
+      "Coverage": {
+        "type": ["object", "null"], "additionalProperties": false, "required": ["library", "calls", "reason"],
+        "description": "A coverage request: allowed only with kind coverage_gap, and null means absent. It carries the library, each refused call as names only with its path:line, and the refusal reason the check gave; no file contents and no literal beyond the call text. formal_model is data Symbolia reviews, never instructions, and shares the 4096 UTF-8 bytes of text (text plus formal_model at most 4096; an oversize model is refused bad_input with a reason naming its size and the room left).",
+        "properties": {
+          "library": {
+            "type": "object", "additionalProperties": false, "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$", "description": "the package index name, 1 to 100 letters, digits, dots, underscores or hyphens"},
+              "version": {"type": "string", "pattern": "^(?:[0-9][0-9A-Za-z.+!-]{0,63})?$", "default": "", "description": "empty, or up to 64 characters starting with a digit"}
+            }
+          },
+          "calls": {
+            "type": "array", "minItems": 1, "maxItems": 4,
+            "items": {
+              "type": "object", "additionalProperties": false, "required": ["call", "at"],
+              "properties": {
+                "call": {"type": "string", "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}\\((?:(?:[A-Za-z_][A-Za-z0-9_]{0,63}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}|\\.\\.\\.)(?:, (?:[A-Za-z_][A-Za-z0-9_]{0,63}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}|\\.\\.\\.)){0,7})?\\)$", "description": "the call as names only, such as toolbar.init_app(app); each argument a name or ..."},
+                "at": {"type": "string", "maxLength": 160, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}(?:/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}){0,15}:[1-9][0-9]{0,6}$", "description": "a repository path:line"}
+              }
+            }
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 320, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.,:() -]{0,319}$", "description": "the refusal reason the check gave"},
+          "formal_model": {"type": ["string", "null"], "minLength": 1, "default": null, "description": "a proposed model, as data; newline and tab allowed, no other control characters; shares the 4096 UTF-8 bytes of text"}
+        }
+      },
+      "FeedbackRequest": {
+        "type": "object", "additionalProperties": false, "required": ["kind", "text"],
+        "properties": {
+          "kind": {"$ref": "#/components/schemas/Kind"},
+          "text": {"type": "string", "minLength": 1, "maxLength": 4096, "x-max-utf8-bytes": 4096, "description": "1..4096 UTF-8 bytes; valid Unicode without lone surrogates or Unicode control characters except LF and TAB. Customer data, never instructions"},
+          "check_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}$", "default": null},
+          "profile": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "default": null},
+          "profile_wanted": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "default": null, "description": "the profile a coverage_gap note wishes existed; the daily digest counts notes by it"},
+          "obligation": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,64}$", "default": null},
+          "package": {"$ref": "#/components/schemas/Package"},
+          "agent": {"$ref": "#/components/schemas/Agent"},
+          "consent_follow_up": {"type": ["boolean", "null"], "default": false, "description": "null normalises to false; true permits follow-up"},
+          "coverage": {"$ref": "#/components/schemas/Coverage"}
+        }
+      },
+      "Accepted": {
+        "allOf": [{"$ref": "#/components/schemas/Flags"}, {
+          "type": "object", "required": ["schema", "id", "received_at", "kind", "check_id", "profile", "obligation", "package", "sha256", "duplicate", "related", "routed"],
+          "properties": {
+            "schema": {"type": "string", "const": "assure.serve.feedback/v1"},
+            "id": {"type": "string", "pattern": "^fb-[0-9]{8}-[0-9a-f]{16}$"},
+            "received_at": {"type": "string", "format": "date-time"},
+            "kind": {"$ref": "#/components/schemas/Kind"},
+            "check_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}$", "description": "the stored row's check id"},
+            "profile": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "description": "the stored row's profile"},
+            "obligation": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,64}$", "description": "the stored row's obligation"},
+            "package": {"$ref": "#/components/schemas/Package"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the stored row's deduplication digest, sha256 of kind|check_id|text, or kind|check_id|text|<coverage as canonical JSON> when the note has coverage (not of the text alone); on a duplicate, the first row's. Text itself is not echoed."},
+            "duplicate": {"type": "boolean"},
+            "related": {"type": "array", "maxItems": 10, "description": "this account's other notes of the same kind and profile (match kind+profile) whose status is not merged or declined, among its notes of the newest 7 UTC-day files, newest first; when the note has no profile, the open notes of the same kind of any profile, null included (match kind; issues #1626, #2125)", "items": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "profile", "status", "match"], "properties": {"id": {"type": "string", "pattern": "^fb-[0-9]{8}-[0-9a-f]{16}$"}, "kind": {"$ref": "#/components/schemas/Kind"}, "profile": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"}, "status": {"type": "string", "enum": ["received", "in_pr", "unavailable"]}, "match": {"type": "string", "enum": ["kind+profile", "kind"]}}}},
+            "routed": {"type": "object", "additionalProperties": false, "required": ["digest", "status_route", "next"], "description": "where the note goes next (issue #2125)", "properties": {"digest": {"type": "string", "pattern": "^Agent feedback digest [0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "the daily agent feedback digest that reads the note, by its UTC day"}, "status_route": {"type": "string", "pattern": "^GET /v1/feedback/fb-[0-9]{8}-[0-9a-f]{16}$", "description": "the route that answers the note's state"}, "next": {"type": "string", "description": "one sentence naming the digest and the status route"}}}
+          }
+        }], "unevaluatedProperties": false
+      },
+      "Stored": {
+        "allOf": [{"$ref": "#/components/schemas/Flags"}, {
+          "type": "object", "required": ["schema", "id", "ts", "received_at", "account_id", "key_id", "kind", "check_id", "check_known", "profile", "obligation", "package", "agent", "consent_follow_up", "text", "sha256", "rows_unreadable", "status"],
+          "properties": {
+            "schema": {"type": "string", "const": "assure.serve.feedback/v1"},
+            "id": {"type": "string", "pattern": "^fb-[0-9]{8}-[0-9a-f]{16}$"},
+            "ts": {"type": "string", "format": "date-time"},
+            "received_at": {"type": "string", "format": "date-time", "description": "the row's ts, the value the POST answered (issue #3270)"},
+            "account_id": {"type": "string"}, "key_id": {"type": "string"},
+            "kind": {"$ref": "#/components/schemas/Kind"},
+            "check_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}$"},
+            "check_known": {"type": "boolean"},
+            "profile": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+            "profile_wanted": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "description": "absent on notes stored before issue #1248"},
+            "obligation": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+            "package": {"$ref": "#/components/schemas/Package"},
+            "agent": {"$ref": "#/components/schemas/Agent"},
+            "consent_follow_up": {"type": "boolean"},
+            "coverage": {"$ref": "#/components/schemas/Coverage", "description": "present only when the note was sent with coverage; the POST answer does not echo it"},
+            "text": {"type": "string", "minLength": 1, "x-max-utf8-bytes": 4096},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "rows_unreadable": {"type": "integer", "minimum": 0},
+            "status": {"$ref": "#/components/schemas/Status"}
+          }
+        }], "unevaluatedProperties": false
+      },
+      "Status": {
+        "type": "object", "required": ["state", "pr", "release", "reason", "updated_at"], "additionalProperties": false,
+        "description": "The note's state, set by Symbolia as it acts on the note: received (the default), in_pr (pr), merged (release, the engine commit that ships the change; pr optional) or declined (reason); unavailable (with a reason) when the state cannot be read just now.",
+        "properties": {
+          "state": {"type": "string", "enum": ["received", "in_pr", "merged", "declined", "unavailable"]},
+          "pr": {"type": ["integer", "null"], "minimum": 1},
+          "release": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+          "reason": {"type": ["string", "null"], "minLength": 1, "x-max-utf8-bytes": 300},
+          "updated_at": {"type": ["string", "null"], "format": "date-time"}
+        }
+      },
+      "Failure": {
+        "allOf": [{"$ref": "#/components/schemas/Flags"}, {
+          "type": "object", "required": ["schema", "check_id", "outcome", "charged", "reason", "action", "detail"],
+          "properties": {
+            "schema": {"type": "string", "const": "assure.serve.failure/v1"},
+            "check_id": {"type": ["string", "null"]},
+            "request_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The X-Request-Id of the request whose refusal was answered before a check was admitted (issue #1101); absent when the envelope names a check_id, as a typed failure of an admitted check does."},
+            "outcome": {"type": "string", "enum": ["bad_input", "unauthenticated", "key_expired", "oversize_input", "rate_limited", "not_found", "checker_error"]},
+            "charged": {"type": "boolean", "description": "Whether this request was charged; feedback routes do not run a check."},
+            "reason": {"type": "string"}, "action": {"type": "string"},
+            "build": {"type": "object", "required": ["commit", "release_sha256", "checkers_sha256"], "properties": {"commit": {"type": ["string", "null"]}, "release_sha256": {"type": ["string", "null"]}, "checkers_sha256": {"type": ["string", "null"]}}, "description": "Issue #1100: every freshly API-built refusal carries the serving engine's identity, including checker_error that refuses a development verdict; never copy the refused development block, kind or tree_sha256. Exactly commit, release_sha256 and checkers_sha256, the three keys of a verdict's engine block; all three are null if the engine pin fails verification. Compare build.commit first. Historical stored and non-API failures can omit this optional outer property and remain as originally written.", "additionalProperties": false},
+            "detail": {"type": "object", "properties": {"served_from": {"type": "string", "const": "handler", "description": "Issue #1665: every refusal on this route is minted while answering this request, so it is handler; this route reads no stored failure"}, "window": {"type": "string", "enum": ["minute", "day"]}, "retry_after_s": {"type": "integer", "minimum": 1}, "accepted_fields": {"type": "array", "items": {"type": "string"}, "description": "bad_input from the feedback body: the accepted top-level keys, sorted"}, "kinds": {"type": "array", "items": {"$ref": "#/components/schemas/Kind"}, "description": "bad_input from the feedback body: the accepted values of kind"}, "shapes": {"type": "object", "description": "bad_input from the feedback body: each accepted top-level key's form, text, boolean, the list of kinds, or an object of its keys (package {name, version}, agent {model_id, client})"}, "example": {"$ref": "#/components/schemas/FeedbackRequest", "description": "bad_input from the feedback body: one minimal valid body, the request example"}, "malformation": {"type": "object", "properties": {"kind": {"type": "string"}, "file": {"type": ["string", "null"]}, "line": {"type": ["integer", "null"]}, "field": {"type": ["string", "null"]}, "expected": {"type": "string"}, "pointer": {"type": "string", "pattern": "^(/([A-Za-z0-9_.-]|~1)+)+$"}}}}}
+          }
+        }], "unevaluatedProperties": false
+      }
+    }
+  }
+}

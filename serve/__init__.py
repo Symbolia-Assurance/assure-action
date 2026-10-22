@@ -28,6 +28,9 @@ def flags():
     return dict(FLAGS)
 
 
+# the Action ref every setup workflow, Skill and doc line names; the release script moves v0 to each qualified release
+ACTION_REF = 'v0'
+
 DEVELOPMENT = 'development'
 DEVELOPMENT_LINE = 'DEVELOPMENT CHECK (unpinned working tree) \u2014 not a served verdict'
 

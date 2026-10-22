@@ -1,0 +1,73 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Assure GitHub sign-in", "version": "1", "description": "The GitHub Actions sign-in route only. A workflow with permissions id-token: write requests its OIDC token with the audience assure and exchanges it here for a key that lives for that run. The token and the key are never logged or stored; only the key's SHA-256 is kept."},
+  "servers": [{"url": "https://api.symbolia.ai"}],
+  "security": [],
+  "paths": {
+    "/v1/auth/oidc": {
+      "post": {
+        "operationId": "signInWithGitHubOidc",
+        "description": "No Authorization header: the GitHub Actions OIDC token is the credential. The token is verified with RS256 against GitHub's published key set (issuer https://token.actions.githubusercontent.com), the whole PKCS#1 v1.5 block compared at once; alg must be RS256, kid must name a published key, aud must be assure (or a list holding it), exp, iat and nbf must hold within 60 s, and exp - iat must be at most 3600 s. The account is gh- followed by the repository_owner claim in lower case, created on the free plan the first time it signs in; a known account keeps its plan. The key expires at the token's exp or one hour from now, whichever comes first. No query parameters. Maximum body 16384 bytes, token 8192 bytes. Counts against the account's minute rate window.",
+        "x-body-max-bytes": 16384,
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SignInRequest"}}}},
+        "responses": {
+          "200": {"description": "A key for this run; the answer also carries Assure-Key-Expires", "headers": {"Assure-Key-Expires": {"description": "The key's expires_at", "schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SignedIn"}}}},
+          "400": {"description": "bad_input: the body is not {\"token\": <string>} or a query parameter was sent", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "401": {"description": "unauthenticated: the token does not verify; detail.identity names the check that failed and detail.rule is oidc", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "405": {"description": "bad_input: method not allowed", "headers": {"Allow": {"schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "413": {"description": "oversize_input: body exceeds 16384 bytes", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "429": {"description": "rate_limited: the account's minute window is full", "headers": {"Retry-After": {"description": "Seconds until another attempt may be made", "schema": {"type": "integer", "minimum": 1}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+          "503": {"description": "server_busy: GitHub's signing keys cannot be read just now (detail.identity keys_unavailable)", "headers": {"Retry-After": {"description": "60", "schema": {"type": "integer", "minimum": 1}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}}
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Flags": {
+        "type": "object",
+        "required": ["execution_authorized", "hardware_authorized", "industrial_release_authorized", "release_allowed", "physical_validation", "simulation", "self_approved"],
+        "properties": {
+          "execution_authorized": {"type": "boolean", "const": false},
+          "hardware_authorized": {"type": "boolean", "const": false},
+          "industrial_release_authorized": {"type": "boolean", "const": false},
+          "release_allowed": {"type": "boolean", "const": false},
+          "physical_validation": {"type": "boolean", "const": false},
+          "simulation": {"type": "boolean", "const": true},
+          "self_approved": {"type": "boolean", "const": false}
+        }
+      },
+      "SignInRequest": {
+        "type": "object", "additionalProperties": false, "required": ["token"],
+        "properties": {"token": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "The job's GitHub Actions OIDC token, requested with the audience assure; no credential examples are included"}}
+      },
+      "SignedIn": {
+        "allOf": [{"$ref": "#/components/schemas/Flags"}, {
+          "type": "object", "required": ["schema", "key", "expires_at", "account_id"],
+          "properties": {
+            "schema": {"type": "string", "const": "assure.serve.auth-oidc/v1"},
+            "key": {"type": "string", "pattern": "^asr_[0-9a-f]{8}_[A-Za-z0-9_-]{43}$", "description": "Shown once; send it as Authorization: Bearer <key> until expires_at"},
+            "expires_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+            "account_id": {"type": "string", "pattern": "^gh-[a-z0-9][a-z0-9-]{0,38}$"}
+          }
+        }], "unevaluatedProperties": false
+      },
+      "Failure": {
+        "allOf": [{"$ref": "#/components/schemas/Flags"}, {
+          "type": "object", "required": ["schema", "check_id", "outcome", "reason", "action", "detail", "charged"],
+          "properties": {
+            "schema": {"type": "string", "const": "assure.serve.failure/v1"},
+            "check_id": {"type": ["string", "null"]},
+            "charged": {"type": "boolean", "description": "False on a refusal answered before a check was admitted; this sign-in route starts no checker."},
+            "request_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The X-Request-Id of the request whose refusal was answered before a check was admitted (issue #1101); absent when the envelope names a check_id, as a typed failure of an admitted check does."},
+            "outcome": {"type": "string", "enum": ["bad_input", "unauthenticated", "oversize_input", "rate_limited", "server_busy", "checker_error"]},
+            "reason": {"type": "string"}, "action": {"type": "string"},
+            "build": {"type": "object", "required": ["commit", "release_sha256", "checkers_sha256"], "properties": {"commit": {"type": ["string", "null"]}, "release_sha256": {"type": ["string", "null"]}, "checkers_sha256": {"type": ["string", "null"]}}, "description": "Issue #1100: every freshly API-built refusal carries the serving engine's identity, including checker_error that refuses a development verdict; never copy the refused development block, kind or tree_sha256. Exactly commit, release_sha256 and checkers_sha256, the three keys of a verdict's engine block; all three are null if the engine pin fails verification. Compare build.commit first. Historical stored and non-API failures can omit this optional outer property and remain as originally written.", "additionalProperties": false},
+            "detail": {"type": "object", "properties": {"served_from": {"type": "string", "const": "handler", "description": "Issue #1665: every refusal on this route is minted while answering this request, so it is handler; this route reads no stored failure"}, "identity": {"type": "string", "enum": ["malformed", "algorithm", "unknown_kid", "signature", "issuer", "audience", "expired", "not_yet_valid", "lifetime", "missing_claim", "owner_changed", "keys_unavailable"]}, "rule": {"type": "string", "const": "oidc"}, "retry_after_s": {"type": "integer", "minimum": 1}, "malformation": {"type": "object", "properties": {"kind": {"type": "string"}, "field": {"type": ["string", "null"]}}}}}
+          }
+        }], "unevaluatedProperties": false
+      }
+    }
+  }
+}

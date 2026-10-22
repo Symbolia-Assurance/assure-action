@@ -85,7 +85,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           profile: postgresql-observed-baseline
           connection: ${{ secrets.ASSURE_PG_CONNECTION }}
@@ -102,7 +102,7 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@beta` resolves to; `gh api repos/Symbolia-Assurance/assure-action/branches/beta -q .commit.sha` prints it. Pin every third-party action to the full commit SHA of the release you trust.
+Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@v0`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@v0` resolves to; `gh api repos/Symbolia-Assurance/assure-action/commits/v0 -q .sha` prints it. Pin every third-party action to the full commit SHA of the release you trust.
 
 The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line.
 
@@ -122,7 +122,7 @@ The summary lists every reading under its status, with its text. The verdict fil
 
 The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days; on the Premium tier a sealed copy of the collected facts is kept for the formal shadow (see [DATA.md](DATA.md)).
 
-The report is on by default in `mode: api`: after a verdict the Action asks for it, which sends the verdict record (never your files) through OpenRouter to a model, asking for zero data retention, and `report: false` turns it off; the Action reads the repository-root `requirements.md` by default and sends its text, your own promises; name another file in the `requirements` input, or set `requirements: none` to send none. To turn either off, add it under `with:` in step 4:
+The report is on by default in `mode: api`: after a verdict the Action asks for it, which sends the verdict record (never your files) through OpenRouter to a model, asking for zero data retention, and `report: false` turns it off; the Action reads the repository-root `requirements.md` by default and sends its text, your own promises; name another file in the `requirements` input, or set `requirements: none` to send none; by default, on every plan, a line of that text that does not match one of the profile's statements word for word also goes to Claude Haiku through OpenRouter, unless an earlier reading of it is kept, drawn from your account's `formalisation` line (with no balance left there, none is sent), and `compile-requirements: false` keeps those lines from it. To turn either off, add it under `with:` in step 4:
 
 ```yaml
           report: false

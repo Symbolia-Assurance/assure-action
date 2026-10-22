@@ -52,9 +52,11 @@ connection or a runner token.
   and `report-url` (the page, `<api-url>/v1/checks/<id>/report.html`, opened with the key). The
   verdict file is the envelope byte for byte, so the page is named in the summary and the outputs, never inside it.
   `mode: local` refuses `report: true` (`bad_input`) before anything is read: the report runs on the API only.
-  `feedback` is separately off by default. One deliberate JSON object or workflow-written file path sends one note
-  only in api mode, after the primary file, outputs and summary. The actual server check id overrides the note's id.
-  Its bounded, single-attempt request adds only a validated receipt or a known typed outcome to the summary; no note
+  `feedback` is separately off by default. One deliberate JSON object, a JSON list of up to 10 objects (issue #5569),
+  or a workflow-written file path holding either sends each note in order only in api mode, after the primary file,
+  outputs and summary. The actual server check id overrides each note's id. Each note's bounded, single-attempt
+  request adds only a validated receipt or a known typed outcome to the summary, and the first note not confirmed
+  stops the rest; a list adds one closing count line. No note
   text, path, server reason or exception message is displayed. A feedback fault never changes the check result.
   serve-015: `allow-overage` (`true` or `false`, default false; any other word is `bad_input` before anything is
   read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
@@ -190,6 +192,7 @@ from action import client as client_mod, declaration_draft, http_identity, repos
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, GitHub, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, is_development, markers, proof_tree, render  # noqa: E402
 from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
+FEEDBACK_LIST_NOTES = 10                         # issue #5569: the most notes one feedback input may hold
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
@@ -1648,6 +1651,8 @@ def _scratch(env):
 def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
     """Bounded JSON string or plain regular-file path; input values are never shown.
 
+    Issue #5569: one object returns one note; a list of 1 to 10 objects returns the list, each note checked as one is.
+
     Object/array/quoted/numeric/literal-looking inputs are JSON, including malformed JSON. A caller can name a file
     with such a name explicitly as ./name. Field validation remains the server's; only transport bounds live here.
     """
@@ -1678,9 +1683,10 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
                 data = b''.join(chunks)
             finally:
                 os.close(fd)
-        note = bundle.parse_json(data, FEEDBACK_LIMITS)
-        if not isinstance(note, dict):
-            raise Refusal('bad_input', 'the feedback body must be one JSON object')
+        parsed = bundle.parse_json(data, FEEDBACK_LIMITS)
+        notes = parsed if isinstance(parsed, list) else [parsed]
+        if not 1 <= len(notes) <= FEEDBACK_LIST_NOTES or not all(isinstance(note, dict) for note in notes):
+            raise Refusal('bad_input', 'the feedback body must be one JSON object or a list of up to 10')
 
         def contains_secret(value):
             if isinstance(value, str):
@@ -1691,13 +1697,14 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
                 return any(contains_secret(v) for v in value)
             return False
 
-        if contains_secret(note):
-            raise Refusal('bad_input', 'the feedback input contains a known secret')
-        note['check_id'] = check_id
-        encoded = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
-        if len(encoded) > FEEDBACK_BODY_BYTES:
-            raise Refusal('oversize_input', 'the feedback body exceeds its byte limit')
-        return note
+        for note in notes:                        # every note is checked before any is posted
+            if contains_secret(note):
+                raise Refusal('bad_input', 'the feedback input contains a known secret')
+            note['check_id'] = check_id
+            encoded = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            if len(encoded) > FEEDBACK_BODY_BYTES:
+                raise Refusal('oversize_input', 'the feedback body exceeds its byte limit')
+        return notes if isinstance(parsed, list) else notes[0]
     except Refusal as e:
         raise Refusal(e.outcome, 'the feedback input is invalid') from None
     except (OSError, ValueError, UnicodeError):
@@ -1795,16 +1802,32 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                         if isinstance(candidate, str) and CHECK_ID_RE.fullmatch(candidate)), None)
             if cid is None:
                 raise Refusal('bad_input', 'feedback needs the server check id')
-            note = _feedback_note(text, cwd, cid, feedback_known_secrets)
-            receipt = state['client'].feedback(note)
-            line = 'Feedback: accepted; id %s; duplicate %s' % (receipt['id'], str(receipt['duplicate']).lower())
+            read = _feedback_note(text, cwd, cid, feedback_known_secrets)
         except Refusal as e:
             outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
-            line = 'Feedback: %s; note not confirmed.' % outcome
+            read, lines = None, ['Feedback: %s; note not confirmed.' % outcome]
         except Exception:
-            line = 'Feedback: api_error; note not confirmed.'
+            read, lines = None, ['Feedback: api_error; note not confirmed.']
+        if read is not None:
+            # issue #5569: notes go in order, one exchange each, and the first delivery failure stops the rest
+            notes, lines, confirmed = (read if isinstance(read, list) else [read]), [], 0
+            for note in notes:
+                try:
+                    receipt = state['client'].feedback(note)
+                    lines.append('Feedback: accepted; id %s; duplicate %s'
+                                 % (receipt['id'], str(receipt['duplicate']).lower()))
+                    confirmed += 1
+                except Refusal as e:
+                    outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
+                    lines.append('Feedback: %s; note not confirmed.' % outcome)
+                    break
+                except Exception:
+                    lines.append('Feedback: api_error; note not confirmed.')
+                    break
+            if isinstance(read, list):
+                lines.append('Feedback: %d of %d notes confirmed.' % (confirmed, len(notes)))
         try:
-            _append(env.get('GITHUB_STEP_SUMMARY'), '\n' + line + '\n')
+            _append(env.get('GITHUB_STEP_SUMMARY'), ''.join('\n' + line + '\n' for line in lines))
         except Exception:
             pass                                  # no secondary warning, value, path or exception text
 
@@ -2059,6 +2082,12 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 # the whole body, these bytes included)
                 repo.update({rel: data for rel, data in repository_manifest.requirement_files(
                     top, env, declaration_draft.stack_of(repo)).items() if rel not in repo})
+            elif checkout and drafted is None and top is not None \
+                    and declaration_draft.stack_of(repo) == declaration_draft.STACK:
+                # issue #5816: a Flask first-run draft reads the dependency files setup sends (#5780/#5800), so the
+                # drafter keeps a library guard beside the file and line its version was read at; never a lock file
+                repo.update({rel: data for rel, data in repository_manifest.draft_dependency_files(top, env).items()
+                             if rel not in repo})
             record = drafted if drafted is not None else declaration_draft.draft(
                 repo, client=state['client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
             data = declaration_draft.dumps(record['declaration'])

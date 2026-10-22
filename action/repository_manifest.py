@@ -345,6 +345,35 @@ def requirement_files(top, env, stack):
     return out
 
 
+def draft_dependency_files(top, env, cap=REQUIREMENTS_DRAFT_BYTES):
+    """Issue #5816: {path: bytes} of the dependency files a Flask first-run draft reads, the set setup selects
+    (#5780/#5800): the tracked dependency files (`is_dependency_file`: requirements*.txt / *.in, constraints*.txt,
+    .txt / .in under a `requirements/` directory, pyproject.toml) and the files their -r / -c lines include
+    (`_dependency_paths`), each a tracked regular file read through `checkout_path` within `cap`. Lock files
+    (LOCK_PIN_FILE: Pipfile.lock, poetry.lock, uv.lock, pdm.lock) stay in the runner: the draft does not need them."""
+    pool = {}
+    for row in _ls_files(top, env).split(b'\0'):
+        meta, _tab, path = row.partition(b'\t')
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if meta.split(b' ', 1)[0] not in (b'100644', b'100755') or LOCK_PIN_FILE.match(rel.split('/')[-1]):
+            continue
+        if not (is_dependency_file(rel) or rel.lower().endswith(('.txt', '.in'))):
+            continue
+        full = checkout_path(top, rel)
+        if not isinstance(full, Path):
+            continue
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size <= cap:
+            pool[rel] = full.read_bytes()
+    return {rel: pool[rel] for rel in sorted(_dependency_paths(pool))}
+
+
 def add_declared_pins(collected, top, doc, env, limits, modes, allow):
     """Issue #5778: the first run, whose declaration the Action drafts in the runner after the checkout read: add the
     pin files that declaration's lock_locators name, under the rules a committed declaration's are read by

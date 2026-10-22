@@ -37,7 +37,7 @@ The smallest job, for files you collected and committed in `collected/` (referen
           python-version: "3.14"
 
       - name: Assure check
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           artefacts: collected
 ```
@@ -150,7 +150,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           profile: postgresql-observed-baseline
           connection: ${{ secrets.ASSURE_PG_CONNECTION }}
@@ -169,16 +169,16 @@ jobs:
 
 The job is named `assure`, so it never shares a name with your repository's own jobs, such as a `check` job that a ruleset requires. A workflow you added earlier whose Assure job is named `check` keeps working. Rename that job to `assure`, so your own required `check` reads only your own job; if a ruleset or branch protection requires Assure's job, require `assure`.
 
-Use `@beta` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
+Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
 
-To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@beta`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@beta` resolves to; `gh api repos/Symbolia-Assurance/assure-action/branches/beta -q .commit.sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
+To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@v0`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@v0` resolves to; `gh api repos/Symbolia-Assurance/assure-action/commits/v0 -q .sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
 This workflow runs on every pull request, on every push to `main`, when you start it by hand, and once a week. Change `main` if your default branch has another name. A pull request from a fork gets no repository secrets from GitHub, so `api-key` is empty there and the Action stops with `bad_input` (exit 2). GitHub gives such a run no identity token either. With `id-token: write` under `permissions:` (section 1), you can leave out the `api-key` line. The template above already does: it signs in with the workflow's GitHub identity, so you store no key. To use a stored key instead, pass it to the step:
 
 ```yaml
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
 ```
@@ -245,7 +245,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           profile: postgresql-observed-baseline
           connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>

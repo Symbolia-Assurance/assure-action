@@ -33,7 +33,7 @@ A complete `manifest.json` for two endpoints:
 
 ```yaml
       - name: Assure check
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline
@@ -103,7 +103,7 @@ jobs:
 
       - name: Assure check
         id: assure
-        uses: Symbolia-Assurance/assure-action@beta
+        uses: Symbolia-Assurance/assure-action@v0
         with:
           api-key: ${{ secrets.ASSURE_API_KEY }}
           profile: http-observed-baseline
