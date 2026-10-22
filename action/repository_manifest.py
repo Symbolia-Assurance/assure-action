@@ -25,10 +25,14 @@ when the checkout's `.assure/declaration.json` names `app_roots`, only the Pytho
 read (requirements.md always); a request that would still pass the body limit stops in the runner naming its size, the
 limit and `app_roots`, the one setting that narrows it.
 Issue #3128: it also reads the tracked dependency files (requirements*.txt / *.in, constraints*.txt, Pipfile.lock,
-poetry.lock, uv.lock, pyproject.toml) in the runner and sends none of them: only the derived `raw/LIBRARY-VERSIONS.json`,
+poetry.lock, uv.lock, pyproject.toml) in the runner and sends the derived `raw/LIBRARY-VERSIONS.json`,
 one entry per package the checker reads a guard of (flask-login; flask-httpauth, issue #3320; flask-jwt-extended, issue #3253) or a pass-through
 decorator of (flask-apispec, issue #3331) or the routes of (flask-restful, issue #3330),
-`{version | range | unread, source: path:line}`.
+`{version | range | unread, source: path:line}`. Issue #5727: with a Django or FastAPI declaration (schema
+assure.identity.declaration/v1) in the checkout, the requirements files its `lock_locator`s name (`pin_files`) are
+also sent, as `raw/repository/<path>`, byte for byte: those adapters read each declared library's version from the pin
+file itself. The full lock files it names (Pipfile.lock, poetry.lock, uv.lock, pdm.lock) are sent only with the
+customer's `send-lock-files` (by default only when the check needs one: `lock_choice`).
 
 Standard library, `serve` (the seven flags, serve.bundle's names) and serve.outcomes only; the child processes are
 those two read-only git commands.
@@ -42,6 +46,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -153,8 +158,18 @@ LIBRARY_VERSIONS = 'raw/LIBRARY-VERSIONS.json'
 #: flask-jwt-extended, whose guards and identity claim the checker reads by version; #3331: flask-apispec, whose
 #: use_kwargs / marshal_with the checker reads as argument parsing and response shaping by version; #3330:
 #: flask-restful, whose Api / Resource routes the checker reads by version; #3320: flask-httpauth, whose guards the
-#: checker reads by version.
-LIBRARY_PACKAGES = ('flask-apispec', 'flask-httpauth', 'flask-jwt-extended', 'flask-login', 'flask-restful')
+#: checker reads by version; #5770: flask-user, whose login_required the checker reads at 1.0.1.5.
+LIBRARY_PACKAGES = ('flask-apispec', 'flask-httpauth', 'flask-jwt-extended', 'flask-login', 'flask-restful',
+                    'flask-user')
+#: Production wave, seat a4-pins2 (the Director, 21 Oct): package -> the versions at which the checker reads a library
+#: helper row (its LIBRARY_HELPER_VERSION_ROWS / HELPER_VERSION_PACKAGES). A read set apart from LIBRARY_PACKAGES, sent
+#: minimal: an entry is recorded only as an exact pin at one of these versions (`{"version", "source"}`), after every
+#: LIBRARY_PACKAGES entry and only while the record stays within its 4096 bytes; another version, a range, an unread
+#: pin or no room leaves it out, and the helper keeps the refusal it has with no version.
+HELPER_VERSION_PACKAGES = {'flask-pagedown': ('0.2.2',)}
+#: seat a4-pins2, commit 2 (the Director's ruling): flask-sqlalchemy, whose 2.2 pin gates the checker's
+#: AFTER_RESPONSE_QUERY_LOG_READ rule
+HELPER_VERSION_PACKAGES['flask-sqlalchemy'] = ('2.2',)
 LOCK_FILE = re.compile(r'(?i)^(requirements[^/]*\.(txt|in)|constraints[^/]*\.txt|pipfile\.lock|poetry\.lock|uv\.lock|'
                        r'pyproject\.toml)$')
 LOCK_FILE_BYTES = 16 * 1024 * 1024
@@ -167,8 +182,272 @@ def is_dependency_file(rel):
     return bool(LOCK_FILE.match(parts[-1])) or (len(parts) > 1 and parts[-2].lower() == 'requirements'
                                                  and parts[-1].lower().endswith(('.txt', '.in')))
 _EXACT_KINDS = ('pipfile.lock', 'poetry.lock', 'uv.lock')
+
+#: Issue #5727: the stacks whose identity adapters read the declared libraries' versions from the pin file's own bytes
+#: (python_django / python_fastapi `resolve_library_pins`, `lock_read_library`); a declared version alone is no pin.
+PIN_STACKS = ('python/django', 'python/fastapi')
+#: The pin forms those readers read (`_lock_pin`): requirements files are sent by default; the full lock files
+#: (Pipfile.lock and the TOML locks, which carry every package's hashes) as `lock_choice` decides.
+PIN_FILE = re.compile(r'(?i)^requirements[^/]*\.txt$')
+LOCK_PIN_FILE = re.compile(r'(?i)^(pipfile\.lock|poetry\.lock|uv\.lock|pdm\.lock)$')
+SEND_LOCK_FILES = 'INPUT_SEND_LOCK_FILES'
+
+
+def send_lock_files(env):
+    """Issue #5727 (remodel 3780): the `send-lock-files` input (`INPUT_SEND_LOCK_FILES`): None when unset (the default:
+    a named lock file is sent only when the check needs it, `lock_choice`), True (`true`: every named lock file), False
+    (`false`: none); any other word is `bad_input`."""
+    v = str((env or {}).get(SEND_LOCK_FILES) or '').strip().lower()
+    if v == '':
+        return None
+    if v in ('true', '1'):
+        return True
+    if v in ('false', '0'):
+        return False
+    raise Refusal('bad_input', 'send-lock-files must be true or false')
+
+
+def pin_files(doc, locks=False):
+    """Issue #5727: the repository paths of the dependency pin files a Django or FastAPI declaration (schema
+    assure.identity.declaration/v1) points the checker at, by each `lock_locator` (`<path>:<line>`) anywhere in it.
+    Only a relative path inside the checkout whose name is a requirements file (`requirements*.txt`, or a .txt under a
+    `requirements/` directory) is kept, and with `locks` (true unless the customer sets `send-lock-files: false`) a LOCK_PIN_FILE too;
+    the bytes sent are the file's own, and the checker compares them to the declared version."""
+    if not isinstance(doc, dict) or doc.get('schema') != IDENTITY_SCHEMA or doc.get('stack') not in PIN_STACKS:
+        return set()
+    out, todo = set(), [doc]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, list):
+            todo.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        todo.extend(node.values())
+        loc = node.get('lock_locator')
+        if not isinstance(loc, str):
+            continue
+        m = re.fullmatch(r'(.+?)(?::[0-9]+)?', loc.strip())
+        parts = m.group(1).split('/') if m else []
+        if not parts or any(p in ('', '.', '..') for p in parts) or '\\' in m.group(1):
+            continue
+        if PIN_FILE.match(parts[-1]) or (locks and LOCK_PIN_FILE.match(parts[-1])) \
+                or (len(parts) > 1 and parts[-2].lower() == 'requirements' and parts[-1].lower().endswith('.txt')):
+            out.add('/'.join(parts))
+    return out
+
+
+def _lock_locators(doc):
+    """{repository path: {library names}} of every `lock_locator` in a Django or FastAPI declaration whose path is a
+    relative path inside the checkout (the rails `pin_files` reads paths with)."""
+    out, todo = {}, [doc] if isinstance(doc, dict) and doc.get('schema') == IDENTITY_SCHEMA \
+        and doc.get('stack') in PIN_STACKS else []
+    while todo:
+        node = todo.pop()
+        if isinstance(node, list):
+            todo.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        todo.extend(node.values())
+        loc = node.get('lock_locator')
+        if not isinstance(loc, str):
+            continue
+        m = re.fullmatch(r'(.+?)(?::[0-9]+)?', loc.strip())
+        parts = m.group(1).split('/') if m else []
+        if not parts or any(p in ('', '.', '..') for p in parts) or '\\' in m.group(1):
+            continue
+        names = out.setdefault('/'.join(parts), set())
+        if isinstance(node.get('name'), str):
+            names.add(_norm(node['name']))
+    return out
+
+
+_PIP_HASH = re.compile(r'(?:^|\s)--hash(?:=|\s+)[A-Za-z0-9_]+:[0-9A-Fa-f]+(?=\s|$)')
+
+
+def _requirement_pins(top, paths, cap):
+    """The canonical names an exact `name==version` requirement pins in the requirements files at `paths` (read through
+    `checkout_path`; backslash continuations joined, pip `--hash` options dropped)."""
+    pinned = set()
+    for rel in sorted(paths):
+        full = checkout_path(top, rel)
+        if not isinstance(full, Path):
+            continue
+        try:
+            if os.lstat(full).st_size > cap:
+                continue
+            text = full.read_bytes().decode('utf-8', 'replace')
+        except OSError:
+            continue
+        for logical in re.sub(r'\\\r?\n', ' ', text).splitlines():
+            body = _PIP_HASH.sub(' ', logical.split('#')[0])
+            m = re.match(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*===?\s*[0-9][^\s;,]*\s*(?:;.*)?$', body)
+            if m:
+                pinned.add(_norm(m.group(1)))
+    return pinned
+
+
+def lock_choice(top, doc, mode, cap):
+    """Issue #5727, remodel 3780 (the Director's rulings reconciled: "If it's just lock files I don't see why it's a
+    problem at all"; free tier opt-in by default, consent at the start; minimalist): (paths to send, [(lock path,
+    reason kept)]). The requirements files a Django or FastAPI declaration's lock_locators name are always sent. A named
+    lock file (Pipfile.lock, poetry.lock, uv.lock, pdm.lock) is sent when `mode` is True; never when False; and by
+    default (None) only when the check needs it: some library its lock_locators name is pinned by no requirements file
+    the declaration names."""
+    locs = _lock_locators(doc)
+    reqs = {p for p in locs if PIN_FILE.match(p.split('/')[-1])
+            or (p.count('/') and p.split('/')[-2].lower() == 'requirements' and p.lower().endswith('.txt'))}
+    locks = {p for p in locs if LOCK_PIN_FILE.match(p.split('/')[-1])}
+    send, kept = set(reqs), []
+    pinned = _requirement_pins(top, reqs, cap) if mode is None and locks else set()
+    for lock in sorted(locks):
+        if mode is True or (mode is None and (not locs[lock] or not locs[lock] <= pinned)):
+            send.add(lock)
+        else:
+            kept.append((lock, 'send-lock-files: false' if mode is False
+                         else 'its versions are pinned in ' + ', '.join(sorted(reqs))))
+    return send, kept
+
+
+REQUIREMENTS_DRAFT_BYTES = 1 << 20
+
+
+#: The framework library each identity stack's first-run draft needs pinned (remodel 3864)
+FRAMEWORK_LIBRARY = {'python/django': 'django', 'python/fastapi': 'fastapi'}
+
+
+def requirement_files(top, env, stack):
+    """Issue #5778 (remodel 3864): {path: bytes} of the tracked requirements files (`requirements*.txt`,
+    `requirements/<x>.txt`) that pin `stack`'s framework library (`django`, `fastapi`) with `==`, read through
+    `checkout_path`, each within REQUIREMENTS_DRAFT_BYTES: what a Django or FastAPI first-run draft reads its
+    lock_locators from. No other requirements file, and nothing for any other stack."""
+    library = FRAMEWORK_LIBRARY.get(stack)
+    if library is None:
+        return {}
+    out = {}
+    for row in _ls_files(top, env).split(b'\0'):
+        meta, _tab, path = row.partition(b'\t')
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        parts = rel.split('/')
+        if meta.split(b' ', 1)[0] not in (b'100644', b'100755') or not (
+                (len(parts) == 1 and PIN_FILE.match(parts[0]))
+                or (len(parts) > 1 and parts[-2].lower() == 'requirements' and parts[-1].lower().endswith('.txt'))):
+            continue
+        if library not in _requirement_pins(top, [rel], REQUIREMENTS_DRAFT_BYTES):
+            continue
+        full = checkout_path(top, rel)
+        if isinstance(full, Path):
+            out[rel] = full.read_bytes()
+    return out
+
+
+def add_declared_pins(collected, top, doc, env, limits, modes, allow):
+    """Issue #5778: the first run, whose declaration the Action drafts in the runner after the checkout read: add the
+    pin files that declaration's lock_locators name, under the rules a committed declaration's are read by
+    (`lock_choice`, the conditional lock-file default; tracked regular files only, through `checkout_path`; a pin over
+    the per-file limit stays in the runner; the allow-list applies). Returns the paths added."""
+    from serve import bundle
+    send = lock_choice(top, doc, send_lock_files(env), limits.file_bytes)[0]
+    if not send:
+        return []
+    tracked = {}
+    for row in _ls_files(top, env).split(b'\0'):
+        meta, _tab, path = row.partition(b'\t')
+        try:
+            tracked[path.decode('utf-8')] = meta.split(b' ', 1)[0].decode('ascii', 'replace')
+        except UnicodeDecodeError:
+            continue
+    added = []
+    for rel in sorted(send):
+        name = PREFIX + rel
+        if name in collected.files or tracked.get(rel) not in ('100644', '100755'):
+            continue
+        try:
+            bundle.check_name(name, allow)
+        except Refusal:
+            collected.ignored.append(name)
+            continue
+        full = checkout_path(top, rel)
+        if full is ABSENT:
+            continue
+        if full is None:
+            collected.ignored.append(name)
+            continue
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limits.file_bytes:
+            continue
+        collected.files[name] = full.read_bytes()
+        modes[rel] = tracked[rel]
+        added.append(rel)
+    collected.ignored.sort()
+    return added
+
+
+def kept_lock_line(top, env, cap):
+    """The runner's log line naming each named lock file kept in the runner, and the flag that sends it; None when
+    every named lock file is sent."""
+    _send, kept = lock_choice(top, _declaration(top, cap), send_lock_files(env), cap)
+    if not kept:
+        return None
+    return ('Assure: kept %s in your runner (%s); set send-lock-files: true to send %s'
+            % (', '.join(p for p, _r in kept), '; '.join(sorted({r for _p, r in kept})),
+               'it' if len(kept) == 1 else 'them'))
+
+
 _REQ = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*((?:[<>=!~]=?|===)\s*[^;#\s,]+'
                   r'(?:\s*,\s*(?:[<>=!~]=?|===)\s*[^;#\s,]+)*)?\s*(?:;.*)?$')
+
+
+def _dependency_paths(files):
+    """Existing dependency names plus their literal, received -r/-c targets.
+
+    This is no dependency resolver: only complete include lines (short flags,
+    attached short arguments, or long flags with space/=) name more input.
+    Quoted local names are accepted; environment expansion, URLs, backslashes
+    and paths outside the repository are not. No path is opened here.
+    """
+    pending = {p for p in files if is_dependency_file(p) and len(files[p]) <= LOCK_FILE_BYTES}
+    seen = set()
+    while pending:
+        rel = pending.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        # Structured locks are still read by _read_lock, never as include text.
+        if posixpath.basename(rel).lower() in _EXACT_KINDS + ('pyproject.toml',):
+            continue
+        for line in files[rel].decode('utf-8', 'replace').splitlines():
+            body = re.split(r'\s+#', line, maxsplit=1)[0].strip()
+            if not body.startswith('-') or '\\' in body or '$' in body:
+                continue
+            try:
+                words = shlex.split(body, comments=False)
+            except ValueError:
+                continue
+            target = None
+            if len(words) == 2 and words[0] in ('-r', '-c', '--requirement', '--constraint'):
+                target = words[1]
+            elif len(words) == 1:
+                for flag in ('--requirement=', '--constraint=', '-r', '-c'):
+                    if words[0].startswith(flag):
+                        target = words[0][len(flag):]
+                        break
+            if not target or target.startswith('/') or re.match(r'[A-Za-z][A-Za-z0-9+.-]*:', target) \
+                    or any(ord(c) < 32 or ord(c) == 127 for c in target):
+                continue
+            path = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target))
+            if path == '..' or path.startswith('../') or path not in files or path in seen:
+                continue
+            if len(files[path]) <= LOCK_FILE_BYTES:
+                pending.add(path)
+    return seen
 
 
 #: The range form the checker reads (`extract._RANGE_RE`): comparator-led clauses joined by commas.
@@ -220,13 +499,14 @@ def _read_lock(rel, text):
     """[(package, version | None, range | None, line, unread | None)] for the named libraries."""
     base = rel.rsplit('/', 1)[-1].lower()
     out = []
+    read = LIBRARY_PACKAGES + tuple(HELPER_VERSION_PACKAGES)
     if base in ('poetry.lock', 'uv.lock'):
         for m in re.finditer(r'^\[\[package\]\]\s*$', text, re.M):
             end = text.find('\n[', m.end())
             block = text[m.end():end if end >= 0 else len(text)]
             name = re.search(r'^name\s*=\s*"([^"]+)"\s*$', block, re.M)
             ver = re.search(r'^version\s*=\s*"([^"]+)"\s*$', block, re.M)
-            if name and ver and _norm(name.group(1)) in LIBRARY_PACKAGES:
+            if name and ver and _norm(name.group(1)) in read:
                 line = text.count('\n', 0, m.end() + ver.start()) + 1
                 out.append((_norm(name.group(1)), ver.group(1), None, line, None))
     elif base == 'pipfile.lock':
@@ -237,7 +517,7 @@ def _read_lock(rel, text):
         if not isinstance(doc, dict) or not isinstance(doc.get('default'), dict):
             return out
         for name, row in sorted(doc['default'].items()):
-            if _norm(name) in LIBRARY_PACKAGES and isinstance(row, dict) and isinstance(row.get('version'), str):
+            if _norm(name) in read and isinstance(row, dict) and isinstance(row.get('version'), str):
                 start = _line_of(text, r'^\s*"%s"\s*:\s*\{' % re.escape(name))[1]
                 line, _m = _line_of(text, r'"version"\s*:', start.end() if start else 0)
                 version, rng = _spec(row['version'])
@@ -245,11 +525,11 @@ def _read_lock(rel, text):
     elif base == 'pyproject.toml':
         text = _toml_without_comments(text)   # sol-a3 bus 457: a comment quoting an older pin is no pin
         for m in re.finditer(r'["\']([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^"\';]*)(?:;[^"\']*)?["\']', text):
-            if _norm(m.group(1)) in LIBRARY_PACKAGES and (not m.group(2).strip() or m.group(2).strip()[0] in '<>=!~'):
+            if _norm(m.group(1)) in read and (not m.group(2).strip() or m.group(2).strip()[0] in '<>=!~'):
                 version, rng = _spec(m.group(2))
                 out.append((_norm(m.group(1)), version, rng, text.count('\n', 0, m.start()) + 1, None))
         for m in re.finditer(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(?:"([^"]*)"|\{[^}\n]*version\s*=\s*"([^"]*)")', text, re.M):
-            if _norm(m.group(1)) in LIBRARY_PACKAGES:
+            if _norm(m.group(1)) in read:
                 version, rng = _spec(_caret(m.group(2) if m.group(2) is not None else m.group(3)))
                 out.append((_norm(m.group(1)), version, rng, text.count('\n', 0, m.start()) + 1, None))
     else:
@@ -271,15 +551,15 @@ def _read_lock(rel, text):
             # An option after an environment marker remains an option; quoted marker values remain values.
             unquoted = re.sub(r'''"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*' ''', '', body, flags=re.X)
             m = None if re.search(r'(?:^|\s)--', unquoted) else _REQ.match(body)
-            if m and _norm(m.group(1)) in LIBRARY_PACKAGES:
+            if m and _norm(m.group(1)) in read:
                 version, rng = _spec(m.group(2))
                 out.append((_norm(m.group(1)), version, rng, first, None))
             elif (name := re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]*)\b', body)) \
-                    and _norm(name.group(1)) in LIBRARY_PACKAGES:
+                    and _norm(name.group(1)) in read:
                 out.append((_norm(name.group(1)), None, None, first,
                             '%s requirement syntax is outside the read set' % _norm(name.group(1))))
         if pending and (name := re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]*)\b', pending)) \
-                and _norm(name.group(1)) in LIBRARY_PACKAGES:
+                and _norm(name.group(1)) in read:
             out.append((_norm(name.group(1)), None, None, start,
                         '%s requirement syntax is outside the read set' % _norm(name.group(1))))
     return out
@@ -326,11 +606,10 @@ def library_versions(files):
     for each package in LIBRARY_PACKAGES a file names, `{"version", "source"}` when every exact pin agrees (a lock
     file's resolved version, or `==X`), else `{"range", "source"}` for the one range the requirement files give, else
     `{"unread", "source"}` with the reason (pins or ranges that disagree, or a requirement with no bound). `source` is
-    the `path:line` read. Nothing else of any file is kept."""
+    the `path:line` read. Nothing else of any file is kept. A HELPER_VERSION_PACKAGES package is added last, only as a
+    `{"version", "source"}` entry at one of its read versions, with a readable locator, where the record still fits."""
     found = {}
-    for rel in sorted(files):
-        if not is_dependency_file(rel) or len(files[rel]) > LOCK_FILE_BYTES:
-            continue
+    for rel in sorted(_dependency_paths(files)):
         text = files[rel].decode('utf-8', 'replace')
         for pkg, version, rng, line, unread in _read_lock(rel, text):
             found.setdefault(pkg, []).append((version, rng, '%s:%d' % (rel, line), unread))
@@ -363,6 +642,7 @@ def library_versions(files):
                         'source': rows[0][2]}
         else:
             out[pkg] = {'unread': '%s is required with no version bound' % pkg, 'source': rows[0][2]}
+    helpers = {pkg: out.pop(pkg) for pkg in sorted(out) if pkg not in LIBRARY_PACKAGES}
     # A derived fact must fit the receiver. Retain every row when deciding agreement, then bound its explanation.
     for pkg, entry in out.items():
         if 'unread' in entry and len(entry['unread']) > 512:
@@ -375,6 +655,14 @@ def library_versions(files):
     for pkg in out:
         if len(library_versions_bytes(out)) > 4096:
             out[pkg] = {'unread': '%s dependency source locator exceeds the 4096-byte record limit' % pkg, 'source': None}
+    # seat a4-pins2: a helper package's exact pin, only where the guard packages leave it room
+    for pkg, entry in sorted(helpers.items()):
+        path, _sep, line = entry['source'].rpartition(':')
+        if set(entry) == {'version', 'source'} and entry['version'] in HELPER_VERSION_PACKAGES.get(pkg, ()) \
+                and path and re.fullmatch(r'[1-9][0-9]*', line) \
+                and not any(ord(c) < 32 or ord(c) == 127 for c in path) \
+                and len(library_versions_bytes({**out, pkg: entry})) <= 4096:
+            out[pkg] = entry
     return out
 
 
@@ -765,6 +1053,7 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         while bound.follow_imports and bound.imports(top, tracked, limits.file_bytes):
             bound.config_loads(top, tracked, limits.file_bytes)
     out, modes, chosen, encoded, locks = bundle.Collected(), {}, [], REQUEST_OVERHEAD, []
+    pins = lock_choice(top, _declaration(top, limits.file_bytes), send_lock_files(env), limits.file_bytes)[0]   # #5727
     for row in listing.split(b'\0'):
         if not row:
             continue
@@ -775,10 +1064,11 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         except UnicodeDecodeError:
             continue
         if mode in ('100644', '100755') and is_dependency_file(rel):
-            locks.append(rel)                    # issue #3128: read here for the derived record, never sent
-        if mode not in ('100644', '100755') or not (rel.endswith('.py') or rel == 'requirements.md'):
+            locks.append(rel)                    # issue #3128: read here for the derived record
+        pin = mode in ('100644', '100755') and rel in pins
+        if not pin and (mode not in ('100644', '100755') or not (rel.endswith('.py') or rel == 'requirements.md')):
             continue
-        if bound is not None and not bound.keeps(rel):
+        if not pin and bound is not None and not bound.keeps(rel):
             continue
         name = PREFIX + rel
         try:
@@ -789,7 +1079,7 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         full = checkout_path(top, rel)
         if full is ABSENT:
             continue
-        if full is None:                         # issue #5736: a link on its path, or outside the checkout
+        if full is None:                         # #5736, and #5727 pins: a link on its path, or outside the checkout
             out.ignored.append(name)
             continue
         try:
@@ -799,12 +1089,14 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         if not stat.S_ISREG(st.st_mode):
             continue
         cap = limits.file_bytes
+        if pin and st.st_size > cap:
+            continue                             # issue #5727: the checker names the pin it could not read
         if st.st_size > cap:
             raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (name, st.st_size, cap))
         chosen.append((name, rel, mode, full))
         encoded += _encoded(name, st.st_size)
     if encoded > limits.body_bytes:
-        python = sum(1 for _n, rel, _m, _f in chosen if rel != 'requirements.md')
+        python = sum(1 for _n, rel, _m, _f in chosen if rel.endswith('.py'))
         if roots is None:
             raise Refusal('oversize_input', 'the checkout holds %d tracked Python files that encode to %d bytes; the '
                           'limit is %d bytes: name the directories your app runs from in app_roots in %s (for example '

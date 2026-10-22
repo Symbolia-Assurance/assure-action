@@ -7,7 +7,7 @@ Every input arrives as an environment variable (INPUT_MODE, INPUT_API_KEY, INPUT
 INPUT_ARTEFACTS, INPUT_CONNECTION, INPUT_COLLECTION_ROLE, INPUT_COLLECTION_PRIVILEGES, INPUT_DATA_DIR, INPUT_CONFIG_DIRS,
 INPUT_FAIL_ON, INPUT_ALLOW_PARTIAL, INPUT_SCOPE, INPUT_SCOPE_BINDING, INPUT_ACCEPTED_SCOPE_REF, INPUT_IDENTITY_KEY,
 INPUT_REPORT, INPUT_FEEDBACK, INPUT_ALLOW_OVERAGE, INPUT_REQUIREMENTS, INPUT_COMPILE_REQUIREMENTS, INPUT_FRESH_CHECK,
-INPUT_OUTPUT, INPUT_DECLARATION), with
+INPUT_OUTPUT, INPUT_DECLARATION, INPUT_SEND_LOCK_FILES), with
 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT and RUNNER_TEMP, and (serve-019) GITHUB_WORKSPACE, GITHUB_REPOSITORY and GITHUB_SHA
 for `requirements_upload`. Issue #1953: run from the source tree as `python3 -m action.entry --mode local --artefacts DIR
 --profile P [--fail-on ...] [--out FILE]`, each `--<input> VALUE` sets its INPUT_* name (`--out` is INPUT_OUTPUT) before
@@ -143,7 +143,8 @@ assure-requirements-draft artifact)" instead (`drafted_top_action`); the verdict
 Issue #2435: in api mode, with a PostgreSQL connection and profile `postgresql-declared-model`, the Action collects as
 for the observed baseline and places the checkout's `.assure/postgresql-declared-model.json`, else
 `.assure/declaration.json` (issue #2927; under GITHUB_WORKSPACE; a link, a
-linked `.assure/`, a file that is not regular or cannot be read is `bad_input`) in the collector's raw/ as
+linked `.assure/`, a file that is not regular or cannot be read is `bad_input`; issue #3861: a `.assure/declaration.json`
+of another schema than POSTGRESQL_DECLARATION_SCHEMAS is passed over, named in one FOREIGN_DECLARATION_LINE) in the collector's raw/ as
 raw/declaration.json (`checkout_declaration`, `action.collect._gather` `declare`), before the bundle limits and the one
 withholding pass, so its `declared_predicate` literals are numbered with the snapshot's. With no such file it drafts
 one from the collected snapshot before that pass (`draft_proposal`; the draft holds the customer's own literals, so the
@@ -229,6 +230,9 @@ PROPOSAL_PROFILE = 'postgresql-observed-baseline'
 DECLARED_PROFILE = 'postgresql-declared-model'      # issue #2435: run on a connection with the checkout's declaration
 DECLARED_TITLE = declaration_draft.TITLE        # issue #2927: one proposal pull request, one title for every profile
 DECLARED_CHECKOUT_PATH = '.assure/postgresql-declared-model.json'   # issue #2927: PostgreSQL's draft, at its own path
+POSTGRESQL_DECLARATION_SCHEMAS = ('assure.postgresql.declaration/v1',)   # issue #3861: assure.declare.SCHEMA (a test holds them equal)
+FOREIGN_DECLARATION_LINE = ('::notice title=Assure::%(rel)s is not read as PostgreSQL intent: its schema is `%(schema)s`, '
+                            'not `%(pg)s`; it is left to its own profile')
 DECLARED_SOURCE = 'the collected catalog snapshot'
 PROPOSAL_FILE = 'assure-declaration-proposal.json'
 REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
@@ -1069,6 +1073,7 @@ def _inputs(env, conn, conn_error, collect, collector_dir=None, cwd=None, is_mys
     has_conn = bool(str(env.get('INPUT_CONNECTION') or '').strip())
     # serve-102 (DD-156 item 3): python-auth with neither reads the checkout itself, in one step
     checkout = profile == declaration_draft.PROFILE and not artefacts and not has_conn
+    repository_manifest.send_lock_files(env)             # issue #5727: a word other than true or false, before any read
     if bool(artefacts) == has_conn and not checkout:
         raise Refusal('bad_input', 'set exactly one of connection and artefacts (%s set)'
                       % ('both are' if has_conn else 'neither is'))
@@ -1430,11 +1435,25 @@ def kept_lines(rel, changed, sources):
     return [KEPT_HEAD % (rel, len(changed)), ''] + rows
 
 
-def checkout_declaration_at(top, cap, skip_links=False):
+def _foreign_schema(data):
+    """Issue #3861: the `schema` string of `data` (committed bytes) when it parses as a UTF-8 JSON object whose `schema`
+    is a string other than POSTGRESQL_DECLARATION_SCHEMAS; None for anything else (no `schema`, a legacy declaration,
+    `assure.declare`; not an object; not JSON), which is read as before."""
+    try:
+        doc = json.loads(bytes(data).decode('utf-8'))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    schema = doc.get('schema') if isinstance(doc, dict) else None
+    return schema if isinstance(schema, str) and schema not in POSTGRESQL_DECLARATION_SCHEMAS else None
+
+
+def checkout_declaration_at(top, cap, skip_links=False, passed=None):
     """(rel, bytes) of the first of DECLARED_CHECKOUT_PATH and `.assure/declaration.json` present under `top`; None
     when neither is. `bad_input` for a link, a linked `.assure/`, a file that is not regular, or one that cannot be
     read: a present declaration is never drafted over. Issue #3153 (#2249): with `skip_links` (the observed profile's
-    intent flow) a link at either path is not committed intent and is passed over, as if absent."""
+    intent flow) a link at either path is not committed intent and is passed over, as if absent. Issue #3861: a
+    `.assure/declaration.json` whose `schema` is another profile's (`_foreign_schema`, e.g. python-auth's) is not
+    PostgreSQL intent and is passed over, as if absent; (rel, schema) is appended to `passed` when given."""
     for rel in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH):
         if skip_links and os.path.islink(top / rel):
             continue
@@ -1445,7 +1464,11 @@ def checkout_declaration_at(top, cap, skip_links=False):
                 continue                             # a linked `.assure/` is refused as #2435 named it, below
             raise
         if data is not None:
-            return rel, data
+            schema = _foreign_schema(data) if rel == declaration_draft.CHECKOUT_PATH else None
+            if schema is None:
+                return rel, data
+            if passed is not None:
+                passed.append((rel, schema))
     return None
 
 
@@ -1755,7 +1778,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
              'compile_requirements': True, 'draft': None, 'proposed': False, 'proposal_number': None, 'files': None,
              'goals': [], 'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
-             'requirements_text': [], 'tree': None, 'declared': None, 'kept_md': '', 'declared_accepted': False}
+             'requirements_text': [], 'tree': None, 'declared': None, 'kept_md': '', 'declared_accepted': False,
+             'foreign_passed': None, 'foreign_named': False}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1857,6 +1881,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     'the pull request comment failed unexpectedly (%s)' % type(w).__name__))
         say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data(
             '%s: %s' % (e.outcome, step or e.reason), cap=None if step else 300)))
+        name_passed()
         outputs(e.outcome, code, decl_out)
         finish_feedback()
         return code
@@ -1942,6 +1967,25 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         declared_reading(inputs['profile'], held[0] if held else None, declared_check, limits, 'checker_error')
         return dict(verdict, charged=False), ignored             # issue #1103: no API was contacted; nothing charged
 
+    def pg_checkout_at(top, cap, skip_links=False):
+        """Issue #3861: `checkout_declaration_at` for the PostgreSQL path; a `.assure/declaration.json` of another
+        profile's schema it passes over is kept in state for `name_passed` (pre-check a2 (8): never said before the
+        verdict's first notice)."""
+        passed = []
+        got = checkout_declaration_at(top, cap, skip_links=skip_links, passed=passed)
+        if passed and state['foreign_passed'] is None:
+            state['foreign_passed'] = passed[0]
+        return got
+
+    def name_passed():
+        """Issue #3861: one FOREIGN_DECLARATION_LINE per run for the file `pg_checkout_at` passed over, said after the
+        verdict's notices (or a refusal's error annotation)."""
+        if state['foreign_passed'] is not None and not state['foreign_named']:
+            state['foreign_named'] = True
+            rel, schema = state['foreign_passed']
+            say(FOREIGN_DECLARATION_LINE % {'rel': rel, 'schema': _cmd_data(schema, cap=120),
+                                            'pg': POSTGRESQL_DECLARATION_SCHEMAS[0]})
+
     def declared_reading(profile, collected, check, lim, unexpected):
         """Issue #2928: on an observed profile with intent committed in the checkout, `check(declared profile, the same
         withheld files plus raw/declaration.json = the committed bytes with their literals withheld in the snapshot's
@@ -1955,8 +1999,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         rel = declaration_draft.CHECKOUT_PATH
         try:
             try:
-                at = checkout_declaration_at(Path(env.get('GITHUB_WORKSPACE') or cwd), (lim or bundle.LIMITS).file_bytes,
-                                             skip_links=True)       # issue #3153: a link is never the intent
+                at = pg_checkout_at(Path(env.get('GITHUB_WORKSPACE') or cwd), (lim or bundle.LIMITS).file_bytes,
+                                    skip_links=True)       # issue #3153: a link is never the intent
             except Refusal as e:                  # the refused file is the one its reason names
                 rel = next((r for r in (DECLARED_CHECKOUT_PATH, declaration_draft.CHECKOUT_PATH)
                             if str(e.reason).startswith(r + ' ')), rel)
@@ -2008,6 +2052,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if declaration_draft.NAME not in collected.files:
             repo = {n[len(repository_manifest.PREFIX):]: d for n, d in collected.files.items()
                     if n.startswith(repository_manifest.PREFIX)}
+            if checkout and drafted is None and top is not None \
+                    and declaration_draft.stack_of(repo) in declaration_draft.FRAMEWORK_STACKS.values():
+                # issue #5778 (remodel 3864): a Django or FastAPI first-run draft reads its lock_locators from the
+                # requirements file that pins the framework, and only that one (Client.declaration_proposal prechecks
+                # the whole body, these bytes included)
+                repo.update({rel: data for rel, data in repository_manifest.requirement_files(
+                    top, env, declaration_draft.stack_of(repo)).items() if rel not in repo})
             record = drafted if drafted is not None else declaration_draft.draft(
                 repo, client=state['client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
             data = declaration_draft.dumps(record['declaration'])
@@ -2107,7 +2158,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         committed at DECLARED_CHECKOUT_PATH is the customer's. Only the keys it lacks are proposed, as additions to it
         (`kept_merge`); a committed value this run read differently is listed under "Fields to confirm" and kept. A
         committed file that is not a JSON object gets the draft; one with nothing to add, or one at
-        `.assure/declaration.json`, none."""
+        `.assure/declaration.json`, none (issue #3861: one there of another profile's `schema` is passed over, as if
+        absent)."""
         if state['draft'] is not None or not isinstance(verdict, dict) or verdict.get('profile') != PROPOSAL_PROFILE \
                 or not isinstance(state['observed_raw'], dict):
             return
@@ -2117,7 +2169,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         try:
             if top is None:
                 return
-            at = checkout_declaration_at(top, bundle.LIMITS.file_bytes, skip_links=True)   # #3153: links pass
+            at = pg_checkout_at(top, bundle.LIMITS.file_bytes, skip_links=True)   # #3153: links pass
             if at is not None and at[0] != DECLARED_CHECKOUT_PATH:
                 return
             drafted = draft_proposal(state['observed_raw'])
@@ -2157,7 +2209,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         declaration, else a draft from the collector's own (not yet withheld) snapshot and sidecar in `raw`, recorded
         to be proposed; None when nothing can be drafted (the missing file is then refused as before)."""
         def declare(raw):
-            got = checkout_declaration_at(top, cap)
+            got = pg_checkout_at(top, cap)
             if got is not None:
                 state['pg_checkout_rel'], state['pg_checkout'] = got
                 return got[1]
@@ -2260,6 +2312,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if subset is not None:
                 state['subset'] = subset
                 say('Assure: ' + subset_line(subset, (state.get('plan') or {}).get('tier')))
+            kept = repository_manifest.kept_lock_line(top, env, lim.file_bytes)   # #5727 (remodel 3780)
+            if kept is not None:
+                say(kept)
             line = repository_manifest.bound_line(top, collected.files, lim.file_bytes)
             if line is not None:                  # issue #3841: the declaration bounds what leaves the runner
                 say(line)
@@ -2268,8 +2323,16 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             checked = repository_manifest.checkout_path(top, declaration_draft.CHECKOUT_PATH)   # issue #5736
             if isinstance(checked, Path):
                 collected.files[declaration_draft.NAME] = checked.read_bytes()
-            manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
+            # issue #5778: the first run drafts its declaration before the manifest is completed, so the manifest binds
+            # it and the pin files it names are collected under the committed declaration's rules
             declaration(collected, top, target, checkout=True, drafted=drafted.get('record'))
+            if state['draft'] is not None and state['draft'].get('record') is not None:
+                try:
+                    drafted_doc = json.loads(bytes(collected.files[declaration_draft.NAME]).decode('utf-8'))
+                except (KeyError, ValueError):
+                    drafted_doc = None
+                repository_manifest.add_declared_pins(collected, top, drafted_doc, env, lim, modes, allow)
+            manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             art = art if art.is_absolute() else Path(cwd) / art
@@ -2552,6 +2615,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name)
     for line in notes:
         say(line)
+    name_passed()                                      # issue #3861: after the verdict's notices
     if ignored:
         say(_notice_line(ignored, inputs_profile))
     if state['report_on'] is True:

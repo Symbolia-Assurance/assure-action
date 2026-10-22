@@ -24,7 +24,7 @@ inputs:
     required: false
     default: postgresql-observed-baseline
   artefacts:
-    description: "A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it. For python-auth-declared-model leave both empty: the Action reads the checked-out repository (its Python files and requirements.md, and its dependency files in the runner, of which it sends only the Flask-Login, Flask-HTTPAuth, Flask-JWT-Extended, flask-apispec and Flask-RESTful versions they pin as raw/LIBRARY-VERSIONS.json) and the declaration at .assure/declaration.json, and when there is none it drafts one and opens one pull request of its own proposing it (it never commits to your branches; the workflow needs contents: write and pull-requests: write)."
+    description: "A directory of collected files (holding raw/, or raw/ itself). Set this or connection, never both. For http-observed-baseline with scope-binding empty, the directory holding your endpoint manifest (manifest.json and the response heads it names); the Action binds and collects it. For python-auth-declared-model leave both empty: the Action reads the checked-out repository (its Python files and requirements.md, and its dependency files in the runner, of which it sends the Flask-Login, Flask-HTTPAuth, Flask-JWT-Extended, flask-apispec, Flask-RESTful and Flask-User versions they pin, and the Flask-PageDown and Flask-SQLAlchemy versions only when they pin exactly a version Assure reads (Flask-PageDown 0.2.2, Flask-SQLAlchemy 2.2), as raw/LIBRARY-VERSIONS.json and, for a Django or FastAPI declaration, the requirements files its lock_locator entries name and, only where the check needs one, a lock file they name; see send-lock-files) and the declaration at .assure/declaration.json, and when there is none it drafts one and opens one pull request of its own proposing it (it never commits to your branches; the workflow needs contents: write and pull-requests: write)."
     required: false
     default: ''
   connection:
@@ -32,7 +32,7 @@ inputs:
     required: false
     default: ''
   declaration:
-    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim. Refused with a PostgreSQL connection; for postgresql-declared-model in api mode the Action reads .assure/postgresql-declared-model.json, else .assure/declaration.json, in the checkout (a link, a linked .assure/ directory, a non-regular or an unreadable file is refused bad_input), and when there is none it drafts one and proposes it at .assure/postgresql-declared-model.json in a pull request of its own on assure/declaration-proposal (no draft, and bad_input for the missing declaration, when the collector's sidecar names no server major from 14 to 18).
+    description: The customer's MySQL declaration file (symbolia.mysql-declaration.v0). Required with a mysql connection; the file is read in the runner and its declared sections are carried into the submission verbatim. Refused with a PostgreSQL connection; for postgresql-declared-model in api mode the Action reads .assure/postgresql-declared-model.json, else .assure/declaration.json, in the checkout (a link, a linked .assure/ directory, a non-regular or an unreadable file is refused bad_input; a .assure/declaration.json whose schema is a string other than assure.postgresql.declaration/v1 is left to its own profile and named in one notice after the verdict's notices; one with no schema is read as before), and when there is none it drafts one and proposes it at .assure/postgresql-declared-model.json in a pull request of its own on assure/declaration-proposal (no draft, and bad_input for the missing declaration, when the collector's sidecar names no server major from 14 to 18).
     required: false
     default: ''
   collection-role:
@@ -95,6 +95,10 @@ inputs:
     description: true (the default) lets the server send each requirements line it cannot match exactly, and only those lines, to Claude Haiku, which proposes the profile's statements the line asks for; the server then checks the proposal and decides the line itself, and the job summary says how many lines were read. False keeps every line from Claude Haiku, and the lines are matched exactly. API mode only.
     required: false
     default: 'true'
+  send-lock-files:
+    description: For python-auth-declared-model with a Django or FastAPI declaration. Unset (the default) sends the requirements files (requirements*.txt) the declaration's lock_locator entries name, and a lock file they name (Pipfile.lock, poetry.lock, uv.lock, pdm.lock) only when the check needs it, that is when no requirements file the declaration names pins that library; a lock file is sent whole, with every hash it records. true sends every lock file the lock_locator entries name; false sends none. Any other word is bad_input.
+    required: false
+    default: ''
   fresh-check:
     description: true sends a random Idempotency-Key, so the same bundle is checked, and charged, again. False (the default) derives the key from the content of the request, so a repeat of the same request gets the stored verdict back and is not charged again.
     required: false
@@ -184,6 +188,7 @@ runs:
         INPUT_REQUIREMENTS: ${{ inputs.requirements }}
         INPUT_COMPILE_REQUIREMENTS: ${{ inputs.compile-requirements }}
         INPUT_FRESH_CHECK: ${{ inputs.fresh-check }}
+        INPUT_SEND_LOCK_FILES: ${{ inputs.send-lock-files }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
         GITHUB_TOKEN: ${{ github.token }}

@@ -765,7 +765,9 @@ def requirement_coverage(row):
     cls, rid = r.get('reason_class'), r.get('id')
     if r.get('state') != 'not_established' or cls not in COVERAGE_CLASSES:
         return None
-    if not (isinstance(rid, str) and _COVERAGE_ID.fullmatch(rid)):
+    # #4910: requirements without an explicit id use req- plus the full SHA-256.
+    if not (isinstance(rid, str) and (_COVERAGE_ID.fullmatch(rid)
+                                    or re.fullmatch(r'req-[0-9a-f]{64}', rid))):
         return None
     line = r.get('line')
     at = 'requirements.md:%d' % line if type(line) is int and line > 0 else requirement_locator(r)
@@ -814,7 +816,8 @@ def coverage_rows(envelope):
     (`_pr_row_stays`, issue #3150). The label is the one the pull request comment gives the row (`_pr_label`: the
     requirement id, else the obligation's short name or phrase, its id only when it has neither)."""
     env = envelope if isinstance(envelope, dict) else {}
-    out = [(r['id'], None, _clip(r['id'])) for r in requirement_rows(env) or () if requirement_coverage(r) is not None]
+    out = [(r['id'], None, _clip(r['id'])) for r in requirement_rows(env) or ()
+           if requirement_coverage(r) is not None and not _pr_paid_row(env, r)]
     if out:
         return out
     _, by_ob = _pr_requirements(env)
@@ -825,11 +828,20 @@ def coverage_rows(envelope):
             continue
         req = by_ob.get((e.get('machine'), e.get('id')))
         if req is not None:
-            out.append((req.get('id'), None, _clip(req.get('id'))))
+            if not _pr_paid_row(env, req):
+                out.append((req.get('id'), None, _clip(req.get('id'))))
         elif _pr_row_stays(env, rows.get((e.get('machine'), e.get('id')), e), written, read):
             lab, name = _pr_label(env, None, e)
             out.append((None, (e.get('machine'), e.get('id')), name or lab))
     return out
+
+
+def _pr_paid_row(env, r):
+    """codex-conflicts 4229 / serving 4232: a requirement row the footer already counts as paid-supported, by the
+    footer's own predicates: a route Premium decides (`premium_row`, PR_PREMIUM_ROWS) or a rule a formal model can
+    check (`_pr_formalisable`, PR_FORMALISE_ROWS). It keeps its plain explanation and is never offered coverage, so
+    the Add coverage count and the row words agree."""
+    return isinstance(r, dict) and (premium_row(r) or _pr_formalisable(env, r))
 
 
 def _pr_row_stays(env, row, written, read):
@@ -2327,8 +2339,6 @@ def requirement_line(row, envelope=None):
     # REFUTATION-034 F7: a failed producer verification is Symbolia's to repair, said so in the customer's words
     action = CONTRACT_WORDS if r.get('reason_class') == 'checker_contract' else _clip(r.get('establishing_action'))
     state, reason = _requirement_label(r), _clip(label(r.get('reason_class')))
-    if premium_row(r):                        # journey F14: a one-route promise Premium checks
-        reason = PREMIUM_CHECKS
     loc, quote = ' — %s' % locator if locator else '', _quote_words(r.get('formalisation_quote'))
     said_once = (isinstance(envelope, dict) and envelope.get('profile') == SAID_ONCE_PROFILE and reason == state)
     # each said-once template names its state, so tools/ci/phrase_pins.py --explain-line resolves it here (#1397)
@@ -2772,6 +2782,7 @@ def readable_summary_markdown(envelope):
     adapter = adapter_step(env)                   # #5269: the coverage request stays visible before the agents' fold
     if adapter is not None:
         out += [_esc_line(adapter_line(adapter)), '']
+    out += config_default_premise_lines(env)
     out += _pr_sections(env, rd)
     return '\n'.join(out) + '\n'
 
@@ -2794,6 +2805,32 @@ def bridge_premise_lines(envelope):
             'This reading maps your app onto a served adapter through the bridge in `.assure/declaration.json`. '
             'Assure re-read that map against your code on this run; what it cannot read from the code is assumed:', ''] + \
         ['- %s' % _esc_line(_clip(t)) for t in texts[:MAX_ANNOTATIONS]] + ['']
+
+
+def config_default_premise_lines(envelope):
+    """Every source-derived env/default assumption, including on an unread machine.
+
+    Native machine warnings live in readings.<machine>.warnings; older/native
+    carriers may put them at the top or directly in readings.warnings. Keep all
+    conditional clauses, without the generic warning-count or line truncation.
+    These source facts do not assert that a runtime environment was observed.
+    """
+    env = envelope if isinstance(envelope, dict) else {}
+    readings = env.get('readings') if isinstance(env.get('readings'), dict) else {}
+    groups = [env.get('warnings'), readings.get('warnings')]
+    groups.extend(reading.get('warnings') for reading in readings.values() if isinstance(reading, dict))
+    texts, seen = [], set()
+    for entries in groups:
+        for entry in entries if isinstance(entries, list) else ():
+            if not _shown_warning(entry) or entry.get('kind') != 'config_default_premise':
+                continue
+            text = entry['text']
+            if text not in seen:
+                seen.add(text)
+                texts.append(text)
+    if not texts:
+        return []
+    return ['### Environment assumptions from source', ''] + ['- %s' % _esc_line(text) for text in texts] + ['']
 
 
 def summary_markdown(envelope, now=None):
@@ -2823,13 +2860,17 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True):
     adapter = adapter_step(env) if include_adapter else None  # the combined summary already prints this above the fold
     if adapter is not None:
         out += [_esc_line(adapter_line(adapter)), '']
-    shown = warning_texts(env)                    # serve-041: a warning sits right under the headline, in the first 10 lines
+    # Source env assumptions have their own complete section, outside the generic five-warning cap.
+    entries = env.get('warnings')
+    shown = [warning_text(entry) for entry in entries if _shown_warning(entry)
+             and entry.get('kind') != 'config_default_premise'] if isinstance(entries, list) else []
     if shown:
         out += ['- Warning: %s' % _esc_line(t) for t in shown[:5]]
         if len(shown) > 5:
             out.append('- and %d more warnings' % (len(shown) - 5))
         out.append('')
     out += bridge_premise_lines(env)              # assure.adapter-bridge/v1: what a bridged reading assumes
+    out += config_default_premise_lines(env)
     up_front = scope_notes_line(env)              # serve-012: a selected scope's bound sits under the headline
     if up_front is not None:
         out += ['Scope: %s' % esc(up_front), '']
@@ -3482,11 +3523,9 @@ PR_UNCHECKED_WORDS = {
 PR_UNCHECKED_FALLBACK = 'the check could not decide this yet; the job summary gives the reason'
 # Journey F14 (#4994): the one-route promises the setup draft writes for Premium (serve/setup_draft.py PAID_CLASSES).
 # Premium decides each as a `route_requires` method; the free check cannot bind a sentence to one route
-# (requirements_compiler.WHY_SPECIFIC), so it reads the row not established and says Premium checks it
+# (requirements_compiler.WHY_SPECIFIC). Rows use the ordinary not-established wording; the footer counts these rows.
 PREMIUM_ROW_SENTENCES = {'route-sign-in': 'Only a signed-in user can reach {route}.',
                          'route-role': 'Only a signed-in {role} can reach {route}.'}
-PREMIUM_CHECKS = 'Premium checks this'
-PR_PREMIUM_ROW = 'not established — ' + PREMIUM_CHECKS
 # the Director, 20 Oct 2026: the footer's one sentence for those rows, above the one upgrade link (`_pr_footer`)
 PR_PREMIUM_ROWS = '%d of your requirements %s established by Premium, which checks each for the route it names.'
 _PREMIUM_ROW = re.compile(r'Only a signed-in [\w-]+ can reach (?:GET|POST|PUT|PATCH|DELETE) /[^\s{}]*\.')
@@ -3699,7 +3738,53 @@ def _pr_label(env, req, row):
                                                    or _pr_phrase(env, row.get('id')))
 
 
+def _premise_label(text):
+    """The served premise clause of a status text, as served: from its "premised" word to the end of that clause (the
+    next top-level "; ", or the end), e.g. "premised: stated by you (...)" for a declared hand-off or a config value."""
+    i = text.lower().find('premised')
+    if i < 0:
+        return None
+    depth, j = 0, i
+    while j < len(text):
+        c = text[j]
+        depth += (c == '(') - (c == ')')
+        if depth <= 0 and text.startswith('; ', j):
+            break
+        j += 1
+    return text[i:j].rstrip(' .;') or None
+
+
 def _pr_checked(env, req, row):
+    """codex-conflicts 4237 HIGH-1: what Assure checked for a rule that holds (`_pr_checked_words`), keeping the served
+    premise clause ("premised: stated by you (...)") of every row it rests on whose status carries one (a declared
+    hand-off or config value), so
+    the PR comment and the readable summary never show a premised result as an ordinary holding row."""
+    rows = (_pr_matched_rows(env, req) or []) + [req] if req is not None else [row]
+    return _with_premise(_pr_checked_words(env, req, row), rows)
+
+
+def _with_premise(words, rows):
+    """codex-conflicts 4237 / 4363: `words` (the row's plain wording, kept) followed by each served premise clause
+    ("premised: stated by you (...)") of `rows` that it does not already carry, for every row state the comment and
+    the readable summary reach (holds, broken, not checked yet)."""
+    labels = [x for x in _premise_labels(rows) if not (isinstance(words, str) and x in words)]
+    if not labels:
+        return words
+    return '; '.join(([words] if words else []) + labels)
+
+
+def _premise_labels(rows):
+    """The distinct served premise clauses of `rows`' status texts, in order."""
+    labels = []
+    for r in rows or ():
+        text = r.get('status_text') if isinstance(r, dict) else None
+        lab = _premise_label(text) if isinstance(text, str) else None
+        if lab:
+            labels.append(lab)
+    return list(dict.fromkeys(labels))
+
+
+def _pr_checked_words(env, req, row):
     """What Assure checked for a rule that holds, never the default holds sentence: the profile's plain sentence for
     each matched obligation (`obligation_words` plain_checked, when every one has it), then the matched obligation's
     reason (the checker's own words), then the requirement row's reason, then the reading's requirement line, then the obligation's
@@ -3744,11 +3829,10 @@ def _pr_reason_class(env, row):
     return row.get('status')
 
 
-# The EXPERIENCE gate (trial lane 12041, readability.not_checked_next_step): a rule the customer wrote that this profile
-# does not check, and that the paid formalisation can model (`needs_formalisation_quote`, serve/requirements.py), reads
-# that as its next step on a free account (`_free_upgrade_url`, #4611). A paid account's row and every other class read as
-# before.
+# Formal-model eligibility and its legacy wording remain available to callers. Requirement rows use the ordinary
+# reason-class wording; Free conversion belongs in the shared footer.
 PR_FORMALISE_WORDS = 'this profile does not check this yet; Premium can check it with a formal model of the rule'
+PR_FORMALISE_ROWS = 'Premium can check %d of your requirements with a formal model of %s.'
 
 
 # Night read of #5006 at a860ed09 (HIGH-1): the paid formalisation serves only the profiles the bound Premium runner
@@ -3769,9 +3853,11 @@ def _pr_formalisable(env, r):
             and _free_upgrade_url(env.get('upgrade')) is not None)      # a free account (#4611), never a gifted plan
 
 
-def _pr_unchecked_words(env, cls, coverage=False):
+def _pr_unchecked_words(env, cls, coverage=False, paid=False):
     """The plain sentence for a reason class; "nothing for you to do" when the class is Symbolia's, and "your agent
-    can propose coverage" in its place for a row whose coverage step is set (issue #4363)."""
+    can propose coverage" in its place for a row whose coverage step is set (issue #4363). codex-conflicts 4229: a row
+    the footer counts as paid-supported (`_pr_paid_row`) has a step, the footer's Premium plan, so it reads the plain
+    sentence alone, neither "nothing for you to do" nor a coverage proposal."""
     s = 'app' if _pr_static(env) else 'system'
     if cls == 'vacuous' and not _pr_static(env):
         words = PR_VACUOUS_OBSERVED.format(s=s)
@@ -3779,6 +3865,8 @@ def _pr_unchecked_words(env, cls, coverage=False):
         words = PR_HTTP_NEEDS_INTENT
     else:
         words = PR_UNCHECKED_WORDS.get(cls, PR_UNCHECKED_FALLBACK).format(s=s)
+    if paid:
+        return words.replace('; ' + NOTHING_TO_DO, '')
     if coverage:
         return words.replace('; ' + NOTHING_TO_DO, '') + '; ' + PROPOSE_COVERAGE
     if CLASS_OWNERS.get(cls) == 'symbolia' and NOTHING_TO_DO not in words:
@@ -3915,14 +4003,17 @@ def _pr_item(env, finding, by_id, by_ob):
         if signout:
             what, fix = _pr_signout_text(signout, 0), _pr_signout_text(signout, 1)
             locators = [loc for _, loc, _ in signout if loc] or locators
-        return {'label': lab, 'name': name, 'text': format_space(req.get('sentence') or req.get('id')),
+        what = _with_premise(what, obs + [req])     # codex-conflicts 4363: a broken row keeps its served premise
+        return {'premise': _premise_labels(obs + [req]),   # codex-conflicts 4452: for text regenerated later (signout)
+                'label': lab, 'name': name, 'text': format_space(req.get('sentence') or req.get('id')),
                 'what': what, 'where': locators[0] if locators else None, 'locators': locators, 'fix': fix,
                 'requirement': req.get('id'), 'sentence': format_space(req.get('sentence') or ''), 'escaped': None,
                 'signout': signout, **({'mapped': True} if name and _checked_as(req) else {})}
     text = _pr_obligation_text(env, row) if row.get('id') is not None else _clip(ob_id)
     plain = _pr_fill(env, row, 'plain_broken') if row.get('id') is not None else None
     return {'label': lab, 'name': name, 'text': text,
-            'what': plain or row.get('status_text') or (label(row['status']) if row.get('status') else None),
+            'what': _with_premise(plain or row.get('status_text') or (label(row['status']) if row.get('status') else None),
+                                  [row]),     # codex-conflicts 4363: a broken row keeps its served premise
             'where': None, 'locators': locators, 'fix': _pr_remedy(env, row) if row.get('id') is not None else None,
             'requirement': None, 'sentence': None,
             # the plain words say what the witness shows, and its locators are under Where
@@ -4218,6 +4309,39 @@ def adapter_step(envelope):
     return step if isinstance(step, dict) and step.get('shape') == EXTENSION_ADAPTER else None
 
 
+def _pr_config_next_step(envelope):
+    """A conditional config step before coverage, using only located, external extension metadata.
+    A module name does not establish its constructor, version or runtime value; the customer must review the fact.
+    Unreadable metadata and other libraries keep their existing next step."""
+    step = adapter_step(envelope)
+    if step is None or envelope.get('profile') != 'python-auth-declared-model':
+        return None
+    more = step.get('more') if isinstance(step.get('more'), list) else []
+    for entry in [step] + more[:MAX_ADAPTER_MORE]:
+        if not isinstance(entry, dict) or entry.get('in_repository') is not False:
+            continue
+        library, receiver, at = entry.get('library'), entry.get('receiver'), entry.get('at')
+        if library not in ('flask_debugtoolbar', 'flask_caching'):
+            continue
+        if not isinstance(receiver, str) or not (
+                len(receiver) <= 300 and _ADAPTER_MODULE.fullmatch(receiver) and receiver.endswith('.init_app')
+                or re.fullmatch(r'[A-Z][A-Za-z0-9_]{0,63}\(app\)', receiver)):
+            continue
+        if not isinstance(at, str) or len(at) > _ADAPTER_AT_BYTES or not _ADAPTER_AT.fullmatch(at) \
+                or any(part in ('.', '..') for part in at.rsplit(':', 1)[0].split('/')):
+            continue
+        fact = ('If the debug toolbar is off where this check runs, state `DEBUG_TB_ENABLED=false`'
+                if library == 'flask_debugtoolbar' else
+                'If this call uses a supported built-in cache backend where this check runs, state its actual '
+                '`CACHE_TYPE` value')
+        return ('**What to do:** %s in `config_surfaces` in `.assure/declaration.json` for %s at %s; '
+                'review the stated fact and rerun. This fact is stated by you, not observed by Assure. '
+                'Other refusals may remain. See [Declared hand-offs and config values]('
+                'https://github.com/Symbolia-Assurance/assure-action/blob/main/docs/'
+                'EXTEND-COVERAGE.md#declared-hand-offs-and-config-values).') % (fact, esc(receiver), esc(at))
+    return None
+
+
 def adapter_line(step):
     """The one "Request coverage for <library>" sentence of an extension_adapter step, from its closed fields only: the
     API's `detail.coverage.request`, and the line of the job summary and of the pull request comment (#5269: one
@@ -4354,13 +4478,12 @@ def pr_reading(envelope):
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None), 'requirement': r.get('id'),
                           **({'mapped': True} if name and _checked_as(r) else {})})
         else:
-            words = None if unread else _pr_unchecked_words(env, r.get('reason_class'), r.get('id') in counted_reqs)
-            if words is not None and premium_row(r):     # journey F14: a one-route promise Premium checks
-                words = PR_PREMIUM_ROW
-            elif words is not None and _pr_formalisable(env, r):   # EXPERIENCE gate 12041: a real next step, on Premium
-                words = PR_FORMALISE_WORDS
+            words = None if unread else _pr_unchecked_words(env, r.get('reason_class'), r.get('id') in counted_reqs,
+                                                            paid=_pr_paid_row(env, r))
             if spent_rows and _pr_unread_row(r):    # the Director, 14 Oct 2026: the spent balance left it unread
                 words = PR_SPENT_ROW if words is None else words + '; ' + PR_SPENT_ROW
+            if words is not None:                   # codex-conflicts 4363: a served premise stays on the row
+                words = _with_premise(words, [r] + _pr_matched_rows(env, r))
             unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'), 'words': words,
                               'cls': r.get('reason_class'), **({'mapped': True} if name and _checked_as(r) else {})})
     for r in obligations:
@@ -4386,7 +4509,8 @@ def pr_reading(envelope):
         else:
             cls = _pr_reason_class(env, r)
             unchecked.append(dict(ids, label=lab, name=name, requirement=None, cls=cls,
-                                  words=None if unread else _pr_unchecked_words(env, cls, key in counted_obs),
+                                  words=None if unread else _with_premise(_pr_unchecked_words(env, cls, key in counted_obs),
+                                                                          [r]),     # codex-conflicts 4363
                                   quiet=cls == 'vacuous' or CLASS_OWNERS.get(cls) == 'symbolia'))
     if env.get('a0') is not None:
         no_reading = ('No reading: input integrity. The input integrity gate stopped the check, so no rule was read: '
@@ -4491,7 +4615,10 @@ def _pr_broken(item, repository, commit, requirements_file=None, setup=False):
     where = ', '.join(_pr_where(x, repository, commit) for x in item['locators'])
     parts, lead = [], 'Found in your code' if setup else 'What this change does'
     if item.get('signout'):
-        parts.append('%s: %s.' % (lead, _pr_signout_text(item['signout'], 0, code=True)))
+        # codex-conflicts 4452: the regenerated sign-out finding keeps the served premise clause of the rows it rests on
+        signout = _pr_signout_text(item['signout'], 0, code=True)
+        extra = [esc(x) for x in item.get('premise') or () if x not in signout]
+        parts.append('%s: %s.' % (lead, '; '.join([signout] + extra)))
     elif item['what']:
         parts.append('%s: %s.' % (lead, esc(str(item['what']).rstrip('.'))))
     if where:
@@ -4590,11 +4717,24 @@ def pr_spent_line(envelope):
 # customers to upgrade to see the proof tree), conversion mechanisms front and centre"): one fixed template line, never
 # model text, for every free account's comment from its first run. The link is the server's own upgrade url
 # (serve/api.py `upgrade_for`: the Payment Link with the account's `client_reference_id`). The readable-report
-# builder appends the same line through `premium_tree_line`, so the words live here only.
+# comment footer appends the line through `premium_tree_line`, so the words live here only.
 PREMIUM_TREE_WORDS = 'Your proof tree for this change is on Premium (USD 20 a month):'
-# serve/api.py GIFT_LINE's fixed start: a gifted Premium or Pro plan's block (`gift_upgrade_for`) is a paid account's,
-# so it reads no Premium line. render ships in the Action, which imports no API module; a test holds the two equal.
+# serve/api.py GIFT_LINE's fixed start: a gifted Premium or Pro plan receives no Free proof-tree promotion.
+# A complete ending-gift block has its separate renewal notice and link. Render ships in the Action without the API;
+# a test holds this prefix equal to the producer's.
 GIFT_LINE_PREFIX = 'To keep it, upgrade at '
+
+
+def _comment_upgrade_markdown(envelope):
+    """A gift comment carries its complete renewal notice; Free blocks keep their summary validation."""
+    up = envelope.get('upgrade') if isinstance(envelope, dict) else None
+    if isinstance(up, dict) and isinstance(up.get('line'), str) and up['line'].startswith(GIFT_LINE_PREFIX):
+        notice, url = up.get('notice'), up.get('url')
+        if not (isinstance(notice, str) and notice.strip() and not _CONTROL.search(notice)
+                and len(notice) <= CAP and '://' not in notice and not _UPGRADE_URL.search(notice)
+                and isinstance(url, str) and up['line'] == GIFT_LINE_PREFIX + url):
+            return ''
+    return upgrade_markdown(envelope).rstrip('\n')
 
 
 def _free_upgrade_url(block):
@@ -4612,7 +4752,8 @@ def _free_upgrade_url(block):
 
 # Launch scope (the Director, 12081, MUST item 3: readable and converting): every free comment ends with this sentence,
 # then the upgrade line: the server's own (`upgrade.line`, escaped as the summary prints it); a malformed line prints
-# no closing link (#4577's pin). Paid and gifted accounts read neither (`_free_upgrade_url`, #4611).
+# no closing link (#4577's pin). Paid accounts and gifts read neither Free-promotion line (`_free_upgrade_url`, #4611);
+# a complete ending-gift block can instead carry its separate renewal notice and link.
 PR_VERIFY_MORE = 'Verify more of your requirements.'
 
 
@@ -5058,13 +5199,36 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     names = _PrMachines(env)                   # issue #3221: each machine in words the first time it is named
     out = [PR_COMMENT_MARKER, '## %s' % _esc_line(pr_heading(rd, setup)), '']
     out += bridge_premise_lines(env)          # assure.adapter-bridge/v1: never a bridged reading without its premises
+    out += config_default_premise_lines(env)  # keep source env assumptions before the unread early return too
     if rd['unread']:                          # issue #3146: the lines it could not read, linked
         out += [_pr_unread_words(rd['unread'], lambda loc: _pr_where(loc, repository, commit)), '']
         if rd['app_unread']:                  # issue #3174: one next step, then the footer (`_pr_footer`)
-            out += [PR_UNREAD_NEXT, '']
             step = adapter_step(env)
-            if step is not None:              # #5269: the customer's coverage request survives the shared sections split
-                out += [esc(adapter_line(step)), '']
+            config_next = _pr_config_next_step(env)
+            if config_next is not None:
+                library, at = step.get('library'), step.get('at')
+                target = (' for ' + esc(package_name(library))
+                          if isinstance(library, str) and _ADAPTER_MODULE.fullmatch(library) else '')
+                if target and isinstance(at, str) and len(at) <= _ADAPTER_AT_BYTES and _ADAPTER_AT.fullmatch(at) \
+                        and not any(part in ('.', '..') for part in at.rsplit(':', 1)[0].split('/')):
+                    target += ' at ' + esc(at)
+                out += [config_next, '',
+                        ('For any other refused hand-offs, review `declared_handoffs`. Request coverage%s only if '
+                         'declared facts cannot express the gap, using `detail.coverage.template` with '
+                         '`POST /v1/feedback` after consent. Sending a request changes no reading until a reader '
+                         'ships.') % target, '']
+            elif step is not None:
+                out += [('**What to do:** Add a `declared_handoffs` entry in `.assure/declaration.json` for this '
+                         'hand-off, stating its actual effect, review the stated facts in the one consent, and rerun. '
+                         'A result resting on a fact says "premised: stated by you". '
+                         'See [Declared hand-offs and config values]('
+                         'https://github.com/Symbolia-Assurance/assure-action/blob/main/docs/'
+                         'EXTEND-COVERAGE.md#declared-hand-offs-and-config-values).'), '',
+                        ('Request coverage only if declared facts cannot express the gap, using '
+                         '`detail.coverage.template` with `POST /v1/feedback` after consent. '
+                         'Sending a request changes no reading until a reader ships.'), '']
+            else:
+                out += [PR_UNREAD_NEXT, '']
             return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names)) + '\n'
     elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']
@@ -5094,7 +5258,18 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None):
     if premium is not None and n_premium:        # journey F14: the rows only Premium establishes, counted once here
         out += [PR_PREMIUM_ROWS % (n_premium, 'is' if n_premium == 1 else 'are'), '']
     if premium is not None:
+        n_formalise = sum(1 for r in requirement_rows(env) or () if _pr_formalisable(env, r) and not premium_row(r))
+        if n_formalise:
+            out += [PR_FORMALISE_ROWS % (n_formalise, 'the rule' if n_formalise == 1 else 'each rule'), '']
         out += [premium, '']
+    # #5649: an ending gift is already paid, so the Free promotion helpers leave it
+    # out. Keep its server renewal block on every footer path, including paid trees.
+    upgrade = env.get('upgrade')
+    if isinstance(upgrade, dict) and isinstance(upgrade.get('line'), str) \
+            and upgrade['line'].startswith(GIFT_LINE_PREFIX):
+        gift = _comment_upgrade_markdown(env)
+        if gift:
+            out += [gift, '']
     out.append('---')
     line = pr_tree_line(tree, tree_bases)       # issue #2651: only for a verdict that carries a validated tree_url
     if line is not None:
@@ -5118,8 +5293,6 @@ PR_NO_PROMISES = ('No requirements file was sent, so no promise is listed. Commi
                   'the repository root; the Action reads it by default.')
 PR_REFUSED_TREE = ('Proof tree: none for this run. A proof tree comes with a verdict, on the Premium (USD 20 a month) '
                    'and Pro (USD 200 a month) plans; this run was refused before a verdict.')
-# issue #4578: the line's upgrade words, only beside a free account's own payment link (`upgrade.url`) as `<url>`
-PR_REFUSED_TREE_LINK = 'Upgrade to Premium at'
 #: a promise line as serve/requirements.py `_parse` reads one: an optional list marker, an id holding a digit, an
 #: optional [scope] tag, a colon, the sentence. For listing only: the server alone decides a promise.
 _PR_PROMISE = re.compile(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)?([A-Za-z][A-Za-z0-9_.-]{0,63})\s*(?:\[[^\]\n]*\])?\s*:\s*(\S.*?)\s*$')
@@ -5141,8 +5314,8 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
     """The one pull request comment for a refused run (a failure envelope): the marker; the heading; the refusal's
     outcome and reason; one next step (`step` when the Action has one, else `next_step`); each promise of the
     requirements text sent (`pr_promises`) reading `not established` with the refusal as its reason, or the line that
-    names the input to send one; the proof tree's line (none for this run); and the commit. Issue #4577: under the
-    next step, the `upgrade` line (`upgrade_markdown`) when the failure carries one. Deterministic; every
+    names the input to send one; the proof tree's line (none for this run); and the commit. A validated `upgrade`
+    line (`_comment_upgrade_markdown`) is the final conversion block, including a complete ending gift. Deterministic; every
     customer-facing value is escaped with `esc`. With `reason=False`, the raw reason stays in the failure file while
     the comment retains the outcome and next step."""
     f = failure if isinstance(failure, dict) else {}
@@ -5153,11 +5326,10 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
     out = [PR_COMMENT_MARKER, '## %s' % PR_REFUSED_HEADING, '',
            'This run was refused (%s)%s' % (word, ': ' + esc(f.get('reason')) if reason else '.'), '',
            '**Next step:** %s' % esc(step or next_step(f), CAP if step else step_cap(f)), '']
-    upgrade = upgrade_markdown(f).rstrip('\n')     # issue #4577: a spent free balance's refusal: price and payment link
-    closing = pr_verify_more(f)
-    if upgrade and not closing:                    # a gifted plan's line, or no free account: said where it was
-        out += [upgrade, '']
     detail = f.get('detail') if isinstance(f.get('detail'), dict) else {}
+    block = f.get('upgrade') if 'upgrade' in f else detail.get('upgrade')  # malformed top-level block wins (#4577)
+    upgrade = _comment_upgrade_markdown({'upgrade': block})
+    closing = pr_verify_more(f)
     if isinstance(detail.get('coverage'), dict):           # issue #4230: a shape no checker reads yet
         out += ['**Add coverage:** %s' % esc(coverage_words(detail['coverage'])), '']
     promises = pr_promises(requirements_text)
@@ -5178,13 +5350,15 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
     # notice, the link) ends with it, after the closing sentence, in place of the closing's plain upgrade line.
     if closing and upgrade:
         closing = ['', PR_VERIFY_MORE, '', upgrade]
+    elif upgrade:                                  # the validated ending-gift block also belongs in the final footer
+        closing = ['', upgrade]
     return '\n'.join(out + closing) + '\n'
 
 # ---------- readable-report-001 (the Director, 18 Oct 2026): the report leads the pull request comment ----------
 # "the readable ... comments written by agents on the PR to tell humans on the PR what it found, what's recorded". A
 # written report's first paragraph is the reviewer's summary under the comment's heading; the full report follows,
-# folded; then two template lines, never model text (the Director's ruling the same day): the trace line, and for a
-# free account the proof-tree line with the Premium payment link. Everything else in the comment is unchanged.
+# folded; then the template trace line, never model text. The shared comment footer retains the free account's
+# one Premium payment link. Everything else in the comment is unchanged.
 PR_REPORT_FOLD = '<details><summary>The full report</summary>'
 PR_TRACE_LINE = 'Everything Assure checked is in the trace: the verdict file `%s` of this run, check `%s`.'
 DEFAULT_VERDICT_FILE = 'assure-verdict.json'
@@ -5241,16 +5415,16 @@ def report_status_lines(envelope):
 
 
 def pr_with_report(body, record, envelope, verdict_file=None):
-    """The comment `body` (`pr_comment_markdown`) with a written report under its heading (after a free comment's
-    Premium proof-tree line, #4611's `premium_tree_line`, which stays first): the report's first paragraph, then
-    folded: each rule's status from the verdict (`report_status_lines`) and the full report; then the trace line. The
-    tree line is the comment's one payment link. `body` itself for any record that is not written."""
+    """The comment `body` (`pr_comment_markdown`) with a written report under its heading: the report's first
+    paragraph, then folded: each rule's status from the verdict (`report_status_lines`) and the full report; then the
+    trace line. The shared footer retains the one payment link. A legacy body's existing top tree line stays before
+    the report. `body` itself for any record that is not written."""
     paras = report_paragraphs(record)
     if not paras:
         return body
     lines = body.split('\n')
     at = 3
-    top = premium_tree_line(envelope)              # #4611 (issue #4576): the free comment's one tree line stays first
+    top = premium_tree_line(envelope)              # preserve placement when given a legacy body with a top tree line
     if top is not None and lines[3:5] == [top, '']:
         at = 5
     block = [paras[0], '', PR_REPORT_FOLD, ''] + report_status_lines(envelope) + ['', '\n\n'.join(paras), '',
@@ -5262,15 +5436,9 @@ def pr_with_report(body, record, envelope, verdict_file=None):
 
 
 def pr_refused_tree(failure):
-    """Issue #4578: the refused comment's proof-tree line: PR_REFUSED_TREE (the plans and their prices), then the
-    server's buy.stripe.com payment link (`_free_upgrade_url`) as `<url>` when the failure carries one in `upgrade` or
-    `detail.upgrade` (a free account's refusal on a server with a Premium payment link, serve/api.py `_fail`), else
-    PR_REFUSED_TREE alone: a paid account's refusal is never told to upgrade."""
-    detail = failure.get('detail') if isinstance(failure.get('detail'), dict) else {}
-    for up in (failure.get('upgrade'), detail.get('upgrade')):
-        url = _free_upgrade_url(up)
-        if url:
-            return '%s %s <%s>' % (PR_REFUSED_TREE, PR_REFUSED_TREE_LINK, url)
+    """The refused comment's proof-tree notice (plans, prices and no verdict).
+    The validated payment link belongs only to the final conversion block. Paid accounts and gifts get no Free
+    proof-tree promotion here; a complete ending gift has its separate renewal notice and link."""
     return PR_REFUSED_TREE
 
 

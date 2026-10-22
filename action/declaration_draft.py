@@ -39,6 +39,7 @@ CHECKOUT_PATH = '.assure/declaration.json'          # where an accepted declarat
 PROPOSAL_SCHEMA = 'assure.identity.declaration-proposal/v1'
 STACK = 'python/flask'
 SCHEMA = 'assure.python-auth.declaration/v1'
+CONFIG_ROW = 'CONFIG'   # a to_confirm row that is a config premise in config_surfaces (proposal/python_flask.py)
 PROPOSAL_BRANCH = 'assure/declaration-proposal'   # Assure's own branch; never the base, the head or the default
 TITLE = 'Assure: proposed intent \u2014 review and merge to accept'   # issue #2927: one title for every profile's draft
 NEVER_COMMITS = ('Assure never commits to your branches; it opens one pull request proposing each profile\'s draft at '
@@ -97,6 +98,7 @@ FIELD_WORDS = {
     'requirements_file': 'where your requirements file is',
     'instance_config': 'how your app loads its instance configuration',
     'config_surfaces': 'which configuration values you state for your app',   # #5289: stated config facts
+    'declared_handoffs': 'which library calls you state hand your app to a library, and what they register',   # #5770
 }
 BOOKKEEPING = ('schema', 'id', 'language', 'idiom') + tuple(FLAGS)
 # Issue #2926: the Action's per-profile intent contract. It lives here, not in serve/profiles/*.json: the profile rows
@@ -124,7 +126,8 @@ NO_DRAFTER_NOTE = '`%s` has no intent drafter yet; Assure drafts no declaration 
 NO_DRAFTER_READS = {'http-observed-baseline': 'only what was observed',
                     'mysql-declared-model': 'the declaration supplied with the run'}   # a declared model
 READS_INTENT_NOTE = ('`%s` reads the declaration supplied with the run; Assure drafts one only on its own connection '
-                     'run with no `' + CHECKOUT_PATH + '` in the checkout, and proposes it in its own pull request.')
+                     'run with no PostgreSQL declaration at `' + CHECKOUT_PATH + '` in the checkout (issue #3861: a file '
+                     'of another schema there is not one), and proposes it in its own pull request.')
 
 
 # Issue #4395: a repository with no requirements.md gets a starter one in the same proposal, drafted from the
@@ -325,10 +328,68 @@ def _section(record, rel, source, lead=None):
     lines += ['- %s (%s)' % (label, _where(at)) for label, at in _confirm_rows(record)]
     if record.get('kept'):                          # committed values this run read differently, kept as written
         lines += [''] + list(record['kept'])
-    notes = [n.get('note') for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
+    rows = [n for n in record.get('to_confirm') or () if isinstance(n, dict) and isinstance(n.get('note'), str)]
+    notes = [n['note'] for n in rows if n.get('method') != CONFIG_ROW]
     if notes:                                       # issue #2567: routes kept out of public_routes, in plain words
         lines += ['', 'To confirm (routes Assure did not draft as public):', ''] + ['- %s' % n for n in notes]
+    assumed = [n['note'] for n in rows if n.get('method') == CONFIG_ROW]
+    if assumed:                                     # a config value drafted into config_surfaces, in plain words
+        lines += ['', 'To confirm (what Assure assumes about your app\'s configuration):', ''] + ['- %s' % n for n in assumed]
+    facts = stated_facts_lines(record.get('declaration'))
+    if facts:                                       # #5770 (c): the facts the customer stated, which Assure cannot read
+        lines += [''] + facts
     return '\n'.join(lines) + '\n'
+
+
+STATED_FACTS_HEADING = 'Facts you stated (Assure cannot read these from your code):'
+STATED_FACTS_SENTENCE = 'Assure takes these as stated by you; a check that rests on one says so.'
+
+
+def _text(v):
+    return isinstance(v, str) and bool(v)
+
+
+def _handoff_line(h):
+    """One line for a declared hand-off, or None when the entry is malformed."""
+    if not isinstance(h, dict) or not _text(h.get('call')) or not _text(h.get('library')):
+        return None
+    head, effect = '- %s %s: ' % (h['call'], h['library']), h.get('effect')
+    if effect == 'no_routes':
+        return head + 'registers no route'
+    routes = effect.get('routes') if isinstance(effect, dict) else None
+    if not isinstance(routes, list) or not routes:
+        return None
+    if not all(isinstance(r, dict) and _text(r.get('method')) and _text(r.get('path')) and _text(r.get('guard'))
+               for r in routes):
+        return None
+    return head + 'registers ' + ', '.join('%s %s (%s)' % (r['method'], r['path'], r['guard']) for r in routes)
+
+
+def _config_line(c):
+    """One line for a stated configuration value, or None when the entry is malformed."""
+    if not isinstance(c, dict) or not _text(c.get('key')) or 'value' not in c:
+        return None
+    try:
+        line = '- %s = %s' % (c['key'], json.dumps(c['value']))
+    except (TypeError, ValueError):
+        return None
+    return line + ' (%s)' % c['where'] if _text(c.get('where')) else line
+
+
+def stated_facts_lines(declaration):
+    """#5770 rule (c): the lines that list the facts `declaration` states and Assure cannot read from the code, under
+    their own heading, one line each, then one sentence; [] when it states none. Hand-offs come first, then
+    configuration values, each in declared order and listed once; a malformed entry is passed over."""
+    if not isinstance(declaration, dict):
+        return []
+    rows = []
+    for key, line in (('declared_handoffs', _handoff_line), ('config_surfaces', _config_line)):
+        items = declaration.get(key)
+        for item in items if isinstance(items, list) else ():
+            row = line(item)
+            if row and row not in rows:
+                rows.append(row)
+    return [STATED_FACTS_HEADING, ''] + rows + ['', STATED_FACTS_SENTENCE] if rows else []
 
 
 def _confirm_rows(record):

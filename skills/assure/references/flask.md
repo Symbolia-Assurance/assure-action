@@ -8,10 +8,31 @@ The Action reads the checked-out repository: its tracked Python files and `requi
 
 Assure never commits to your branches; it opens one pull request proposing each profile's draft at its own path under .assure/; merging it is the acceptance. The pull request, `Assure: proposed intent — review and merge to accept`, comes from Assure's own branch `assure/declaration-proposal` into your base branch (the pull request's base, or your default branch on a push), and changes only the drafts' files: python-auth's `.assure/declaration.json` and `postgresql-declared-model`'s `.assure/postgresql-declared-model.json`, side by side when both profiles run on one repository, its description holding one section per file. Its description and the job summary list each field to confirm with the file and line it was read from. A later run updates the same pull request, keeping the other profile's file, in the shallow checkout `actions/checkout` leaves too; it never opens a second one. Its description opens by naming the file this run is proposing. A branch on an older base tip, or one holding a file its description does not name (a proposal opened before one pull request carried both profiles), is rebuilt from the base branch's tip, carrying over each draft under `.assure/` whose section its description holds (with that section); a file it does not name is left behind.
 
-Which profiles draft intent: `python-auth-declared-model` drafts `.assure/declaration.json`; `postgresql-declared-model` reads the declaration supplied with the run, and drafts one only on its own connection run with no `.assure/declaration.json` in the checkout, proposing it in Assure's pull request (the job summary of a run not bounded by a draft says so in an "Intent" section); `postgresql-observed-baseline` writes its proposal beside the verdict (`assure-declaration-proposal.json`) and, inside a git checkout with a workflow token, proposes it at `.assure/postgresql-declared-model.json` in Assure's pull request; `http-observed-baseline` and `mysql-declared-model` have no intent drafter yet, and the job summary of a run of either that reaches a verdict says so in an "Intent" section: an `http-observed-baseline` check reads only what was observed, a `mysql-declared-model` check reads the declaration supplied with the run.
+Which profiles draft intent: `python-auth-declared-model` drafts `.assure/declaration.json`; `postgresql-declared-model` reads the declaration supplied with the run, and drafts one only on its own connection run with no PostgreSQL declaration at `.assure/declaration.json` in the checkout (a file of another schema there is not one), proposing it in Assure's pull request (the job summary of a run not bounded by a draft says so in an "Intent" section); `postgresql-observed-baseline` writes its proposal beside the verdict (`assure-declaration-proposal.json`) and, inside a git checkout with a workflow token, proposes it at `.assure/postgresql-declared-model.json` in Assure's pull request; `http-observed-baseline` and `mysql-declared-model` have no intent drafter yet, and the job summary of a run of either that reaches a verdict says so in an "Intent" section: an `http-observed-baseline` check reads only what was observed, a `mysql-declared-model` check reads the declaration supplied with the run.
 
 Read the draft in that pull request. Edit any field that is wrong on its branch. Merge it to accept.
 
 Until the declaration is on your base branch, the result is bounded by the draft. The log says "bounded by an unaccepted declaration draft", the job summary says where the draft is, and the step output `declaration` is `unaccepted-draft`. After the merge, every run reads the accepted file and the bound goes.
 
 GitHub lets the workflow token open a pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". When the workflow lacks `contents: write` or `pull-requests: write`, that setting is off, or the run is on a pull request from a fork, the check still runs, bounded, and the job summary carries the draft in full with one sentence naming the two permission lines. The summary also carries a **Commit this draft** link: GitHub's prefilled new-file form (`https://github.com/<owner>/<repo>/new/<branch>` with the path and the draft filled in, on the branch the proposal targets: the pull request's base branch, else the repository's default branch), so accepting the draft stays one click with no setting changed. When that branch cannot be read (a push run with no workflow token, or the repository could not be read) or the link would pass 8000 characters, the summary instead names the path at which to commit the draft shown below it. The observed PostgreSQL profile's summary carries such a link only when withholding left its draft unchanged; a draft holding your policy literals gets none, since the summary never shows them.
+
+### Declared hand-offs and config values
+
+A `python-auth` declaration (`.assure/declaration.json`) can state two kinds of fact that Assure cannot read from your code. Both are stated by you.
+
+`config_surfaces` gives the value of a configuration key. Assure reads a stated value only for the keys it interprets: `DEBUG_TB_ENABLED` and `CACHE_TYPE`. A binding in your code that contradicts it reads disproven.
+
+```json
+{"key": "CACHE_TYPE", "value": "SimpleCache", "where": "production"}
+```
+
+`declared_handoffs` says what a call Assure cannot follow does with your app object or a blueprint, such as `db.init_app(app)` or `UserManager(app, db, User)`. Name the call as `<file>:<line>`, the library by its PyPI name, and the effect. `no_routes` means the call registers no route. `routes` lists every route it registers, each with a method, a path and a guard: a guard your declaration defines under `guards`, or `public`. AUTH-1 judges each listed route like any other.
+
+```json
+[
+  {"call": "app/__init__.py:37", "library": "Flask-SQLAlchemy", "effect": "no_routes"},
+  {"call": "app/__init__.py:68", "library": "Flask-User", "effect": {"routes": [{"method": "GET", "path": "/user/sign-in", "guard": "public"}, {"method": "GET", "path": "/user/change-password", "guard": "login_required"}]}}
+]
+```
+
+Every row that rests on one of these facts reads "premised: stated by you (file:line)". A `no_routes` entry whose call registers a route in code Assure can read reads disproven. An entry that names a call that does not exist is refused as a stale declaration. The setup consent lists these facts.

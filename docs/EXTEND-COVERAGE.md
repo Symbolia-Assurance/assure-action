@@ -55,6 +55,27 @@ git -C /path/to/app push
 
 The comment says `holds, assuming DEBUG_TB_ENABLED = false in production (stated by you, not observed)`. This is a stated assumption, not an observed production value; do not count it as an unconditional hold. This path covers the supported disabled-DebugToolbar and built-in Flask-Caching decisions; it cannot waive an unknown extension, a contradiction in code, a computed loader or a constructor's configuration. An unused fact changes no reading.
 
+### Declared hand-offs and config values
+
+A `python-auth` declaration (`.assure/declaration.json`) can state two kinds of fact that Assure cannot read from your code. Both are stated by you.
+
+`config_surfaces` gives the value of a configuration key. Assure reads a stated value only for the keys it interprets: `DEBUG_TB_ENABLED` and `CACHE_TYPE`. A binding in your code that contradicts it reads disproven.
+
+```json
+{"key": "CACHE_TYPE", "value": "SimpleCache", "where": "production"}
+```
+
+`declared_handoffs` says what a call Assure cannot follow does with your app object or a blueprint, such as `db.init_app(app)` or `UserManager(app, db, User)`. Name the call as `<file>:<line>`, the library by its PyPI name, and the effect. `no_routes` means the call registers no route. `routes` lists every route it registers, each with a method, a path and a guard: a guard your declaration defines under `guards`, or `public`. AUTH-1 judges each listed route like any other.
+
+```json
+[
+  {"call": "app/__init__.py:37", "library": "Flask-SQLAlchemy", "effect": "no_routes"},
+  {"call": "app/__init__.py:68", "library": "Flask-User", "effect": {"routes": [{"method": "GET", "path": "/user/sign-in", "guard": "public"}, {"method": "GET", "path": "/user/change-password", "guard": "login_required"}]}}
+]
+```
+
+Every row that rests on one of these facts reads "premised: stated by you (file:line)". A `no_routes` entry whose call registers a route in code Assure can read reads disproven. An entry that names a call that does not exist is refused as a stale declaration. The setup consent lists these facts.
+
 ## Before sending an adapter or model
 
 The agent shows exactly what will be sent and asks once: **"Would you like to submit this data to improve Assure's coverage of your requirements?"** For a bridge, name the declaration and route/header map, selected application files and requirements; for a request, name the note and any proposed model. Wait for yes before a POST or a commit/push that submits them. If declined, keep the work local; the bridge self-check still works.
