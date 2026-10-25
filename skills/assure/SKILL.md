@@ -14,7 +14,7 @@ BASE is `https://api.symbolia.ai` unless the person or env variable `ASSURE_API`
 Pick one check:
 
 - **A Flask, FastAPI or Django app:** the sign-in check, `python-auth-declared-model`. Free; it never runs your code.
-- **A PostgreSQL database the app uses:** `postgresql-observed-baseline`, from a connection or a CI database. Skip to step 5.
+- **A PostgreSQL database the app uses:** `postgresql-observed-baseline`, from a connection or a CI database. Committed `.assure/postgresql-declared-model.json` (the merged proposal) or `.assure/declaration.json` adds `postgresql-declared-model`: in `mode: api`, two checks charged. One check: `profile: postgresql-declared-model`, or commit neither. Skip to step 5.
 - **Both:** Flask first, then the database.
 
 Standard-library http.server: the same check with a declaration you write (references/python.md). Supabase cannot grant the collector's role. So this Action version cannot collect from a Supabase database.
@@ -29,7 +29,7 @@ LIST: routes with no sign-in guard (method, path). Ask the person once:
 Send N files (X KB) to BASE? This includes dependency files, including nested requirements files. Later sends follow DATA.md: source, intent, records, default report, and whole Django/FastAPI lock files, only where your versions are pinned (names, versions, hashes). Public: LIST; other routes need sign-in. One yes covers sending, setup and its pull request. Yes, or edit LIST?
 ```
 
-No: send nothing; leave an unsent local draft and push no sending workflow. Yes: POST this JSON to BASE/v1/setup, with no key. For FastAPI or Django, add the key stack, python/fastapi or python/django. At most 10 calls a minute from one address.
+No: send nothing; leave an unsent local draft and push no sending workflow. Yes: POST this JSON to BASE/v1/setup, with no key. Tool asks to approve? [Approving](references/agent.md#approving-a-request-in-your-tool). For FastAPI or Django, add the key stack, python/fastapi or python/django. At most 10 calls a minute from one address.
 
 ```json
 {"profile": "python-auth-declared-model",
@@ -46,11 +46,11 @@ setup.requirements.text -> setup.requirements.path (requirements.md)
 setup.workflow.text     -> setup.workflow.path (.github/workflows/assure.yml)
 ```
 
-If setup.requirements is null, keep existing requirements.md. Add `report: true` (default on; `report: false` opts out), and `api-url` with BASE if BASE is not the default. `requirements: none` stops the separate field, not tracked root requirements.md in the Python bundle (DATA.md). Change `main` for another default branch. Never give the Assure job the name of a required status check.
+If setup.requirements is null, keep existing requirements.md. Add `report: true` (default on; `report: false` opts out), and `api-url` with BASE if BASE is not the default. `requirements: none` stops the separate field, not tracked root requirements.md in the Python bundle ([DATA.md](DATA.md)). Change `main` for another default branch. Never give the Assure job the name of a required status check.
 
 ## 4. Open the pull request
 
-Ask nothing more. Put LIST, with the person's edits, in declaration.public_routes. Each to_confirm row is applied by default (CONFIG: keep as drafted); list its method, path and note in the pull request body. Do not ask about requirements.md: the workflow names it.
+Ask nothing more. Set declaration.public_routes to the union of LIST, with the person's edits, and the draft's public_routes minus routes the person removed from LIST; in the pull request body, list each route that only one of the two names, and which, and name each removed drafted route as not applied. Each to_confirm row is applied by default (CONFIG: keep as drafted); list its method, path and note in the pull request body. Do not ask about requirements.md: the Action reads the repository-root `requirements.md` by default; one notice names a root file it cannot send.
 
 Commit on a new branch; open a pull request with your own GitHub access. No repository setting changes. Fix confirm fields at sources' file:line. After the first Assure comment, return its first line and pull request link; stop. Never merge: the person reviews and merges.
 
@@ -112,10 +112,10 @@ jobs:
         with:
           profile: python-auth-declared-model
           report: true
-          # requirements: requirements.md   # once you have one
+          # requirements: requirements.md   # the default
 ```
 
-When permitted, the first run opens `Assure: proposed intent — review and merge to accept`; else use the summary draft. Name **Approve and run** as a human action. After the first Assure comment, return the pull request link and its first line, then stop. Never merge: the person reviews and merges.
+If permitted, the first run opens `Assure: proposed intent — review and merge to accept`; else the summary draft. Name **Approve and run** (Conversation tab) as a human action. After the first Assure comment, return the pull request link and first line, then stop. Never merge: they review and merge.
 
 ## References
 

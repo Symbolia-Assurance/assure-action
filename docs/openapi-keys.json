@@ -19,7 +19,7 @@
     "/v1/keys/rotate": {
       "post": {
         "operationId": "rotateKey",
-        "description": "The Authorization header's key is the credential and the subject. No body (Content-Length 0) and no query parameters. From the key's rotation window (Assure-Key-Expires minus 7 days, or the last quarter of its life) the answer is a new key for the same account and plan, expiring 30 days from now, with predecessor naming this key; inside the overlap a second rotate with the old key answers the same successor with reissued true. Before the window: 409 rotate_too_early, detail.opens_at the time it opens (null for a key with no expiry yet). Counts against the account's minute rate window.",
+        "description": "The Authorization header's key is the credential and the subject. No body (Content-Length 0) and no query parameters. From the key's rotation window (Assure-Key-Expires minus 7 days, or the last quarter of its life) the answer is a new key for the same account and plan, expiring 30 days from now, with predecessor naming this key; inside the overlap a second rotate with the old key answers the same successor with reissued true. Before the window: 409 rotate_too_early, detail.opens_at the time it opens. A key with no expiry is refused key_expired (401, detail.expires null) before the window is read. Counts against the account's minute rate window.",
         "x-body-max-bytes": 0,
         "security": [
           {
@@ -289,11 +289,14 @@
                       "string",
                       "null"
                     ],
-                    "description": "rotate_too_early: when the window opens; null for a key with no expiry yet, and for a GitHub sign-in key, which never rotates (the reason says which)"
+                    "description": "rotate_too_early: when the window opens; null for a GitHub sign-in key, which never rotates (the reason says so)"
                   },
                   "expires": {
-                    "type": "string",
-                    "description": "rotate_too_early and key_expired: the presented key's expiry"
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "rotate_too_early and key_expired: the presented key's expiry; key_expired: null for a key with no expiry"
                   },
                   "window": {
                     "type": "string",

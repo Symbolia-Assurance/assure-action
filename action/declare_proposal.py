@@ -73,13 +73,16 @@ STOCK_KEYS = {
 }
 #: the derive step reads at most 32 privilege_queries rows (derive_lifted.py m1_acl scoped(...)[:32])
 QUERY_CAP = 32
+#: M1 models at most 8 tables per declaration (derive m1_acl "object X beyond explorer cap 8"; serve/profiles.py
+#: refuses M1 when a cut table is named by a declared check)
+M1_OBJECT_CAP = 8
 #: keys the snapshot gives no basis for: every one is reported unread, never drafted (observed needs_intent ids)
 ALWAYS_UNREAD = (
     "disjoint_duties",      # PRIV-3: which duties must stay apart is the operator's division of work
     "declared_revokes",     # PRIV-6: which grants the operator means to revoke
     "certificate_roles",    # TLS-3: which roles must present a client certificate
     "no_loss_required",     # REP-3, REP-3-CONFIG: whether a committed transaction may be lost is the operator's
-    "exclusive_reader",     # LR-1: which role alone may read the replication stream
+    "exclusive_reader",     # LR-1: which role alone may read the replication stream (drafted when one is observed)
     "authority_complete",   # SD-2: whether every authority over the caller's path is listed
     "owner_only_login",     # SD-2: whether only the owner logs in
     "caller",               # SD-2: which role calls the SECURITY DEFINER function
@@ -224,13 +227,147 @@ def _norm_sql(text):
     return re.sub(r"\s+", " ", str(text).strip().strip("()")).strip().lower()
 
 
-def _outside_grammar(predicate, policies):
+#: issue #3237: the declared derive step's reading of the two Supabase tenant shapes (derive.py tenant_form and its
+#: helpers, copied verbatim: the drafter also ships alone in the public action tree, without assure/checkers;
+#: tests/serving/test_issue_3237_accept.py pins the copy to derive.py's text)
+def unwrap(text):
+    """`text` with every parenthesis pair that encloses all of it removed."""
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(text):
+            depth += {"(": 1, ")": -1}.get(ch, 0)
+            if depth == 0 and i < len(text) - 1:
+                return text
+        text = text[1:-1].strip()
+    return text
+
+
+UID_READS = (re.compile(r"\( select auth\.uid \( \)(?: as [a-z_][a-z0-9_]*| [a-z_][a-z0-9_]*)? \)"), re.compile(r"auth\.uid \( \)"))
+
+
+TENANT_IDENT = r"[a-z_][a-z0-9_]*"
+
+
+def tenant_skeleton(text):
+    """issue #3237: `text` lower-cased, one token per space, every Supabase auth.uid() read (bare or its initplan
+    `(SELECT auth.uid() [AS name])`) spelled UID; None for non-text and for text carrying a quote, a NUL or `;`."""
+    if type(text) is not str or any(ch in text for ch in "\"'\x00;"):
+        return None
+    tokens = re.findall(r"[a-z_][a-z0-9_$]*(?:\.[a-z_][a-z0-9_$]*)*|\d+|<>|!=|<=|>=|\S", re.sub(r"\s*\.\s*", ".", text.lower()))
+    skeleton = " ".join(tokens)
+    for pattern in UID_READS:
+        skeleton = pattern.sub("UID", skeleton)
+    return unwrap(skeleton)
+
+
+def split_top(text, word):
+    """`text` split on ` <word> ` outside every parenthesis."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        depth += {"(": 1, ")": -1}.get(text[i], 0)
+        if depth == 0 and text.startswith(" %s " % word, i):
+            parts.append(text[start:i])
+            start = i = i + len(word) + 2
+            continue
+        i += 1
+    return parts + [text[start:]]
+
+
+def tenant_column(operand, table):
+    """The protected-table column `operand` names (bare or qualified by `table`), or None."""
+    operand = unwrap(operand)
+    if operand.startswith(table + "."):
+        operand = operand[len(table) + 1:]
+    return operand if re.fullmatch(TENANT_IDENT, operand) else None
+
+
+def tenant_form(text, table, policy=False):
+    """issue #3237: the tenant scope `text` states on the protected table `table`, or None:
+    ("uid", column) for `UID = column` (either side), the row's own column equal to the caller's auth.uid();
+    ("parent", parent, key, fk, owner) for `EXISTS (SELECT 1 FROM parent alias WHERE alias.key = fk AND alias.owner =
+    UID)` (conjuncts and operands in either order), the row whose foreign key fk names a parent row the caller owns.
+    The parent form reads as one tenant (the parent's owner) per row only where alias.key is the parent's key, which
+    the operator confirms (DECLARATIONS.md). A `policy` text (pg_get_expr's print) must qualify fk by `table`: a bare
+    column inside the subquery would name the parent's own column where the parent has one."""
+    form, _reason = parent_owner(text, table, policy)
+    if form is not None:
+        return form
+    skeleton = tenant_skeleton(text)
+    if skeleton is None or type(table) is not str:
+        return None
+    sides = split_top(skeleton, "=")
+    if len(sides) != 2 or "UID" not in [unwrap(side) for side in sides]:
+        return None
+    other = [side for side in sides if unwrap(side) != "UID"]
+    column = tenant_column(other[0], table) if len(other) == 1 else None
+    return ("uid", column) if column else None
+
+
+def parent_owner(text, table, policy=False):
+    """(("parent", parent, key, fk, owner), "") when `text` is the parent-owner EXISTS form on `table`, else (None,
+    the named reason it is not)."""
+    skeleton = tenant_skeleton(text)
+    if skeleton is None or type(table) is not str:
+        return None, "not readable policy text (non-text, a quote, a NUL or `;`)"
+    m = re.fullmatch(r"exists \( select 1 from (%s) (?:as )?(%s) where (.*) \)" % (TENANT_IDENT, TENANT_IDENT), skeleton)
+    if m is None:
+        return None, "not EXISTS (SELECT 1 FROM <parent table> <alias> WHERE ...)"
+    parent, alias, where = m.group(1), m.group(2), unwrap(m.group(3))
+    if parent == table or alias == table:
+        return None, "parent table %s is the protected table itself" % parent
+    if len(split_top(where, "or")) > 1:
+        return None, "the WHERE joins its comparisons with OR, not AND"
+    conjuncts = [unwrap(part) for part in split_top(where, "and")]
+    owner = key = fk = None
+    for conjunct in conjuncts:
+        sides = [unwrap(side) for side in split_top(conjunct, "=")]
+        if len(sides) != 2:
+            return None, "the WHERE comparison %r is not one `=`" % conjunct
+        mine = [side[len(alias) + 1:] for side in sides if side.startswith(alias + ".") and re.fullmatch(TENANT_IDENT, side[len(alias) + 1:])]
+        if len(mine) != 1:
+            return None, "the WHERE comparison %r does not compare one %s column" % (conjunct, alias)
+        rest = [side for side in sides if not side.startswith(alias + ".")][0]
+        if rest == "UID":
+            if owner is not None:
+                return None, "two owner columns compared with auth.uid()"
+            owner = mine[0]
+        elif tenant_column(rest, table) is not None:
+            if policy and not rest.startswith(table + "."):
+                return None, "the foreign key %r is not qualified by %s (it may name a %s column)" % (rest, table, parent)
+            if key is not None:
+                return None, "two joins to the protected table"
+            key, fk = mine[0], tenant_column(rest, table)
+        else:
+            return None, "the foreign key %r is not a column of %s" % (rest, table)
+    if owner is None:
+        return None, "no owner column of %s is compared with auth.uid()" % parent
+    if key is None:
+        return None, "the join %s.<key> = %s.<foreign key> is missing" % (alias, table)
+    return ("parent", parent, key, fk, owner), ""
+
+
+def _tenant_form(sql, table, policy=True):
+    """issue #3237: the derive step's tenant_form of `sql` on `table`: ("uid", column) for auth.uid(), bare or
+    `(SELECT auth.uid() [AS name])`, compared by `=` with one column; ("parent", parent, key, fk, owner) for the
+    parent-owner EXISTS form; None for any other text."""
+    return tenant_form(sql, table, policy)
+
+
+def _same_filter(sql, predicate, table):
+    """Whether the derive step reads `sql` as the same tenant_eq as `predicate` declared on `table`."""
+    if _norm_sql(sql) == _norm_sql(predicate):
+        return True
+    form = _tenant_form(sql, table)
+    return form is not None and form == _tenant_form(predicate, table, False)
+
+
+def _outside_grammar(predicate, policies, table=None):
     """The policy expressions on a table the declared derive step cannot read with `predicate` declared."""
     out = []
     for _index, policy in policies:
         for field, clause in (("polqual", "USING"), ("polwithcheck", "WITH CHECK")):
             sql = policy.get(field)
-            if sql is not None and _norm_sql(sql) not in ("true", "false", _norm_sql(predicate)):
+            if sql is not None and _norm_sql(sql) not in ("true", "false") and not _same_filter(sql, predicate, table):
                 out.append("policy %s %s" % (policy.get("polname"), clause))
     return out
 
@@ -470,7 +607,8 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         d.unread("applications", "roles were not collected" if roles_sec is None else
                  "no customer login and no customer role holding a table privilege was observed")
 
-    # privilege_queries (PRIV-1): the observed table grants to customer roles other than the owner
+    # privilege_queries (PRIV-1): the observed table grants to customer roles other than the owner, else the
+    # owners' own observed table privileges
     if objects_sec is None or roles_sec is None:
         d.unread("privilege_queries", "objects or roles were not collected")
     else:
@@ -486,6 +624,30 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                         member = {"object": row["relname"], "privilege": TABLE_PRIVS[letter], "role": parsed[0]}
                         if member not in [m for m, _ in queries]:
                             queries.append((member, SNAP + "/objects/%d/relacl/%d" % (index, j)))
+        # issue #5960: with no such grant, each table's own customer owner and the table privileges it is observed to
+        # hold (its own aclitem's letters, or all four under a NULL ACL: the default owner ACL, cited at the owner the
+        # role is read from, the major named in a note) are drafted as the intended baseline. The loop binds
+        # table_owner: `owner` stays the connected database's owner, which untrusted_roles and intended_flows read
+        null_acl = 0
+        for index, row, items in tables if not queries else ():
+            table_owner = row.get("owner")
+            if not NAME.match(row["relname"]) or not customer(table_owner) or table_owner not in roles:
+                continue
+            if items is None and row.get("relacl") is None:
+                held = [(letter, SNAP + "/objects/%d/owner" % index) for letter in TABLE_PRIVS]
+                null_acl += 1
+            else:
+                held = [(letter, SNAP + "/objects/%d/relacl/%d" % (index, j)) for j, parsed in items or []
+                        if parsed is not None and parsed[0] == table_owner for letter in TABLE_PRIVS
+                        if letter in [l for l, _ in parsed[1]]]
+            for letter, where in held:
+                member = {"object": row["relname"], "privilege": TABLE_PRIVS[letter], "role": table_owner}
+                if member not in [m for m, _ in queries]:
+                    queries.append((member, where))
+        if null_acl:
+            d.notes.append({"key": "privilege_queries", "note": "%d tables have a NULL relacl, drafted as the default "
+                            "owner ACL (the owner holds SELECT, INSERT, UPDATE and DELETE) at major %d (%s)"
+                            % (null_acl, major, major_source)})
         if len(queries) > QUERY_CAP:
             d.notes.append({"key": "privilege_queries", "note": "%d observed grants; the first %d are drafted (the "
                             "derive step reads at most %d)" % (len(queries), QUERY_CAP, QUERY_CAP)})
@@ -496,15 +658,45 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
             d.unread("privilege_queries", "no table grant to a customer role other than the owner was observed")
 
     # sensitive_objects (PRIV-4, GRANT-OPTION-POLICY) and the row-security keys: the customer's own signal is row
-    # security switched on for a table
+    # security switched on for a table. Issue #5962: with no such table, each observed table within the name pattern
+    # is drafted (the strict reading, for the customer to narrow), so the PRIV-4 line is proposed and, accepted, reads
+    # holds or fails. Issue #5955: the same baseline is drafted for the customer to confirm, so the GRANT-OPTION-POLICY
+    # line is proposed and one accepted line decides it. M1 models at most M1_OBJECT_CAP tables, and the serving profile
+    # refuses M1 when a table some declared check names is cut, so the baseline keeps the tables privilege_queries
+    # names and fills up to the cap in observed order
     rls_tables = [(index, row) for index, row, _items in tables if row.get("relrowsecurity") is True and NAME.match(row["relname"])]
+    sensitive_tables = rls_tables
     if objects_sec is None:
         d.unread("sensitive_objects", "objects were not collected")
     elif rls_tables:
         d.put("sensitive_objects", [row["relname"] for _, row in rls_tables],
               _list_sources([SNAP + "/objects/%d/relrowsecurity" % index for index, _ in rls_tables]))
     else:
-        d.unread("sensitive_objects", "no table with row security switched on was observed")
+        observed = [(index, row) for index, row, _items in tables if NAME.match(row["relname"])]
+        queried = {m["object"] for m in d.decl.get("privilege_queries") or []}
+        if not observed:
+            d.unread("sensitive_objects", "no table with row security switched on was observed")
+        elif len(queried) > M1_OBJECT_CAP:
+            d.unread("sensitive_objects", "no table with row security switched on was observed, and privilege_queries "
+                     "already names %d tables, more than the %d M1 checks per declaration" % (len(queried), M1_OBJECT_CAP))
+        else:
+            room = M1_OBJECT_CAP - len(queried)
+            for index, row in observed:
+                if row["relname"] not in queried and room:
+                    queried, room = queried | {row["relname"]}, room - 1
+            sensitive_tables = [(index, row) for index, row in observed if row["relname"] in queried]
+            d.put("sensitive_objects", [row["relname"] for _, row in sensitive_tables],
+                  _list_sources([SNAP + "/objects/%d/relname" % index for index, _ in sensitive_tables]))
+            left = [row["relname"] for _, row in observed if row["relname"] not in queried]
+            d.notes.append({"key": "sensitive_objects", "note": "no table with row security switched on was observed, "
+                            "so %s drafted as sensitive; keep only the tables no login at all may read or change"
+                            % ("the observed tables M1 can check are" if left else "each observed table is")})
+            if left:
+                d.notes.append({"key": "sensitive_objects", "note": "%d tables observed with no row security switched "
+                                "on; %d are drafted (M1 checks privileges on at most %d tables per declaration): %s %s "
+                                "not" % (len(observed), len(sensitive_tables), M1_OBJECT_CAP, _and(left[:OPEN_CAP] + (
+                                    ["%d more" % (len(left) - OPEN_CAP)] if len(left) > OPEN_CAP else [])),
+                                    "is" if len(left) == 1 else "are")})
 
     # table_owners (GRANT-OPTION-POLICY; issue #2570): a customer role observed not to be a superuser that owns a
     # drafted sensitive table holds that table's grant options by owning it; it is drafted for the customer to
@@ -513,7 +705,7 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
     # reach, and the draft says so. An owner whose login, CREATEROLE or memberships were not observed is not drafted
     # either, and the draft says that those were not observed.
     owned, held, unseen = {}, {}, {}
-    for index, row in rls_tables if roles_sec is not None and "sensitive_objects" in d.decl else ():
+    for index, row in sensitive_tables if roles_sec is not None and "sensitive_objects" in d.decl else ():
         name = row.get("owner")
         if name in roles and customer(name) and roles[name][1].get("rolsuper") is False:
             role = roles[name][1]
@@ -590,6 +782,22 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         for key in ("standbys", "standby_addresses"):
             d.unread(key, "roles were not collected")
 
+    # exclusive_reader (LR-1, issue #5958): with a publication observed, the one login able to read its change stream
+    # (replication attribute or superuser), drafted as the intended reader for the customer to confirm; with no
+    # publication, roles or publications not collected, or several such logins, the key stays unread
+    reader, reader_why = None, None
+    if roles_sec is not None and pubs_sec:
+        readers = [(name, index, "rolreplication" if row.get("rolreplication") is True else "rolsuper")
+                   for name, (index, row) in roles.items() if not name.startswith("pg_")
+                   and row.get("rolcanlogin") is True
+                   and (row.get("rolreplication") is True or row.get("rolsuper") is True)]
+        if len(readers) == 1 and NAME.match(readers[0][0]):
+            reader = readers[0]
+        else:
+            reader_why = ("no login able to replicate was observed" if not readers else
+                          "%d logins able to replicate were observed (%s); the customer states which one alone reads "
+                          "the replication stream" % (len(readers), ", ".join(n for n, _, _ in readers)))
+
     # permitted (SU-3-OB, issue #4642): the customer roles observed as members of pg_read_all_data or
     # pg_write_all_data, directly or through other roles, each sourced to the first membership edge on its path
     if members_sec is None:
@@ -650,19 +858,23 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
             for pindex, policy in by_table.get(row["relname"], []):
                 qual = policy.get("polqual")
                 if type(qual) is str and not _trivial(qual):
-                    quals.setdefault(strip_outer_parens(qual), pindex)
+                    # issue #3237: expressions the derive step reads as one tenant scope (the bare and SELECT-wrapped
+                    # auth.uid(), the parent-owner EXISTS in either spelling) are one row filter
+                    form = _tenant_form(qual, row["relname"])
+                    quals.setdefault(form if form is not None else strip_outer_parens(qual), (strip_outer_parens(qual), pindex))
             if len(quals) == 1:
-                (predicate, pindex), = quals.items()
-                outside = _outside_grammar(predicate, by_table.get(row["relname"], []))
+                (predicate, pindex), = quals.values()
+                outside = _outside_grammar(predicate, by_table.get(row["relname"], []), row["relname"])
                 if outside:
                     off_grammar.append(row["relname"])
                     d.notes.append({"key": "protected_tables", "note": "table %s has a policy expression %s (%s); "
-                                    "not drafted" % (row["relname"], GRAMMAR_REASON, "; ".join(outside))})
+                                    "not drafted" % (row["relname"], GRAMMAR_REASON, "; ".join(outside)),
+                                    "table": row["relname"]})
                     continue
                 groups.setdefault(predicate, []).append((index, row, pindex))
             else:
                 d.notes.append({"key": "protected_tables", "note": "table %s has %d distinct row filters; not drafted"
-                                % (row["relname"], len(quals))})
+                                % (row["relname"], len(quals)), "table": row["relname"]})
         if not groups:
             for key in ("protected_tables", "declared_predicate", "required_policies"):
                 d.unread(key, "the row filter of %s is %s" % (_and(off_grammar), GRAMMAR_REASON) if off_grammar
@@ -670,6 +882,13 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         else:
             predicate = max(groups, key=lambda p: (len(groups[p]), -groups[p][0][0]))
             chosen = groups[predicate]
+            # issue #5573: a table whose single row filter is another predicate is left out (the declaration states
+            # one predicate); it is noted by name, in snapshot order, so a left-out list names it
+            for _index, row, other in sorted((index, row, p) for p, group in groups.items() if p != predicate
+                                             for index, row, _pindex in group):
+                d.notes.append({"key": "protected_tables", "table": row["relname"], "note": (
+                    "table %s has the row filter %s, not the drafted predicate %s; not drafted"
+                    % (row["relname"], other, predicate))})
             d.put("protected_tables", [row["relname"] for _, row, _ in chosen],
                   _list_sources([SNAP + "/objects/%d/relrowsecurity" % index for index, _, _ in chosen]))
             d.put("declared_predicate", predicate, SNAP + "/policies/%d/polqual" % chosen[0][2])
@@ -865,7 +1084,11 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                         "pg_hba_file_rules row matches it" % ", ".join(missed)})
 
     for key in ALWAYS_UNREAD:
-        d.unread(key, "the catalog snapshot gives no basis for it; the customer states it")
+        if key == "exclusive_reader" and reader is not None:
+            d.put(key, reader[0], SNAP + "/roles/%d/%s" % reader[1:])
+        else:
+            d.unread(key, reader_why if key == "exclusive_reader" and reader_why else
+                     "the catalog snapshot gives no basis for it; the customer states it")
 
     declaration = dict(sorted(d.decl.items()))
     declaration.update(FLAGS)
@@ -910,6 +1133,9 @@ ROWS = (
      "INSERT/UPDATE admission implies the declared new-row predicate through explicit CHECK or implicit USING."),
     ("RLS-4", ("protected_tables", "view_exemptions", "access_paths_complete"),
      "No non-exempt view-owner read path over protected tables."),
+    ("LR-1", ("exclusive_reader",),
+     "Publication design cannot enforce a named exclusive reader when another finite declared replication-capable "
+     "login can connect."),
     ("LR-1-SCOPE", ("intended_tables",),
      "Published tables, including modeled future FOR ALL TABLES members, stay within declared intent."),
 )
@@ -941,6 +1167,7 @@ ENGLISH = {
                {"view_exemptions": [], "access_paths_complete": True}),
               ("No view except {view_exemptions} reads {protected_tables} past row security" + _PATHS,
                {"access_paths_complete": True})),
+    "LR-1": (("Only {exclusive_reader} can read what logical replication publishes.", {}),),
     "LR-1-SCOPE": (("Logical replication publishes no table.", {"intended_tables": []}),
                    ("Logical replication publishes only {intended_tables}.", {})),
 }
@@ -951,12 +1178,13 @@ ENGLISH = {
 TEMPLATES = (("RLS-1", "RLS-2"), ("RLS-3",))
 _FILL = {"protected_tables": "<tables>", "declared_predicate": "`<caller predicate>`"}
 #: the goals a person would write, each over the obligation family it rolls up (key, sentence, obligations): a goal
-#: is drafted when at least one of its obligations is; its sentence names no role, table or obligation
+#: is drafted when at least one of its obligations is; its sentence names no role, table or obligation, except that the
+#: tenant goal is drafted naming its rows' protected tables (`tenant_sentence`, issue #5572)
 GOALS = (
     ("access", "Only the people who run the database can change who has access to it.",
      ("SU-1", "GRANT-OPTION-POLICY", "PRIV-1", "PRIV-4", "PRIV-5")),
     ("tenant", "Each user sees only their own data.", ("RLS-1", "RLS-2", "RLS-3", "RLS-4")),
-    ("replication", "Only the data meant to be shared leaves the database through replication.", ("LR-1-SCOPE",)),
+    ("replication", "Only the data meant to be shared leaves the database through replication.", ("LR-1", "LR-1-SCOPE")),
 )
 #: drafted keys no requirement row rests on, and why (the draft's notes name them)
 NO_ROW = {
@@ -987,6 +1215,8 @@ _PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _PLACE = re.compile(r"\{([a-z_]+)\}")
 _GID = re.compile(r"G[1-9][0-9]{0,5}\Z")
 _MARKER = re.compile(r"(?:[-*+]\s+|\d+[.)]\s+)")
+#: issue #5572: the prefix of the tenant goal sentence that names its tables (`tenant_sentence`)
+_TENANT = "Each user sees only their own rows in "
 
 
 def _and(words):
@@ -1017,6 +1247,8 @@ def _phrase(key, value):
     """The plain words for one drafted value, or None when it has none (an empty list, an unknown shape)."""
     if key == "declared_predicate":
         return "`%s`" % value if isinstance(value, str) else None
+    if key == "exclusive_reader":
+        return value if isinstance(value, str) and NAME.match(value) else None
     if not isinstance(value, list) or not value:
         return None
     if key == "privilege_queries":
@@ -1039,6 +1271,8 @@ def _unphrase(key, text):
     """`_phrase` read back: the drafted value, or None when the words are not its phrase."""
     if key == "declared_predicate":
         return text[1:-1] if len(text) > 1 and text[0] == text[-1] == "`" else None
+    if key == "exclusive_reader":
+        return text if NAME.match(text) else None
     if key == "privilege_queries":
         out = []
         for part in text.split("; "):
@@ -1169,16 +1403,46 @@ def goal_sentence(key):
 
 
 def parse_goal(sentence):
-    """The goal key of a goal sentence, or None."""
+    """The goal key of a goal sentence, or None. A tenant sentence that names its tables (`tenant_sentence`) is tenant's."""
+    if isinstance(sentence, str) and sentence.startswith(_TENANT):
+        return "tenant"
     return next((k for k, s, _obligations in GOALS if s == sentence), None)
+
+
+def tenant_sentence(tables):
+    """Issue #5572: the tenant goal sentence over its rows' `protected_tables`, naming each table in their declared
+    order, or counting them when that is not one line (`_one_line`); None when `tables` is not a list of names."""
+    if not isinstance(tables, list) or not tables or not all(isinstance(t, str) for t in tables):
+        return None
+    named = _TENANT + ("this table: %s." % tables[0] if len(tables) == 1
+                       else "these %d tables: %s." % (len(tables), _and(tables)))
+    return named if _one_line(named) else _TENANT + "%d %s; assure-requirements-typed.json names %s." % (
+        len(tables), "table" if len(tables) == 1 else "tables", "it" if len(tables) == 1 else "them")
+
+
+def _tenant_english(rows):
+    """The tenant sentence (`tenant_sentence`) of the `protected_tables` every row in `rows` carries; None when `rows`
+    is not a non-empty list of rows with dict `values` that agree on one list of table names."""
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+        return None
+    values = [row.get("values") for row in rows]
+    tables = [v.get("protected_tables") if isinstance(v, dict) else None for v in values]
+    return tenant_sentence(tables[0]) if all(t == tables[0] for t in tables) else None
+
+
+def _goal_english(key, sentence, rows):
+    """The sentence a goal is drafted with: its GOALS sentence, or for tenant the rendering of its rows' tables (the
+    GOALS sentence only when they carry none, which `typed_rows` does not draft)."""
+    return (_tenant_english(rows) or sentence) if key == "tenant" else sentence
 
 
 def drafted_goals(record):
     """[{key, english, rows}]: each goal (GOALS order) with at least one typed row the drafted declaration decides,
     its rows in the goal's order."""
     rows = {row["obligation"]: row for row in typed_rows(record)}
-    return [{"key": key, "english": sentence, "rows": [rows[o] for o in obligations if o in rows]}
-            for key, sentence, obligations in GOALS if any(o in rows for o in obligations)]
+    goals = [(key, sentence, [rows[o] for o in obligations if o in rows]) for key, sentence, obligations in GOALS]
+    return [{"key": key, "english": _goal_english(key, sentence, children), "rows": children}
+            for key, sentence, children in goals if children]
 
 
 def _left(record, notes):
@@ -1230,9 +1494,9 @@ def _companion(companion):
 
 def _goals(companion):
     """{sha256: {id, english, line, rows: [(id, statement, waypoint)]}} of the companion goals that check: the goal
-    sentence is its key's, its sha256 is that sentence's, and every child is one of the goal's obligations with its
-    obligation's statement, the waypoint its own values render, and the id G<n>.<k> in order. A goal with any child
-    that does not check is ignored whole."""
+    sentence is its key's (or, for tenant, the rendering of its children's `protected_tables`, issue #5572), its sha256
+    is that sentence's, and every child is one of the goal's obligations with its obligation's statement, the waypoint
+    its own values render, and the id G<n>.<k> in order. A goal with any child that does not check is ignored whole."""
     if not _companion(companion):
         return {}
     statements = {obligation: statement for obligation, _keys, statement in ROWS}
@@ -1242,7 +1506,10 @@ def _goals(companion):
         try:
             line, children = goal.get("line"), []
             ok = (type(goal["id"]) is str and _GID.match(goal["id"]) and goal["id"] not in ids
-                  and goal_sentence(goal["key"]) == goal["english"] and goal["sha256"] == _sha(goal["english"])
+                  and isinstance(goal["english"], str)
+                  and (goal_sentence(goal["key"]) == goal["english"]
+                       or goal["key"] == "tenant" and _tenant_english(goal["rows"]) == goal["english"])
+                  and goal["sha256"] == _sha(goal["english"])
                   and (line is None or type(line) is int and line > 0)
                   and isinstance(goal["rows"], list) and goal["rows"])
             seen = set()
@@ -1334,8 +1601,9 @@ def rollup(goal, states):
 
 def requirements_draft(record, notes=()):
     """A draft requirements.md (issue #1186; coordination 7588 and its qualification): the goals a person would write,
-    one plain sentence each, for each goal with at least one obligation the drafted declaration decides; no role,
-    table or obligation names. The header is a Markdown heading, so the matcher reads only the goals as requirements.
+    one plain sentence each, for each goal with at least one obligation the drafted declaration decides; no role or
+    obligation names, and no table names except the tenant goal's protected tables (issue #5572). The header is a
+    Markdown heading, so the matcher reads only the goals as requirements.
     The checks under each goal, the drafter's notes and provenance are in the companion (`typed_companion`). Issue
     #3269: the file is committed unchanged as requirements.md, so it carries no internal flags line; a requirements.md
     committed with that line (a Markdown heading) still parses the same."""

@@ -40,10 +40,10 @@ red: 8 of 8 machines read; declared premises: none (observed profile); version p
 
 ## Every obligation not established
 
-The declared profile on the same image (the proof fixture's recorded readings), `fail-on: fails`. Three of eight machines were read and none of their 15 obligations holds, so the line says in words that nothing could be established, then the action that would establish the most frequent kind of gap.
+The declared profile on the same image (the proof fixture's recorded readings), `fail-on: fails`. Three of eight machines were read and none of their 15 obligations holds; the five refused machines wrote no obligation rows and each one's needs is tabled, so their 25 obligations are listed too (40). The line says in words that nothing could be established, then the action that would establish the most frequent kind of gap.
 
 ```text
-green: 3 of 8 machines read, 5 refused; declared premises: 0; version pins: none; nothing could be established (0 of 15 obligations hold); not established: 15 — top action: collect the facts Each standby connects as a dedicated replication login (REP-1) reads
+green: 3 of 8 machines read, 5 refused; declared premises: 0; version pins: none; nothing could be established (0 of 40 obligations hold); not established: 40 — top action: Set database_owner in declaration.json to a role present in the catalog snapshot (pg_roles); M1 and M7 are evaluated only against the operator's declaration.
 ```
 
 ## What each colour means, per profile
@@ -79,7 +79,7 @@ The proof fixture's recorded readings: green as recorded; red with TLS-1 changed
 Green:
 
 ```text
-Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 15 of 15 checks could not be completed, mostly because some facts were not collected. That is a gap in what we could see; your database configuration is unchanged by it.
+Nothing in your database configuration contradicts what is known about safe PostgreSQL setups. 40 of 40 checks could not be completed, mostly because some facts were not collected. That is a gap in what we could see; your database configuration is unchanged by it.
 ```
 
 Red:

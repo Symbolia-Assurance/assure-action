@@ -140,6 +140,9 @@ jobs:
       id-token: write
       pull-requests: write
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@<full commit sha of the release you trust>
+
       - name: Set up Python 3.14
         uses: actions/setup-python@<full commit sha of the release you trust>
         with:
@@ -152,7 +155,7 @@ jobs:
         id: assure
         uses: Symbolia-Assurance/assure-action@v0
         with:
-          profile: postgresql-observed-baseline
+          profile: ${{ hashFiles('.assure/postgresql-declared-model.json') != '' && 'postgresql-declared-model' || 'postgresql-observed-baseline' }}
           connection: ${{ secrets.ASSURE_PG_CONNECTION }}
           collection-role: assure_collector
           collection-privileges: pg_read_all_settings,pg_read_all_stats
@@ -169,7 +172,7 @@ jobs:
 
 The job is named `assure`, so it never shares a name with your repository's own jobs, such as a `check` job that a ruleset requires. A workflow you added earlier whose Assure job is named `check` keeps working. Rename that job to `assure`, so your own required `check` reads only your own job; if a ruleset or branch protection requires Assure's job, require `assure`.
 
-Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.0-beta.N`.
+Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.N`.
 
 To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@v0`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@v0` resolves to; `gh api repos/Symbolia-Assurance/assure-action/commits/v0 -q .sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
@@ -186,6 +189,8 @@ This workflow runs on every pull request, on every push to `main`, when you star
 **A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). Leave out `data-dir` and `config-dirs`: the runner cannot read the container's files, so each configuration file reads as a recorded gap (section 6, option c).
 
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (references/postgres-local.md, section 9).
+
+On `postgresql-observed-baseline`, a declaration committed at `.assure/postgresql-declared-model.json` (where merging Assure's proposal pull request puts it) or `.assure/declaration.json` (one of another profile's `schema` is passed over, issue #3861) makes the same run also check `postgresql-declared-model`. In `mode: api` that is two checks, each charged, and the job summary says "two checks charged". To run one check, set `profile: postgresql-declared-model` to run the declared profile alone, or leave the declaration out of the checkout to run the observed profile alone.
 
 The runner must reach your database and `api.symbolia.ai`. For a database on a private network, use a self-hosted runner inside that network with outbound HTTPS.
 
@@ -247,7 +252,7 @@ jobs:
         id: assure
         uses: Symbolia-Assurance/assure-action@v0
         with:
-          profile: postgresql-observed-baseline
+          profile: ${{ hashFiles('.assure/postgresql-declared-model.json') != '' && 'postgresql-declared-model' || 'postgresql-observed-baseline' }}
           connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>
           collection-role: assure_collector
           collection-privileges: pg_read_all_settings,pg_read_all_stats
@@ -262,7 +267,7 @@ jobs:
           path: ${{ steps.assure.outputs.verdict-path }}
 ```
 
-Leave out a step your CI does not have: with no bootstrap SQL, drop that step. The job grants `contents: write` beside `pull-requests: write` so that the first run proposes its draft: it opens `Assure: proposed intent — review and merge to accept` with the draft at `.assure/postgresql-declared-model.json`, each key to confirm with where it was read. Check each key, fix what is wrong on its branch, and merge it to accept it; the next check then also reads `postgresql-declared-model` beside this reading. GitHub lets the workflow token open the pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". Once it is merged, set `contents: read`.
+Leave out a step your CI does not have: with no bootstrap SQL, drop that step. The job grants `contents: write` beside `pull-requests: write` so that the first run proposes its draft: it opens `Assure: proposed intent — review and merge to accept` with the draft at `.assure/postgresql-declared-model.json`, each key to confirm with where it was read. Check each key, fix what is wrong on its branch, and merge it to accept it. GitHub lets the workflow token open the pull request only when the repository allows it: in Settings, Actions, General, tick "Allow GitHub Actions to create and approve pull requests". GitHub may hold the Assure check on that pull request as awaiting approval (`action_required`): someone with write access clicks **Approve and run** in the box at the bottom of the pull request's Conversation tab (or on the run's page under Actions). Once it is merged, the same workflow, with no edit, runs `postgresql-declared-model` against the committed `.assure/postgresql-declared-model.json` in place of the observed reading, and sends the committed `requirements.md` (the `requirements` input is left unset, so the Action reads the repository-root file); `contents: write` can then go back to `read`. On `pull_request` the checkout is the merge commit, so the run on the proposal pull request itself already reads its draft that way.
 
 ## 6. Managed PostgreSQL and configuration files
 

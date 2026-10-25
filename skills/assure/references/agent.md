@@ -27,3 +27,7 @@ When an agent sets up or runs the Action for you, these rules hold for it, as th
 - Outside the files and sends covered by your DATA.md consent, this rule holds: Never send your configuration files, your connection string or your API key.
 - Create a new role. Use it for nothing else. The checker leaves the collection role out of every reading, so a role your site also uses would hide its own results.
 - Grant it only these two roles. The collector refuses a broader role: `pg_monitor` or `pg_stat_scan_tables` in `collection-privileges` stops the Action with exit 2 (`bad_input`) before anything runs, and a role that belongs to either stops it with exit 3 (`collector_refused`). The collector also refuses to run if the role is a superuser, has `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, or belongs to any other role.
+
+## Approving a request in your tool
+
+Your coding tool may ask you to approve sending the setup files to Assure, or reading Assure's reply from a saved file, even after your yes. That is a normal one-time approval, like any tool that asks before it sends files. The agent stops and names the one request: `POST /v1/setup` at `https://api.symbolia.ai` (or your `api-url`) with the files you agreed to send, or the saved reply it reads. Approve that one request in your tool and setup carries on; nothing else is sent and nothing else changes. The agent makes the request exactly as it named it and never reworks a command to get around the approval.

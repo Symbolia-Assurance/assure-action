@@ -318,7 +318,12 @@ def with_lead(body, line):
     if not line:
         return body
     marker, sep, rest = body.partition('\n')
-    return '%s\n%s\n\n%s' % (marker, line, rest) if sep else body
+    if not sep:
+        return body
+    if rest.startswith(render.CREDIT_HEADERS):            # issue #6045: the credit header stays first
+        head, _, rest = rest.partition('\n\n')
+        return '%s\n%s\n\n%s\n\n%s' % (marker, head, line, rest)
+    return '%s\n%s\n\n%s' % (marker, line, rest)
 
 
 def with_plan_line(refusal, plan):
@@ -579,10 +584,11 @@ SKIPPED_HOW = {
     'bounds': (None, 'To send it, shorten it to within the bounds; '),
 }
 # Issue #4395: on python-auth's checkout run, a `requirements` input naming the repository-root requirements.md that is
-# not there yet sends no text and says so; the run goes on and drafts, and Assure's pull request proposes a starter.
+# not there yet sends no text and says so; the run goes on and drafts, and for a Flask repository (issue #5074: the
+# starter is drafted on declaration_draft.STACK only) Assure's pull request proposes a starter.
 NOT_YET_NOTICE = ('requirements.md is not in the repository yet, so this check sent no requirements. When Assure drafts '
-                  'your declaration, its pull request also proposes a starter requirements.md; once it is merged, every '
-                  'check reads it.')
+                  'the declaration for a Flask repository, its pull request also proposes a starter requirements.md; once '
+                  'it is merged, every check reads it.')
 LOCAL_REQUIREMENTS_NOTICE = ('requirements are read in api mode only: local mode did not read or send requirements.md')
 
 
@@ -674,7 +680,7 @@ def setup_run(env, cwd):
 
 
 def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, lead=None, setup=False, report=None,
-                    verdict_file=None):
+                    verdict_file=None, plan=()):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
     looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
@@ -685,7 +691,8 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, l
     Issue #3168: `body` (a `mode: lint` run's LINT_PREFLIGHT) is posted in place of the verdict's comment, under the
     same marker, so the one Assure comment says no check ran. F10: `setup` (`setup_run`) words the broken rules as
     found in your code. readable-report-001: a written `report` record leads the comment under its heading
-    (`render.pr_with_report`), with the trace line naming `verdict_file`."""
+    (`render.pr_with_report`), with the trace line naming `verdict_file`. Issue #3219: `plan`
+    (`render.footer_plan_lines`) adds the plan and checks lines to the footer."""
     if env.get('GITHUB_EVENT_NAME') not in PR_EVENTS:
         return None
     repo, number = str(env.get('GITHUB_REPOSITORY') or '').strip(), _pull_number(env)
@@ -696,7 +703,8 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, l
     else:
         body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
                                           tree_bases=tree_bases, requirements_file=render.pr_requirements_file(
-                                              requirements_named(env), env.get('GITHUB_WORKSPACE')), setup=setup)
+                                              requirements_named(env), env.get('GITHUB_WORKSPACE')), setup=setup,
+                                          plan=plan)
         body = render.pr_with_report(body, report, verdict, verdict_file)
         body = with_lead(body, lead)      # the plan's app subset: what was checked leads the comment
     root = '/repos/%s/issues' % repo
@@ -820,23 +828,29 @@ def previous_release(github, repo, tag, releases=None, *, require_current=False,
 def previous_states(prev, client, repo, profile, rows):
     """The previous release's states, id -> state: the states line its notes carry (`render.release_states`), else
     each requirement's stored state at the previous release's commit (`Client.requirement_history`, free). An id the
-    API cannot answer for is left out."""
+    API cannot answer for is left out; when the route answers for none of the ids asked, the history was not read and
+    ReleaseReadError is raised (issue #5065), never a readable absence."""
     got = render.release_states(prev.get('body'))
     if got is not None and got['states']:
         return got['states']
     states = {}
     if client is None:
         return states
-    for r in (rows or [])[:render.MAX_ANNOTATIONS]:
+    asked = (rows or [])[:render.MAX_ANNOTATIONS]
+    failed = 0
+    for r in asked:
         rid = r.get('id')
         try:
             doc = client.requirement_history(rid, repo, profile)
         except Exception:  # never the verdict's concern: that promise is compared with nothing
+            failed += 1
             continue
         hit = next((e for e in doc.get('entries') or () if isinstance(e, dict) and e.get('commit') == prev['commit']
                     and e.get('state') in ('holds', 'disproven', 'not_established')), None)
         if hit is not None:
             states[rid] = hit['state']
+    if asked and failed == len(asked):
+        raise ReleaseReadError('the stored requirement history could not be read')
     return states
 
 
@@ -2142,12 +2156,18 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     # REFUTATION-r1 HIGH-2: a `contents: read` token (the documented observed jobs, a fork) is not
                     # asked to propose; main's files and section beside the verdict stay, with no warning
                     return 'Assure: declaration proposal: not proposed (%s)' % _cmd_data(scrub(e.reason)), '', ''
-                told = 'not proposed (%s); the draft is below' % scrub(e.reason)
+                told = 'not proposed (%s)' % scrub(e.reason)
+                if d.get('added'):                    # issue #4631: the additions path shows no draft; it names them
+                    told += '; it adds the %d field(s) listed below' % len(d['added'])
+                elif not d.get('observed') or d.get('shown') is not None:
+                    told += '; the draft is below'
                 say('::warning title=Assure declaration::%s' % _cmd_data(told))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
             if d.get('observed'):                     # issue #2934: an observed verdict is not bounded by the draft
                 md = '\n### Declaration pull request\n\n%s.\n' % render.esc(told[:1].upper() + told[1:])
+                if not state['proposed'] and d.get('added'):     # issue #4631: each field the additions bring
+                    md += '\n%s\n' % '\n'.join('- %s' % _span(p) for p in d['added'])
                 if not state['proposed'] and d.get('shown') is not None:   # REFUTATION-r6 MEDIUM-2: withheld only
                     md += '\n```json\n%s```\n' % d['shown'].decode('utf-8')
                     if d['shown'] == d['data']:   # issue #3153: a link commits the proposal's own bytes, never placeholders
@@ -2217,7 +2237,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 return
             record = dict(record, declaration=merged, confirm=sorted(added), kept=kept)
             state['draft'] = {'record': record, 'data': declaration_draft.dumps(merged), 'top': top,
-                              'rel': DECLARED_CHECKOUT_PATH, 'observed': True, 'shown': None,
+                              'rel': DECLARED_CHECKOUT_PATH, 'observed': True, 'shown': None, 'added': sorted(added),
                               'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE, 'lead': ADDITIONS_LEAD % {
                                   'rel': DECLARED_CHECKOUT_PATH, 'source': DECLARED_SOURCE,
                                   'rows': proposal_counts(record, verdict)['rows']}}}
@@ -2511,6 +2531,12 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     code = verdict['policy']['exit']
     unrenderable = 'api_error' if state['mode'] == 'api' else 'checker_error'
     report_extra = ''
+    usage_doc = None
+    if state['mode'] == 'api' and state.get('client') is not None and isinstance(verdict.get('usage'), dict):
+        try:                                           # issue #3219: the plan, read after the check; never the verdict
+            usage_doc = state['client'].usage()
+        except Exception:  # an older server or a fault: no plan line, as before
+            usage_doc = None
     try:                                               # rendered before anything is written: a fault is typed
         summary = render.summary_markdown(verdict)
         when = render.first_checked(verdict)            # serve-035: the first check's time, as the API wrote it
@@ -2530,6 +2556,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         compiled = verdict.get('requirements_compilation')  # issue #2252: the server's sentence on the Haiku reading
         if isinstance(compiled, dict) and isinstance(compiled.get('summary'), str) and compiled['summary']:
             summary += '\n' + render.esc(compiled['summary']) + '\n'
+        plan = render.plan_lines(usage_doc)               # issue #3219: the plan and checks lines
+        if plan:
+            summary += '\n' + '\n\n'.join(plan) + '\n'     # fixed words, a checked id, numbers
+        plan_log = render.plan_log_lines(usage_doc)
+        footer_plan = render.footer_plan_lines(usage_doc)  # the comment footer: on free, the credit line too
         key_line = render.key_expiry_line(getattr(state.get('client'), 'key_expires', None))    # issue #1262
         if key_line is not None:
             summary += '\n' + render.esc(key_line) + '\n'
@@ -2641,7 +2672,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     client = state.get('client')
     pr_comment(verdict, tree=pr_tree(verdict, state['tree']),
                tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()), lead=subset_lead,
-               report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name)
+               report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name,
+               plan=footer_plan)
     for line in notes:
         say(line)
     name_passed()                                      # issue #3861: after the verdict's notices
@@ -2653,6 +2685,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         else:
             say('::warning title=%s::%s' % (_cmd_prop('Assure report'), _cmd_data(
                 render.report_withheld_line(getattr(state['report'], 'reason', None)))))
+    for line in plan_log:                              # issue #3219: one log line naming the plan (free: and the credit)
+        say(_cmd_data(line))
     if lead is not None:                               # serve-035: a stored verdict says so in the log too
         say('Assure: ' + _cmd_data(lead))
     bound = render.scope_notes_line(verdict)          # serve-012: a selected scope's bound, just before the last line

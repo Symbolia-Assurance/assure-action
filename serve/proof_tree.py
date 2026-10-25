@@ -42,7 +42,7 @@ model gets one line. The free tier's line links `upgrade_url` (the server's Prem
 test the PR comment applies); no link otherwise. The model's pinned digests are compared with this run's as `maintain.recheck` compares them: a
 path added, removed or changed counts only when it is inside the model's read set (`_in_read_set`, the checker's
 rule); none is "current", any is "drifted", and no file list for this run or no read set in the model is "unknown"
-(drift is not claimed either way). A drifted model offers the remodel as the planned API call (`REMODEL_ROUTE`), with
+(drift is not claimed either way). A drifted model offers the remodel as the API call (`REMODEL_ROUTE`, served since issue #6055), with
 its cost against the remaining budget; a remodel that does not fit names the parts it cannot cover (when costs per
 part are given) and quotes the extension. The page never acts: nothing runs or is charged until the person makes the
 call.
@@ -71,8 +71,8 @@ LEDE = 'Each goal is a line of requirements.md.'
 LEDE_ROWS = 'Each goal is a requirement row the check read.'
 FOOTER = 'Assure'
 # Layer 2 (Premium): the tiers whose plan includes the formal model (hosted/tiers.json `formal_heads`; a test holds the
-# two equal), the planned remodel call (issue #1228's on-demand recheck route, so the page and the API agree; it is
-# marked planned until #1228 serves it) and the lines a page carries without a model
+# two equal), the remodel call (issue #1228's on-demand recheck route, so the page and the API agree; served since
+# issue #6055, so `route_planned` is false) and the lines a page carries without a model
 FORMAL_MODEL_TIERS = ('usd_20', 'usd_200', 'usage', 'enterprise')
 REMODEL_ROUTE = 'POST /v1/premium/recheck'
 UPGRADE_LINE = 'Premium builds the formal model when you upgrade.'
@@ -502,7 +502,7 @@ def _remodel(budget, quote_usd, parts, words):
     budget lasts) and the extension that covers it (rounded up to the cent). The page never acts on it."""
     b = _budget(budget)
     q = _usd(quote_usd)
-    out = {'route': REMODEL_ROUTE, 'route_planned': True, 'quote_usd': _cents(q), 'allowance_usd': None, 'overage_usd': None,
+    out = {'route': REMODEL_ROUTE, 'route_planned': False, 'quote_usd': _cents(q), 'allowance_usd': None, 'overage_usd': None,
            'spent_usd': None, 'remaining_usd': None, 'fits': None, 'uncovered': [], 'extend_usd': None}
     if b is not None:
         out.update(b)
@@ -527,6 +527,29 @@ def _remodel(budget, quote_usd, parts, words):
     return out
 
 
+def _drift(m, repository_files):
+    """(state, changed paths) of a model against this run's files (module docstring: `maintain.recheck`'s rule), or
+    None for a model without its pinned digests."""
+    pinned = _digests(m.get('repo_digests'))
+    if not pinned:
+        return None
+    current = _digests(repository_files)
+    read_set = _read_set_body(m.get('read_set'))
+    if current is None or read_set is None:
+        return 'unknown', []
+    changed = [p for p in sorted(set(pinned) | set(current)) if pinned.get(p) != current.get(p)   # maintain.recheck
+               and _in_read_set(read_set, p)]
+    return ('drifted' if changed else 'current'), changed
+
+
+def drift(model, repository_files=None):
+    """Issue #6055: 'current', 'drifted' or 'unknown' for a saved model against this run's files (as layer 2 reads
+    it), or None for no model (or one without its pinned digests): the API's refresh route and the verdict's
+    `model_refresh` read the same state the page shows."""
+    found = _drift(model, repository_files) if isinstance(model, dict) else None
+    return None if found is None else found[0]
+
+
 def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quote_usd=None, remodel_parts=None,
                  checks=(), obligation_words=None, upgrade_url=None):
     """Layer 2 of the tree (module docstring), or None when no tier is named. A tier without the formal model:
@@ -545,17 +568,10 @@ def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quo
             out['url'] = upgrade_url
         return out
     m = model if isinstance(model, dict) else {}
-    pinned = _digests(m.get('repo_digests'))
-    if not pinned:
+    found = _drift(m, repository_files)
+    if found is None:
         return {'state': 'not_built', 'line': NOT_BUILT_LINE}
-    current = _digests(repository_files)
-    read_set = _read_set_body(m.get('read_set'))
-    if current is None or read_set is None:
-        state, changed = 'unknown', []
-    else:                                    # maintain.recheck: changed paths, then those inside the read set
-        changed = [p for p in sorted(set(pinned) | set(current)) if pinned.get(p) != current.get(p)
-                   and _in_read_set(read_set, p)]
-        state = 'drifted' if changed else 'current'
+    state, changed = found
     words, stated = {}, {}
     for c in checks or ():
         if isinstance(c, dict) and c.get('id'):
@@ -869,8 +885,9 @@ def _model_html(fm):
                    '</details>' % (_plural(len(branches), 'part', 'parts'), rows))
     r = fm.get('remodel')
     if fm['state'] == 'drifted' and isinstance(r, dict):
-        out.append('<div class="remodel"><p><b>Remodel:</b> make the call <code>%s</code> (the planned route). It '
-                   'quotes the cost before anything runs.</p>' % _e(r.get('route')))
+        out.append('<div class="remodel"><p><b>Remodel:</b> make the call <code>%s</code>%s. It quotes the cost '
+                   'before anything runs.</p>' % (_e(r.get('route')), ' (the planned route)'
+                                                  if r.get('route_planned') is not False else ''))
         if r.get('quote_usd') is not None:
             out.append('<p>A remodel is modelled at %s.</p>' % _money(r['quote_usd']))
         if r.get('remaining_usd') is not None:

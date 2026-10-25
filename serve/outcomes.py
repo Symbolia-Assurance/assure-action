@@ -37,14 +37,21 @@ _TABLE = {
     # says the move is to wait and its `needs` (NOT_SERVABLE_NEEDS) names what is missing.
     'profile_not_servable': (503, 3, 'Wait for this profile to be qualified; nothing on your side opens it.'),
     'profile_refused': (422, 3, 'Fix the collection or declaration fault the reason names, then run again.'),
-    'checker_error': (500, 3, 'Report the check id to Symbolia, because the checker failed in a way it should not.'),
-    'checker_timeout': (504, 3, 'Send a smaller input or try again later, because the check ran past its time limit.'),
+    # issue #5138: the checker, the server or the Action can fail this way (a stored verdict that does not read, a
+    # restart, the Action's own fault), so the action names none of them and the reason names which
+    'checker_error': (500, 3, 'Report the check id to Symbolia, because Assure failed in a way it should not; the '
+                              'reason names where, and is what to report when the answer carries no id.'),
+    # issue #5138: the check's own limit, the Action's collector or its wait, or a job lease; the reason names which
+    'checker_timeout': (504, 3, 'Send a smaller input or try again later, because a time limit was reached; the '
+                                'reason names which.'),
     # issue #1420: the refusal names the bound that bound, the check worker's RLIMIT_CPU or RLIMIT_AS (serve/worker.py)
     'checker_cpu_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its CPU time '
                                   'limit.'),
     'checker_memory_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its memory '
                                      'limit.'),
-    'server_busy': (503, None, 'Try again in a minute, because the queue is full.'),
+    # issue #5138: a full queue, the usage ledger, an Idempotency-Key in flight, a plan change or GitHub's keys
+    'server_busy': (503, None, 'Try again after the Retry-After seconds when the answer gives them, else in a minute, '
+                               'because the server cannot take this request just now; the reason names why.'),
     'not_found': (404, None, 'Check the check id, because no check with that id exists for this account.'),
     # serve-062 parts 3-4: a record the server keeps for this account (an accepted scope) no longer reads as it was
     # written. A serving fault, never a verdict and never the customer's input; nothing ran and nothing was charged.

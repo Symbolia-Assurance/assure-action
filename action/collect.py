@@ -126,7 +126,7 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '725a308bc75047a4c6a340bcab84dd5e0b8c432cf0ddf4f083084d3ad4a50a57'      # rf33 (candidate)
+FROZEN_COLLECTOR_SHA256 = '5889f75a6ffe68adbd4e2cecece7b29462af87b4cedcb086c13e006c80410dd8'      # rf33 (candidate)
 RF32_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'        # the pin's `previous`
 RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'
 RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'

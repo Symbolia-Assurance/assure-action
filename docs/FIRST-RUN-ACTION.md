@@ -87,7 +87,7 @@ jobs:
         id: assure
         uses: Symbolia-Assurance/assure-action@v0
         with:
-          profile: postgresql-observed-baseline
+          profile: ${{ hashFiles('.assure/postgresql-declared-model.json') != '' && 'postgresql-declared-model' || 'postgresql-observed-baseline' }}
           connection: ${{ secrets.ASSURE_PG_CONNECTION }}
           collection-role: assure_collector
           collection-privileges: pg_read_all_settings,pg_read_all_stats
@@ -120,7 +120,7 @@ The summary lists every reading under its status, with its text. The verdict fil
 
 ## What is sent
 
-The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days; on the Premium tier a sealed copy of the collected facts is kept for the formal shadow (see [DATA.md](DATA.md)).
+The Action sends the collector's output: catalog facts (roles, memberships, object ACLs, policies, functions, schemas, settings and similar) and, when the runner can read them, your configuration files. Comments in those files and string literals in policy expressions are withheld in the runner, except a setting name written as a standard-quoted `'name'` directly after `current_setting(`, which is sent as written. The collector never reads table contents, password hashes, key material or other sessions' statements. The server deletes the collected facts when the check ends and keeps the verdict for 30 days; on Premium, Pro and usage plans a sealed copy of the collected facts is kept for the formal shadow (see [DATA.md](DATA.md)).
 
 The report is on by default in `mode: api`: after a verdict the Action asks for it, which sends the verdict record (never your files) through OpenRouter to a model, asking for zero data retention, and `report: false` turns it off; the Action reads the repository-root `requirements.md` by default and sends its text, your own promises; name another file in the `requirements` input, or set `requirements: none` to send none; by default, on every plan, a line of that text that does not match one of the profile's statements word for word also goes to Claude Haiku through OpenRouter, unless an earlier reading of it is kept, drawn from your account's `formalisation` line (with no balance left there, none is sent), and `compile-requirements: false` keeps those lines from it. To turn either off, add it under `with:` in step 4:
 

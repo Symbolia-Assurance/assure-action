@@ -44,6 +44,9 @@ PROPOSAL_BRANCH = 'assure/declaration-proposal'   # Assure's own branch; never t
 TITLE = 'Assure: proposed intent \u2014 review and merge to accept'   # issue #2927: one title for every profile's draft
 NEVER_COMMITS = ('Assure never commits to your branches; it opens one pull request proposing each profile\'s draft at '
                  'its own path under .assure/; merging it is the acceptance.')
+APPROVE_AND_RUN = ('GitHub may hold this pull request\'s Assure check as awaiting approval: someone with write access '
+                   'clicks **Approve and run** in the box at the bottom of its Conversation tab (or on the run\'s page '
+                   'under Actions).')   # issue #3175: the workflow token opened it, so its run can wait unannounced
 _SECTION = '<!-- assure-draft: %s -->'                 # issue #2927: where one file's section of the body starts
 PERMISSIONS_SENTENCE = ('to open the proposal, give the workflow `contents: write` and `pull-requests: write` under '
                         '`permissions:` (and let GitHub Actions create pull requests in the repository settings)')
@@ -198,11 +201,12 @@ def starter_promises(data):
 
 def starter_section(data):
     """Issue #4395: the proposal body's section for the starter requirements.md. Issue #5075: it names the runs that
-    check the merged file (`entry.requirements_upload`), not every run."""
+    check the merged file (`entry.requirements_upload`), not every run. Issue #4429: that sentence ends before the
+    list, which has its own lead-in, so the list never reads as the promises those other runs do not check."""
     lines = [_SECTION % STARTER_PATH, '', 'Assure also drafted `%s`, the promises your app makes, from what it read in '
              'your code. Once this pull request is merged, an api-mode run checks them when its `requirements` input '
              'is unset (the default) or names `%s`; a run with `requirements: none` or another file, or in local mode, '
-             'does not:' % (STARTER_PATH, STARTER_PATH), '']
+             'does not.' % (STARTER_PATH, STARTER_PATH), '', 'The promises it holds:', '']
     lines += ['- %s' % p for p in starter_promises(data)]
     lines += ['', 'Add your own promises to it on this branch, one per line. The free check decides the ones above; '
               'Premium checks the promises it cannot decide yet.']
@@ -477,18 +481,18 @@ def _companion_section(path, rel):
 
 def pull_request_body(record, rel, source='this repository', kept=(), lead=None, starter=None, companions=()):
     """The proposal pull request's body: what it is, how to accept it, and one section per proposed file naming each
-    field to confirm and where it was read. `source` names what the draft at `rel` was read from (issue #2435: the
-    collected catalog snapshot); `kept` holds the sections of the other files already on the branch (issue #2927);
-    `lead` replaces the first sentence of `rel`'s section (issue #2934). Issue #4395: `starter`, the starter
-    requirements.md bytes this proposal carries, adds its section after `rel`'s. Issue #5547: `companions` names the
-    files committed with `rel`, each given a short section after those."""
+    field to confirm and where it was read, and that its run may wait on Approve and run (issue #3175). `source` names
+    what the draft at `rel` was read from (issue #2435: the collected catalog snapshot); `kept` holds the sections of
+    the other files already on the branch (issue #2927); `lead` replaces the first sentence of `rel`'s section (issue
+    #2934). Issue #4395: `starter`, the starter requirements.md bytes this proposal carries, adds its section after
+    `rel`'s. Issue #5547: `companions` names the files committed with `rel`, each given a short section after those."""
     paths = [rel] + ([] if starter is None else [STARTER_PATH]) + sorted(companions)
     what = paths[0] if len(paths) == 1 else '%s and %s' % (', '.join(paths[:-1]), paths[-1])
     head = ('Read each draft and edit any field that is wrong, on this branch. %s This run is proposing %s; merging the '
             'pull request commits %s.\n' % (NEVER_COMMITS, what, 'it' if len(paths) == 1 else 'them'))  # issue #3153
     tail = ([] if starter is None else [starter_section(starter)]) + [_companion_section(p, rel)
                                                                     for p in sorted(companions)]
-    return '\n'.join([head] + list(kept) + [_section(record, rel, source, lead)] + tail)
+    return '\n'.join([head, APPROVE_AND_RUN + '\n'] + list(kept) + [_section(record, rel, source, lead)] + tail)
 
 
 PUSH_REFUSED = 'the push to'      # issue #2934: the observed profile reads a refused push as `contents: read`

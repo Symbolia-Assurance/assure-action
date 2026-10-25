@@ -3,7 +3,7 @@
  "info": {
   "title": "Assure check answer",
   "version": "1",
-  "description": "Focused description of the check answer: POST /v1/checks and GET /v1/checks/{check_id}, and the profile listing they take their profile ids and file names from, GET /v1/profiles (issue #2072), and the free pre-flight POST /v1/lint. The verdict's own fields are described in VERDICTS.md; this contract names the envelope and the optional upgrade object a free account's answer can carry."
+  "description": "Focused description of the check answer: POST /v1/checks and GET /v1/checks/{check_id}, and the profile listing they take their profile ids and file names from, GET /v1/profiles (issue #2072), the free pre-flight POST /v1/lint, and the Premium model refresh POST /v1/premium/recheck (issue #6055). The verdict's own fields are described in VERDICTS.md; this contract names the envelope and the optional upgrade object a free account's answer can carry."
  },
  "servers": [
   {
@@ -145,6 +145,64 @@
      }
     }
    }
+  },
+  "/v1/premium/recheck": {
+   "post": {
+    "operationId": "refreshModel",
+    "description": "\"Refresh my model\" (QUICKSTART-API.md, section 6, the POST /v1/premium/recheck row): rebuilds the saved formal model of a check whose code changed since the model was built. Premium and above; the free plan is refused tier_required (403). The quote comes first: within the monthly allowance the refresh draws on it; past it, overage at cost x 1.2 within the overage budget, else allowance_exhausted (402) until the allowance resets. A check with no saved model is not_found (404); while no paid runner is bound, profile_not_servable (503). A released refresh is tried again as a new job on the next request; a settled one replays at no cost.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "check_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+         "check_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+         },
+         "allow_overage": {
+          "type": "boolean"
+         },
+         "quote_only": {
+          "type": "boolean",
+          "description": "true: answer the quote, hold nothing."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The quote (status quoted), a current model (status current, nothing held), or the job record (schema assure.serve.formalisation/v1, kind recheck) when it lands within the wait or is a repeat.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "202": {
+      "description": "The refresh is queued and runs (status running), with its quote.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RecheckAnswer"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Failure"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -277,6 +335,40 @@
           }
          }
         }
+       }
+      }
+     },
+     "model_refresh": {
+      "type": "object",
+      "required": [
+       "state",
+       "route",
+       "check_id",
+       "quote_usd",
+       "metered"
+      ],
+      "description": "Issue #6055, Premium and above: present when the saved formal model predates this check's code; POST /v1/premium/recheck refreshes it at this quote.",
+      "properties": {
+       "state": {
+        "const": "drifted"
+       },
+       "route": {
+        "const": "POST /v1/premium/recheck"
+       },
+       "check_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{32}$"
+       },
+       "quote_usd": {
+        "type": "number",
+        "minimum": 0,
+        "description": "What the refresh costs you, rounded up to the cent (the quote_usd of POST /v1/premium/recheck)."
+       },
+       "metered": {
+        "enum": [
+         "allowance",
+         "overage"
+        ]
        }
       }
      }
@@ -843,7 +935,8 @@
        "rows",
        "problems",
        "row_details",
-       "counts"
+       "counts",
+       "not_read"
       ],
       "properties": {
        "rows": {
@@ -917,6 +1010,27 @@
          },
          "free_text": {
           "type": "integer"
+         }
+        }
+       },
+       "not_read": {
+        "type": "array",
+        "description": "Issue #4382: one entry per line the check does not read as a promise because it is prose in a file that lists its promises as list items, in line order; empty when there is none. Not a row, a count or a finding.",
+        "items": {
+         "type": "object",
+         "required": [
+          "line",
+          "reason_class"
+         ],
+         "properties": {
+          "line": {
+           "type": "integer"
+          },
+          "reason_class": {
+           "enum": [
+            "prose"
+           ]
+          }
          }
         }
        },
@@ -1069,6 +1183,90 @@
      }
     },
     "additionalProperties": true
+   },
+   "RecheckQuote": {
+    "type": "object",
+    "required": [
+     "quote_usd",
+     "basis_usd",
+     "allowance_remaining_usd",
+     "metered",
+     "overage_usd"
+    ],
+    "description": "The quote of refreshing a saved formal model on the formalisation line (QUICKSTART-API.md, section 6, the POST /v1/premium/recheck row).",
+    "properties": {
+     "quote_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "What you pay, rounded up to the cent: the model-cost basis x 1.2, drawn from the allowance or charged as overage (what the hold draws)."
+     },
+     "allowance_remaining_usd": {
+      "type": "number",
+      "minimum": 0
+     },
+     "metered": {
+      "enum": [
+       "allowance",
+       "overage"
+      ],
+      "description": "allowance: drawn from what is left of the monthly allowance (the pool on Premium and Pro); overage: the part past it is charged at cost x 1.2 within the overage budget."
+     },
+     "overage_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The overage charge, rounded up to the cent; 0 within the allowance."
+     },
+     "basis_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The model-cost basis the hold reserves."
+     }
+    }
+   },
+   "RecheckAnswer": {
+    "type": "object",
+    "required": [
+     "check_id",
+     "route",
+     "model_state",
+     "quote",
+     "status"
+    ],
+    "additionalProperties": true,
+    "description": "The answer of POST /v1/premium/recheck before its record: quoted (quote_only), current (nothing to refresh, nothing held) or running (202, the job queued).",
+    "properties": {
+     "check_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+     },
+     "route": {
+      "const": "POST /v1/premium/recheck"
+     },
+     "model_state": {
+      "enum": [
+       "current",
+       "drifted",
+       "unknown"
+      ]
+     },
+     "model_id": {
+      "description": "The saved model's id, or null."
+     },
+     "quote": {
+      "$ref": "#/components/schemas/RecheckQuote"
+     },
+     "status": {
+      "enum": [
+       "quoted",
+       "current",
+       "running"
+      ]
+     },
+     "job_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+     }
+    }
    }
   }
  }

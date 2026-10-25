@@ -188,10 +188,20 @@ QUERIES = [
                              "'[]'::json) FROM pg_catalog.pg_rewrite w JOIN pg_catalog.pg_depend d "
                              "ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = w.oid "
                              "AND d.refclassid = 'pg_catalog.pg_class'::regclass JOIN pg_catalog.pg_class t "
-                             "ON t.oid = d.refobjid WHERE w.ev_class = c.oid AND t.oid <> c.oid) ELSE NULL END")],
+                             "ON t.oid = d.refobjid WHERE w.ev_class = c.oid AND t.oid <> c.oid) ELSE NULL END"),
+             # #5579: each base relation with its schema; DISTINCT sits in the inner select (json has no equality)
+             ('base_relations', "CASE WHEN c.relkind IN ('v', 'm') THEN (SELECT coalesce(json_agg(json_build_object("
+                                "'schema', b.nspname, 'relname', b.relname) ORDER BY b.nspname, b.relname), "
+                                "'[]'::json) FROM (SELECT DISTINCT tn.nspname::text AS nspname, "
+                                "t.relname::text AS relname FROM pg_catalog.pg_rewrite w JOIN pg_catalog.pg_depend d "
+                                "ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = w.oid "
+                                "AND d.refclassid = 'pg_catalog.pg_class'::regclass JOIN pg_catalog.pg_class t "
+                                "ON t.oid = d.refobjid JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace "
+                                "WHERE w.ev_class = c.oid AND t.oid <> c.oid) b) ELSE NULL END")],
             'pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace '
             "WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND " + _NSP_FILTER, 'n.nspname, c.relname'),
-       'relations with ACL, owner and RLS flags; views and materialized views with their base tables'),
+       'relations with ACL, owner and RLS flags; views and materialized views with their base tables (bare '
+       'names) and their base relations ({schema, relname})'),
     _q('default_acl', 'default_acl', ['pg_default_acl', 'pg_namespace'], 14, 18, 'catalog_snapshot',
        _agg([('defaclrole', 'pg_catalog.pg_get_userbyid(d.defaclrole)'), ('defaclnamespace', 'n.nspname::text'),
              ('defaclobjtype', 'd.defaclobjtype::text'), ('defaclacl', 'd.defaclacl::text[]')],

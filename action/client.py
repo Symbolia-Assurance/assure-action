@@ -541,6 +541,13 @@ class Client:
         status, doc = self._call('GET', '/v1/profiles?request_bytes=%d' % len(body), route='precheck')
         return doc
 
+    def usage(self):
+        """Issue #3219: the `GET /v1/usage` answer (the account's plan, checks and check credit); no work is submitted."""
+        status, doc = self._call('GET', '/v1/usage', route='usage')
+        if status != 200 or not isinstance(doc, dict):
+            raise Refusal('api_error', 'the usage document answered %d' % status)
+        return doc
+
     def declaration_proposal(self, files, stack='python/flask', *, library_versions=None):
         """Draft with the server's identity proposer; never run a second reader in the Action. `library_versions`: the
         bytes of the derived raw/LIBRARY-VERSIONS.json (issue #3128), sent beside the repository files. Issue #3376:
