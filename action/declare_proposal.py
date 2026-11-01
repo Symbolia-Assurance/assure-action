@@ -24,8 +24,8 @@ The record is ``{schema, stack, declaration, sources, confirm}``, the shape of t
 Each rule below drafts the strict reading of what the snapshot shows (access_paths_complete excepted: it is drafted
 true beside protected_tables, always confirmed, since without it the row-security machine is refused). A value that would only widen what the checker
 accepts (an empty untrusted-role list, an empty administrator list) is never drafted from an absence: that key stays
-unread. Issue #2921 drafts three confirmed `default:` values from an absence: standbys, replication_roles and
-standby_addresses `[]` when roles were collected and no customer replication role was observed; tls_floor not
+unread. When no customer replication role is observed, standbys, replication_roles and standby_addresses stay
+unread with their reason, and the written companion asks the customer to state them (issue #3931); tls_floor not
 collected stays unread (the Director, 17 Oct 2026). A snapshot section the collector did not read (absent from the snapshot) is never read as empty.
 
 The draft requirements.md (``requirements_draft``) holds the goals a person would write (``GOALS``), one plain
@@ -454,7 +454,7 @@ def _hba_rule_id(row, top=None, major=16):
     return "hba-%s%d" % (stem, row["line_number"])
 
 
-def _hba_match(row, flow):
+def _hba_match(row, flow, major=16):
     """Whether pg_hba_file_rules `row` matches `flow` as the frozen derive step's hba_match reads it: True, False, or
     None when it may (a samerole or samegroup database, a +group or @file entry, a host name or an address the drafter
     does not resolve, an unknown rule type), past which the drafter guesses no rule id. An error row and an empty name
@@ -476,8 +476,9 @@ def _hba_match(row, flow):
     database = flow["database"] in databases or ("all" in databases and flow["database"] != "replication") \
         or ("sameuser" in databases and flow["database"] == flow["user"])
     user = any(item in ("all", flow["user"]) for item in users)
-    if not database and not any(item in ("samerole", "samegroup") or item[0] == "@" for item in databases) \
-            or not user and not any(item[0] in "+@" for item in users):
+    if not database and not any(item in ("samerole", "samegroup") or item[0] == "@"
+                                or (major >= 16 and item[0] == "/") for item in databases) \
+            or not user and not any(item[0] in "+@" or (major >= 16 and item[0] == "/") for item in users):
         return False
     if kind == "local" or row.get("address") == "all":
         address = True
@@ -761,8 +762,8 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         else:
             d.unread("default_acl_expectations", "no schema-scoped table default privilege was observed")
 
-    # replication_roles (HBA-4): customer logins with the replication attribute ([] as a confirmed default when roles
-    # were collected and none has it)
+    # replication_roles (HBA-4): observed customer roles with the replication attribute. An absence cannot establish
+    # the customer's replication intent: a role outside the snapshot or a superuser can still replicate (#3931).
     if roles_sec is None:
         d.unread("replication_roles", "roles were not collected")
     else:
@@ -774,10 +775,19 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 d.unread(key, "a customer role with the replication attribute was observed; the customer states its "
                               "standbys and their addresses")
         else:
-            # issue #2921: with no customer replication role observed, no standby is drafted (confirmed)
-            d.put("replication_roles", [], "default:[] no customer role with the replication attribute was observed")
-            d.put("standbys", [], "default:[] no customer role with the replication attribute was observed")
-            d.put("standby_addresses", [], "default:[] no customer role with the replication attribute was observed")
+            why = ("no non-superuser customer role with the replication attribute was observed; this does not "
+                   "establish that no role replicates or that no standby exists")
+            for key in ("replication_roles", "standbys", "standby_addresses"):
+                d.unread(key, why)
+            # _left exports explicit notes into the written companion; unread reasons alone are returned only to
+            # the caller. Keep this question scoped to the three fields rather than changing every unread note.
+            d.notes.append({"key": "replication_roles", "note": (
+                "replication_roles, standbys and standby_addresses are unread. A non-superuser replication role was "
+                "not observed. "
+                "A role the snapshot does not show or a superuser can replicate, so an empty list is not inferred. "
+                "Which roles are intended to replicate, and what are the intended standbys and their addresses? "
+                "State replication_roles, standbys and standby_addresses in the declaration, using [] only if none "
+                "are intended.")})
     if roles_sec is None:
         for key in ("standbys", "standby_addresses"):
             d.unread(key, "roles were not collected")
@@ -852,6 +862,7 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                 d.notes.append({"key": "protected_tables", "note": "table %s has a policy that admits every row (%s); "
                                 "its rows are open by its own policy, so it was not drafted as protected"
                                 % (row["relname"], "; ".join(open_to_all)), "table": row["relname"],
+                                "left_out": "a policy admits every row",
                                 "open": _open_line(row["relname"], by_table.get(row["relname"], []))})
                 continue
             quals = {}
@@ -869,12 +880,14 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
                     off_grammar.append(row["relname"])
                     d.notes.append({"key": "protected_tables", "note": "table %s has a policy expression %s (%s); "
                                     "not drafted" % (row["relname"], GRAMMAR_REASON, "; ".join(outside)),
-                                    "table": row["relname"]})
+                                    "table": row["relname"], "left_out": "a policy outside the tenant grammar"})
                     continue
                 groups.setdefault(predicate, []).append((index, row, pindex))
             else:
                 d.notes.append({"key": "protected_tables", "note": "table %s has %d distinct row filters; not drafted"
-                                % (row["relname"], len(quals)), "table": row["relname"]})
+                                % (row["relname"], len(quals)), "table": row["relname"],
+                                "left_out": ("row-level security on and no policy" if not by_table.get(row["relname"])
+                                             else "no row filter" if not quals else "more than one row filter")})
         if not groups:
             for key in ("protected_tables", "declared_predicate", "required_policies"):
                 d.unread(key, "the row filter of %s is %s" % (_and(off_grammar), GRAMMAR_REASON) if off_grammar
@@ -886,7 +899,8 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
             # one predicate); it is noted by name, in snapshot order, so a left-out list names it
             for _index, row, other in sorted((index, row, p) for p, group in groups.items() if p != predicate
                                              for index, row, _pindex in group):
-                d.notes.append({"key": "protected_tables", "table": row["relname"], "note": (
+                d.notes.append({"key": "protected_tables", "table": row["relname"],
+                                "left_out": "a row filter other than the drafted one", "note": (
                     "table %s has the row filter %s, not the drafted predicate %s; not drafted"
                     % (row["relname"], other, predicate))})
             d.put("protected_tables", [row["relname"] for _, row, _ in chosen],
@@ -1037,7 +1051,10 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         if all(type(hba_sec[i].get("rule_number")) is int for i in live):
             order = sorted(live, key=lambda i: hba_sec[i]["rule_number"])
         else:
-            order = sorted(live, key=lambda i: hba_sec[i].get("line_number") or 0) if len(files) <= 1 else None
+            readable_lines = all(type(hba_sec[i].get("line_number")) is int for i in live)
+            order = sorted(live, key=lambda i: hba_sec[i]["line_number"]) if len(files) <= 1 and readable_lines else None
+            order_reason = ("a line_number in pg_hba_file_rules is unread" if not readable_lines else
+                            "the order of pg_hba_file_rules rows across files is not known (no rule_number)")
     for name in logins:
         flow = {"address": "127.0.0.1", "database": database, "method": "scram-sha-256", "transport": "local",
                 "user": name}
@@ -1047,12 +1064,12 @@ def propose_with_notes(snapshot, *, major, major_source="argument:major"):
         for transport in ("local", "plain"):
             candidate = dict(flow, transport=transport)
             if order is None:
-                unresolved.append("%s to %s (%s, scram-sha-256, 127.0.0.1): the order of pg_hba_file_rules rows "
-                                  "across files is not known (no rule_number)" % (name, database, transport))
+                unresolved.append("%s to %s (%s, scram-sha-256, 127.0.0.1): %s"
+                                  % (name, database, transport, order_reason))
                 break
-            index = next((i for i in order if _hba_match(hba_sec[i], candidate) is not False), None)
+            index = next((i for i in order if _hba_match(hba_sec[i], candidate, major) is not False), None)
             rule_id = _hba_rule_id(hba_sec[index], top, major) if index is not None else None
-            if index is not None and (_hba_match(hba_sec[index], candidate) is None or rule_id is None):
+            if index is not None and (_hba_match(hba_sec[index], candidate, major) is None or rule_id is None):
                 unresolved.append("%s to %s (%s, scram-sha-256, 127.0.0.1): %s may be its first rule"
                                   % (name, database, transport, rule_id or "pg_hba_file_rules row %d" % index))
                 break
@@ -1195,7 +1212,7 @@ NO_ROW = {
     "key_owner": "drafted from the stock packaged key: TLS-1 to TLS-5 rest on it with tls_floor and key_file_mode; "
                  "the draft carries no TLS goal",
     "permitted": "SU-3-OB on postgresql-observed-baseline reads it; the declared-model goals carry no row for it",
-    "replication_roles": "HBA-4 reads it beside standbys and standby_addresses, drafted [] with it",
+    "replication_roles": "HBA-4 also needs standbys and standby_addresses, which the customer must state",
     "untrusted_roles": "SD-1 and SD-3 also need the authority closure (authority_complete, caller), which the catalog "
                        "snapshot does not give",
 }
@@ -1602,8 +1619,9 @@ def rollup(goal, states):
 def requirements_draft(record, notes=()):
     """A draft requirements.md (issue #1186; coordination 7588 and its qualification): the goals a person would write,
     one plain sentence each, for each goal with at least one obligation the drafted declaration decides; no role or
-    obligation names, and no table names except the tenant goal's protected tables (issue #5572). The header is a
-    Markdown heading, so the matcher reads only the goals as requirements.
+    obligation names, and no table names except the tenant goal's protected tables (issue #5572) and, under it, the
+    row-security tables left out of it, each reason's tables on one or more heading lines wrapped under LINE_CAP
+    (issue #3235). The header is a Markdown heading, so the matcher reads only the goals as requirements.
     The checks under each goal, the drafter's notes and provenance are in the companion (`typed_companion`). Issue
     #3269: the file is committed unchanged as requirements.md, so it carries no internal flags line; a requirements.md
     committed with that line (a Markdown heading) still parses the same."""
@@ -1613,6 +1631,21 @@ def requirements_draft(record, notes=()):
              "assure-requirements-typed.json: commit it beside this file unchanged.", ""]
     goals = drafted_goals(record)
     lines += ["- " + goal["english"] for goal in goals] + ([""] if goals else [])
+    # issue #3235: under a drafted tenant goal, each reason's left-out row-security tables, on one or more heading lines
+    # wrapped under LINE_CAP
+    left = {}
+    for n in notes if any(goal["key"] == "tenant" for goal in goals) else ():
+        if isinstance(n.get("left_out"), str) and isinstance(n.get("table"), str):
+            left.setdefault(n["left_out"], []).append(n["table"])
+    for why, tables in left.items():
+        head, line = "## Left out of the goal on users' own rows (%s): " % why, []
+        for table in tables:
+            if line and len(head + ", ".join(line + [table]) + ".") > LINE_CAP:
+                lines.append(head + ", ".join(line) + ".")
+                line = []
+            line.append(table)
+        lines.append(head + ", ".join(line) + ".")
+    lines += [""] if left else []
     opened = [n["open"] for n in notes if isinstance(n.get("open"), str)]
     if opened:
         lines += opened[:OPEN_CAP] + ([] if len(opened) <= OPEN_CAP else [

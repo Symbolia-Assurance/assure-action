@@ -61,7 +61,11 @@ SCOPE_FIELDS = (('scope', 'scope_missing'), ('scope_binding', 'scope_binding'), 
 # Issue #2651 (layer 1 follow-up): `requirement_goals` (only with `requirements`) is the goal map of the typed rows the
 # text holds (serve.proof_tree `goal_map`): each goal's sentence, its requirements.md line and its children's ids and
 # plain sentences, each child a typed row of the text. Kept with the check for its proof tree, never matched.
-REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance', 'compile_requirements', 'requirement_goals')
+# Issue #3850: `release_tag` (only with `repository` and `commit`) is the release tag the Action ran on (a published
+# GitHub release or a pushed tag); with the account's remodel-on-release setting on it starts the remodel on this check.
+REQUIREMENT_FIELDS = ('requirements', 'repository', 'commit', 'provenance', 'compile_requirements', 'requirement_goals',
+                      'release_tag')
+RELEASE_TAG_MAX = 255
 MAX_GOALS = 64
 MAX_GOAL_ROWS = 32
 
@@ -74,7 +78,9 @@ def _goal_id(value):
 
 # issue #2126: the top-level keys from_request reads with `with_scope`, in the order its body-shape refusal names them;
 # the lint names the first 16 other keys a body holds as unknown_field findings and counts the rest (lint.py).
-BODY_FIELDS = ('profile', 'files') + tuple(k for k, _ in SCOPE_FIELDS) + REQUIREMENT_FIELDS
+# HOLDS-SUPPLY-001 piece 2 (serving 8403/8452): `probe: true` asks for a bounded variant probe beside the verdict
+PROBE_FIELDS = ('probe',)
+BODY_FIELDS = ('profile', 'files') + tuple(k for k, _ in SCOPE_FIELDS) + REQUIREMENT_FIELDS + PROBE_FIELDS
 MAX_REQUIREMENTS_BYTES = 65536
 MAX_REQUIREMENTS_LINES = 256
 MAX_REQUIREMENT_LINE_BYTES = 8192
@@ -277,7 +283,7 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
     `accepted_scope_ref` (serve-006 gap 1), returned as a third item {field: value} holding only the fields sent; a field
     sent as null is `bad_input`. Their values are checked against the profile row later (`serve.profiles`)."""
     doc = parse_json(body, limits)
-    optional = ({k for k, _ in SCOPE_FIELDS} | set(REQUIREMENT_FIELDS)) if with_scope else set()
+    optional = ({k for k, _ in SCOPE_FIELDS} | set(REQUIREMENT_FIELDS) | set(PROBE_FIELDS)) if with_scope else set()
     if not isinstance(doc, dict) or not {'profile', 'files'} <= set(doc) <= {'profile', 'files'} | optional:
         # issue #644: the pointer and the reason name the first key the body lacks or holds beyond the rule, when the
         # key is of the closed pointer alphabet (else the reason keeps the rule alone)
@@ -333,6 +339,11 @@ def from_request(body, limits=LIMITS, *, with_scope=False):
                                                     pointer=json_pointer(key)))
         asked[key] = doc[key]
     asked.update(upload_fields({k: doc[k] for k in REQUIREMENT_FIELDS if k in doc}))
+    if 'probe' in doc:
+        if not isinstance(doc['probe'], bool):
+            raise Refusal('bad_input', 'probe is true or false; leave it out for no probe',
+                          malformation=malformation('body_shape', pointer=json_pointer('probe')))
+        asked['probe'] = doc['probe']
     return profile_id, files, asked
 
 
@@ -396,6 +407,13 @@ def upload_fields(fields):
         if fields['provenance'] not in PROVENANCES:
             raise bad('provenance must be caller or runner', 'provenance')
         out['provenance'] = fields['provenance']
+    if 'release_tag' in fields:                   # issue #3850: the release this check's commit is
+        if 'repository' not in fields:
+            raise bad('release_tag names the release of repository and commit; send it only with them', 'release_tag')
+        tag = fields['release_tag']
+        if not isinstance(tag, str) or not 0 < len(tag) <= RELEASE_TAG_MAX or not tag.isprintable():
+            raise bad('release_tag must be a tag name of 1 to %d printable characters' % RELEASE_TAG_MAX, 'release_tag')
+        out['release_tag'] = tag
     if 'compile_requirements' in fields:            # issue #2252: the off switch of reading lines with Claude Haiku
         if 'requirements' not in fields:
             raise bad('compile_requirements says whether the requirements text is read by Claude Haiku; send it only '
@@ -726,17 +744,18 @@ def dumps(obj):
 
 def request_body(profile_id, files, limits=LIMITS, *, scope=None, scope_binding=None, accepted_scope_ref=None,
                  requirements=None, repository=None, commit=None, provenance=None, compile_requirements=None,
-                 requirement_goals=None):
+                 requirement_goals=None, release_tag=None):
     """The upload body `{profile, files: {name: base64}}`, plus each of `scope`, `scope_binding` and
     `accepted_scope_ref` (serve-006 gap 1), of `requirements`, `repository`, `commit` and `provenance` (serve-019)
-    and of `compile_requirements` (issue #2252) and `requirement_goals` (issue #2651) that is not None;
+    and of `compile_requirements` (issue #2252), `requirement_goals` (issue #2651) and `release_tag` (issue #3850) that
+    is not None;
     `oversize_input` when the encoded body passes the body cap."""
     doc = {'profile': profile_id,
            'files': {n: base64.b64encode(bytes(files[n])).decode('ascii') for n in sorted(files)}}
     for key, value in (('scope', scope), ('scope_binding', scope_binding), ('accepted_scope_ref', accepted_scope_ref),
                        ('requirements', requirements), ('repository', repository), ('commit', commit),
                        ('provenance', provenance), ('compile_requirements', compile_requirements),
-                       ('requirement_goals', requirement_goals)):
+                       ('requirement_goals', requirement_goals), ('release_tag', release_tag)):
         if value is not None:
             doc[key] = value
     body = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('ascii')

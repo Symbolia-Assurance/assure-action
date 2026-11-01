@@ -56,7 +56,7 @@
             }
           },
           "401": {
-            "description": "unauthenticated: the key is missing, malformed, unknown or revoked; key_expired: the key is past its expiry (detail.expires)",
+            "description": "unauthenticated: the key is missing, malformed, unknown or revoked; a single Authorization value that is not `Bearer asr_…` reads \"the Authorization value is not an Assure key (Bearer asr_…)\" (issue #3271), never echoing it; key_expired: the key is past its expiry (detail.expires)",
             "content": {
               "application/json": {
                 "schema": {

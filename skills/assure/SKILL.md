@@ -26,7 +26,7 @@ Select Python files, except tests (tests/ and test/ folders, test_x.py, x_test.p
 LIST: routes with no sign-in guard (method, path). Ask the person once:
 
 ```text
-Send N files (X KB) to BASE? This includes dependency files, including nested requirements files. Later sends follow DATA.md: source, intent, records, default report, and whole Django/FastAPI lock files, only where your versions are pinned (names, versions, hashes). Public: LIST; other routes need sign-in. One yes covers sending, setup and its pull request. Yes, or edit LIST?
+Send N files (X KB) to BASE? This includes dependency files, including nested requirements files. Later sends follow DATA.md: source, intent, records, default report, and whole Django/FastAPI lock files, only where your versions are pinned (names, versions, hashes). Public: LIST; other routes, and any whose guard Assure cannot read, need sign-in. One yes covers sending, setup and its pull request. Yes, or edit LIST?
 ```
 
 No: send nothing; leave an unsent local draft and push no sending workflow. Yes: POST this JSON to BASE/v1/setup, with no key. Tool asks to approve? [Approving](references/agent.md#approving-a-request-in-your-tool). For FastAPI or Django, add the key stack, python/fastapi or python/django. At most 10 calls a minute from one address.
@@ -36,7 +36,7 @@ No: send nothing; leave an unsent local draft and push no sending workflow. Yes:
  "files": {"raw/repository/<path>": "<base64 of the file>"}}
 ```
 
-A 404 (`not_found`): this server does not serve it; use the fallback at the end.
+A 404 (`not_found`): this server does not serve it; use the fallback at the end. A 400 (`bad_input`): fix what its reason names, then send again. A 429 (`rate_limited`): wait its Retry-After seconds, then send again. A 504 (`checker_timeout`): send again later.
 
 ## 3. Write what comes back
 
@@ -50,7 +50,7 @@ If setup.requirements is null, keep existing requirements.md. Add `report: true`
 
 ## 4. Open the pull request
 
-Ask nothing more. Set declaration.public_routes to the union of LIST, with the person's edits, and the draft's public_routes minus routes the person removed from LIST; in the pull request body, list each route that only one of the two names, and which, and name each removed drafted route as not applied. Each to_confirm row is applied by default (CONFIG: keep as drafted); list its method, path and note in the pull request body. Do not ask about requirements.md: the Action reads the repository-root `requirements.md` by default; one notice names a root file it cannot send.
+Ask nothing more. Set declaration.public_routes to the union of LIST, with the person's edits, and the draft's public_routes minus routes the person removed from LIST; in the pull request body, list each route that only one of the two names, and which, and name each removed drafted route as not applied. Each to_confirm row is applied by default: a route row stays out of public_routes, so it needs sign-in; the CONFIG row keeps its drafted config_surfaces fact (Flask: `DEBUG_TB_ENABLED` false). List each row's method, path, note and default (sign-in required, or as drafted) in the pull request body. Do not ask about requirements.md: the Action reads the repository-root `requirements.md` by default; one notice names a root file it cannot send.
 
 Commit on a new branch; open a pull request with your own GitHub access. No repository setting changes. Fix confirm fields at sources' file:line. After the first Assure comment, return its first line and pull request link; stop. Never merge: the person reviews and merges.
 

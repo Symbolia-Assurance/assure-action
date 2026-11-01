@@ -38,7 +38,7 @@ def _validate(value, rule, path, errors):
     known = {'$schema', '$id', 'title', 'description', 'type', 'const', 'enum', 'pattern', 'minLength',
              'minimum', 'maximum', 'properties', 'propertyNames', 'required', 'additionalProperties',
              'dependentRequired', 'items', 'prefixItems', 'minItems', 'maxItems', 'uniqueItems',
-             'x-runtime-integer-encoding',
+             'x-runtime-integer-encoding', 'x-other-profile-keys',
              'execution_authorized', 'hardware_authorized', 'industrial_release_authorized',
              'release_allowed', 'physical_validation', 'simulation', 'self_approved'}
     if rule.keys() - known:
@@ -81,6 +81,9 @@ def _validate(value, rule, path, errors):
         for key, item in value.items():
             if 'propertyNames' in rule: _validate(key, rule['propertyNames'], _pointer(path,key), errors)
             if key in props: _validate(item, props[key], _pointer(path,key), errors)
+            # issue #6357: a top-level key another PostgreSQL profile documents (x-other-profile-keys) is that
+            # profile's to read; one declaration file serves both profiles, so it is ignored here, not refused
+            elif key in rule.get('x-other-profile-keys', {}): continue
             elif rule.get('additionalProperties') is False:
                 errors.append({'path':_pointer(path,key),'code':'unknown_field','message':'Field is absent from this schema version.'})
             elif type(rule.get('additionalProperties')) is dict:

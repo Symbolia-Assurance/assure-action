@@ -182,7 +182,7 @@ def canonical_fail_on(text):
 
 
 def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requirements=None, repository=None,
-              commit=None, provenance=None, compile_requirements=None, requirement_goals=None):
+              commit=None, provenance=None, compile_requirements=None, requirement_goals=None, release_tag=None):
     """serve-023: the Idempotency-Key of one request, derived from its content: the first 32 hex of
     sha256(canonical JSON of {bundle_sha256, profile, scope_sha256, scope_binding_sha256, requirements_sha256,
     repository, commit, provenance, query}).
@@ -208,6 +208,8 @@ def check_key(profile_id, files, query, *, scope=None, scope_binding=None, requi
         doc['compile_requirements'] = compile_requirements
     if requirement_goals is not None:
         doc['requirement_goals_sha256'] = _digest_of(requirement_goals)
+    if release_tag is not None:                  # issue #3850: joins the document only when sent
+        doc['release_tag'] = release_tag
     return hashlib.sha256(bundle.canonical_json(doc)).hexdigest()[:32]
 
 
@@ -570,7 +572,7 @@ class Client:
     def submit(self, profile_id, files, fail_on=None, *, body=None, allow_partial=False, scope=None,
                scope_binding=None, accepted_scope_ref=None, limits=None, requirements=None, repository=None,
                commit=None, provenance=None, compile_requirements=None, requirement_goals=None,
-               key_from_bundle=False):
+               key_from_bundle=False, release_tag=None):
         """Send one check and return the final verdict envelope (a dict with schema assure.serve.verdict/v1). Every
         other end is a Refusal. `body` is the encoded upload when the caller has already built it; otherwise it is
         built here under `limits` (default the serving limits) with the scope fields and the serve-019 requirements
@@ -585,9 +587,9 @@ class Client:
                                        scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                        requirements=requirements, repository=repository, commit=commit,
                                        provenance=provenance, compile_requirements=compile_requirements,
-                                       requirement_goals=requirement_goals)
+                                       requirement_goals=requirement_goals, release_tag=release_tag)
         elif (scope, scope_binding, accepted_scope_ref, requirements, repository, commit,
-              provenance, compile_requirements, requirement_goals) != (None,) * 9:
+              provenance, compile_requirements, requirement_goals, release_tag) != (None,) * 10:
             raise ValueError('pass the scope fields or a built body, not both')
         path = '/v1/checks'
         query = {}
@@ -603,7 +605,8 @@ class Client:
             keyed = urllib.parse.urlencode({k: v for k, v in query.items() if k != 'fail_on'})
             idem = check_key(profile_id, files, keyed, scope=scope, scope_binding=scope_binding,
                              requirements=requirements, repository=repository, commit=commit, provenance=provenance,
-                             compile_requirements=compile_requirements, requirement_goals=requirement_goals)
+                             compile_requirements=compile_requirements, requirement_goals=requirement_goals,
+                             release_tag=release_tag)
         else:
             idem = secrets.token_hex(16)
         self.precheck(body)                          # #4907: the size first; nothing of the upload on a refusal
@@ -687,14 +690,14 @@ class Client:
 
     def lint(self, profile_id, files, fail_on=None, *, allow_partial=False, scope=None, scope_binding=None,
              accepted_scope_ref=None, limits=None, requirements=None, repository=None, commit=None, provenance=None,
-             compile_requirements=None, requirement_goals=None):
+             compile_requirements=None, requirement_goals=None, release_tag=None):
         """serve-043: the free pre-flight of one upload (`POST /v1/lint`, serve/lint.py): the lint document (schema
         assure.serve.lint/v1) the API answers with. Nothing is charged and no check runs. Every other end is a Refusal."""
         body = bundle.request_body(profile_id, files, limits if limits is not None else bundle.LIMITS, scope=scope,
                                    scope_binding=scope_binding, accepted_scope_ref=accepted_scope_ref,
                                    requirements=requirements, repository=repository, commit=commit,
                                    provenance=provenance, compile_requirements=compile_requirements,
-                                   requirement_goals=requirement_goals)
+                                   requirement_goals=requirement_goals, release_tag=release_tag)
         query = {}
         if fail_on:
             query['fail_on'] = canonical_fail_on(fail_on)

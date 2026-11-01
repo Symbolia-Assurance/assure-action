@@ -1,7 +1,7 @@
 # Assure: collects PostgreSQL facts in the customer's runner, sends them to the hosted Assure API over TLS with the
 # customer's key, and writes the verdict the API returns. The check runs on Symbolia's server. Inputs reach entry.py
 # through the environment only, the API key too (never on a command line); no expression appears inside the run
-# script. The one action used is GitHub's actions/upload-artifact, pinned to a full sha; it cannot fail the Action.
+# script. The actions used are GitHub's, pinned to a full sha: upload-artifact (it cannot fail the Action) and, in local mode, setup-python 3.14.
 name: Assure check
 description: Check a PostgreSQL server against an Assure profile. Collects in your runner, checks on the Assure API, writes a verdict file.
 author: Symbolia
@@ -88,7 +88,7 @@ inputs:
     required: false
     default: ''
   requirements:
-    description: "A requirements file to send with the check, api mode only (a path relative to the workspace). Unset (the default), the Action reads the repository-root requirements.md by default and sends its text; with no such file it sends none and says nothing, and a root file it cannot send (a symbolic link, beyond the bounds, not UTF-8 text) is not sent: the check runs and one notice says why. A file is sendable within 65536 bytes, 256 lines and 8192 bytes per line, as a regular UTF-8 file that is not a symbolic link. A named file that cannot be sent is bad_input (exit 2) before anything is sent. none sends no requirements text and prints no notice; the repository and the commit still go. The text is a request field, never a collected file; the repository and the commit (on a pull request, its head commit) go with it, and the server keeps them with the check for 30 days. Local mode does not read requirements."
+    description: "A requirements file to send with the check as a separate request field, in api and lint modes (a path relative to the workspace). Unset (the default), the Action reads the repository-root requirements.md by default and sends its text; with no such file it sends none and says nothing, and a root file it cannot send (a symbolic link, beyond the bounds, not UTF-8 text) is not sent: the check runs and one notice says why. A file is sendable within 65536 bytes, 256 lines and 8192 bytes per line, as a regular UTF-8 file that is not a symbolic link. A named file that cannot be sent is bad_input (exit 2) before anything is sent. The repository and the commit (on a pull request, its head commit) go with it. Sent in API and lint uploads; lint creates no stored check, and in api mode the server keeps them with the check for 30 days. none sends no text in this request field and prints no notice; the repository and the commit still go. none stops only that separate field. Independently, the Python bundle includes tracked root requirements.md as raw/repository/requirements.md, including with requirements: none; see DATA.md. Local mode does not read requirements."
     required: false
     default: ''
   compile-requirements:
@@ -108,7 +108,7 @@ inputs:
     required: false
     default: assure-verdict.json
   python:
-    description: The Python 3.14 interpreter to run the Action with.
+    description: The Python 3.14 interpreter to run the Action with. In mode local the Action provisions Python 3.14 with actions/setup-python (the job's PATH is unchanged) and, on any other Python, runs again on it, or else on the python3.14 on PATH, and refuses (bad_input) when neither runs 3.14.
     required: false
     default: python3
 
@@ -162,6 +162,16 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: engine-python
+      # issue #6818: the engine's parsers are pinned to Python 3.14, whatever the runner's python3 is; when this step
+      # fails, entry.py refuses local mode by name (bad_input), never running on the runner's other Python
+      if: ${{ inputs.mode == 'local' }}
+      continue-on-error: true
+      # actions/setup-python v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.14'
+        update-environment: false
     - id: assure
       shell: bash
       env:
@@ -191,6 +201,7 @@ runs:
         INPUT_SEND_LOCK_FILES: ${{ inputs.send-lock-files }}
         INPUT_OUTPUT: ${{ inputs.output }}
         ASSURE_PYTHON: ${{ inputs.python }}
+        ASSURE_ENGINE_PYTHON: ${{ steps.engine-python.outputs.python-path }}
         GITHUB_TOKEN: ${{ github.token }}
       run: '"$ASSURE_PYTHON" -I -B "$GITHUB_ACTION_PATH/action/entry.py"'
     - name: Upload the requirements draft

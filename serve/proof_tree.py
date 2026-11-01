@@ -77,6 +77,14 @@ FORMAL_MODEL_TIERS = ('usd_20', 'usd_200', 'usage', 'enterprise')
 REMODEL_ROUTE = 'POST /v1/premium/recheck'
 UPGRADE_LINE = 'Premium builds the formal model when you upgrade.'
 NOT_BUILT_LINE = 'Your formal model is being built; it shows here when it is ready.'
+# issue #6391: the profiles the Premium runner builds a model for (serve/premium_runner.py SERVES `profiles`; a test
+# holds the two equal), and the line a paid check of another profile carries without a model
+MODEL_PROFILES = ('python-auth-declared-model',)
+NOT_OFFERED_LINE = 'No formal model is built for this profile, so none shows here.'
+# issue #5160: a tree past the 30-day retention with no model (swept, or never built: serve/store.py release-tree-keep
+# keeps a release account's verdict, not its model, and nothing kept says whether a model was built)
+NOT_HELD_LINE = ('No formal model is held for this check: a model is kept for 30 days after its check, '
+                 'and this check is older.')
 UPGRADE_LINK_WORDS = 'Upgrade to Premium'
 MAX_CHANGED = 50
 _BUILT = re.compile(r'\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?')
@@ -302,7 +310,7 @@ def _goal_state(states):
 
 def build(verdict, companion=None, requirements_text=None, *, proposal=None, goals=None, repository=None,
           commit=None, goals_unstored=False, goals_kept=False, tier=None, model=None, repository_files=None,
-          budget=None, remodel_quote_usd=None, remodel_parts=None, upgrade_url=None):
+          budget=None, remodel_quote_usd=None, remodel_parts=None, upgrade_url=None, model_retention_over=False):
     """The proof tree of `verdict` (module docstring) as a JSON-ready dict:
     {schema, header, counts, goals, checks, other_checks, not_decided, no_reading, note}.
 
@@ -316,7 +324,8 @@ def build(verdict, companion=None, requirements_text=None, *, proposal=None, goa
     goal map, `goals_of`): each goal node names the line the map carries, which `goal_map` takes from requirements.md
     as read and never from the companion or the typed text; its rows name no requirements.md line (`_source_lines`:
     goals without the text they came from).
-    `tier`, `model`, `repository_files`, `budget`, `remodel_quote_usd`, `remodel_parts` and `upgrade_url` give layer 2,
+    `tier`, `model`, `repository_files`, `budget`, `remodel_quote_usd`, `remodel_parts`, `upgrade_url` and
+    `model_retention_over` give layer 2,
     `formal_model` (`formal_model`, module docstring); without `tier` it is None."""
     env = verdict if isinstance(verdict, dict) else {}
     reading = render.pr_reading(env)
@@ -401,6 +410,7 @@ def build(verdict, companion=None, requirements_text=None, *, proposal=None, goa
     header = _header(env, repository, commit)
     layer2 = formal_model(tier, model, repository_files, budget=budget, remodel_quote_usd=remodel_quote_usd,
                           remodel_parts=remodel_parts, checks=checks, upgrade_url=upgrade_url,
+                          model_retention_over=model_retention_over, profile=env.get('profile'),
                           obligation_words={k: render._pr_words(env, k, 'short_name')
                                             for k in env.get('obligation_words') or ()
                                             if isinstance(env.get('obligation_words'), dict)})
@@ -459,7 +469,7 @@ def _read_set_body(value):
 
 
 def _under(path, roots):
-    return any(path == r or path.startswith(r.rstrip('/') + '/') for r in roots)
+    return any(r.rstrip('/') in ('.', '') or path == r or path.startswith(r.rstrip('/') + '/') for r in roots)
 
 
 def _probe_hit(rs, path):
@@ -551,9 +561,12 @@ def drift(model, repository_files=None):
 
 
 def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quote_usd=None, remodel_parts=None,
-                 checks=(), obligation_words=None, upgrade_url=None):
+                 checks=(), obligation_words=None, upgrade_url=None, model_retention_over=False, profile=None):
     """Layer 2 of the tree (module docstring), or None when no tier is named. A tier without the formal model:
-    {state: 'upgrade', line}. No model (or one without its pinned digests): {state: 'not_built', line}. Otherwise
+    {state: 'upgrade', line}. No model (or one without its pinned digests): {state: 'not_built', line},
+    or {state: 'not_held', line} with `model_retention_over` (issue #5160: the check is past the 30 days a model is
+    kept for, so none is held, whether or not one was built), or {state: 'not_offered', line} when `profile` (the
+    verdict's) is a named profile outside MODEL_PROFILES (issue #6391: no model is ever built for it). Otherwise
     {state: current | drifted | unknown, model_id, built_at, model_commit, scope, changed_files, changed_count,
     branches, remodel}: each branch is a requirement row of the model, headed by the customer's words for it (the
     layer-1 check's waypoint, else the requirement sentence) with the model's own state, and opens to `checks`: the
@@ -570,7 +583,10 @@ def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quo
     m = model if isinstance(model, dict) else {}
     found = _drift(m, repository_files)
     if found is None:
-        return {'state': 'not_built', 'line': NOT_BUILT_LINE}
+        if isinstance(profile, str) and profile and profile not in MODEL_PROFILES:
+            return {'state': 'not_offered', 'line': NOT_OFFERED_LINE}
+        return {'state': 'not_held', 'line': NOT_HELD_LINE} if model_retention_over else \
+            {'state': 'not_built', 'line': NOT_BUILT_LINE}
     state, changed = found
     words, stated = {}, {}
     for c in checks or ():

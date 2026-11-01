@@ -23,7 +23,8 @@ serve-102: with neither artefacts nor a connection, `from_checkout` reads the re
 tracked Python files and requirements.md, listed by `git ls-files -s`, read only), with git's index modes. Issue #3841:
 when the checkout's `.assure/declaration.json` names `app_roots`, only the Python files under those directories are
 read (requirements.md always); a request that would still pass the body limit stops in the runner naming its size, the
-limit and `app_roots`, the one setting that narrows it.
+limit and `app_roots`, the one setting that narrows it, or, when `app_objects` names a `factory` (read wide, #3882),
+that the factory reads every tracked Python file and `app_roots` does not narrow it (issue #4748).
 Issue #3128: it also reads the tracked dependency files (requirements*.txt / *.in, constraints*.txt, Pipfile.lock,
 poetry.lock, uv.lock, pyproject.toml) in the runner and sends the derived `raw/LIBRARY-VERSIONS.json`,
 one entry per package the checker reads a guard of (flask-login; flask-httpauth, issue #3320; flask-jwt-extended, issue #3253) or a pass-through
@@ -165,7 +166,9 @@ LIBRARY_PACKAGES = ('flask-apispec', 'flask-httpauth', 'flask-jwt-extended', 'fl
 #: helper row (its LIBRARY_HELPER_VERSION_ROWS / HELPER_VERSION_PACKAGES). A read set apart from LIBRARY_PACKAGES, sent
 #: minimal: an entry is recorded only as an exact pin at one of these versions (`{"version", "source"}`), after every
 #: LIBRARY_PACKAGES entry and only while the record stays within its 4096 bytes; another version, a range, an unread
-#: pin or no room leaves it out, and the helper keeps the refusal it has with no version.
+#: pin or no room leaves it out, and the helper keeps the refusal it has with no version. #5769 (R, the Director's
+#: "R, then V"): exact pins that disagree are kept as an `unread` entry naming each pin's file and line (no version), so
+#: the checker's refusal names both pins and files rather than reading as if the package were never pinned.
 HELPER_VERSION_PACKAGES = {'flask-pagedown': ('0.2.2',)}
 #: seat a4-pins2, commit 2 (the Director's ruling): flask-sqlalchemy, whose 2.2 pin gates the checker's
 #: AFTER_RESPONSE_QUERY_LOG_READ rule
@@ -643,6 +646,7 @@ def library_versions(files):
         for pkg, version, rng, line, unread in _read_lock(rel, text):
             found.setdefault(pkg, []).append((version, rng, '%s:%d' % (rel, line), unread))
     out = {}
+    conflicts = set()     # #5769 (R): helper packages whose exact pins disagree
     for pkg in sorted(found):
         rows = found[pkg]
         pins = [(v, src) for v, _r, src, _u in rows if v is not None]
@@ -658,8 +662,11 @@ def library_versions(files):
             if len(versions) == 1:
                 out[pkg] = {'version': versions[0], 'source': pins[0][1]}
             else:
-                out[pkg] = {'unread': 'dependency files pin %s at %d different versions (%d pins)' % (pkg, len(versions), len(pins)),
-                            'source': pins[0][1]}
+                text = 'dependency files pin %s at %d different versions (%d pins)' % (pkg, len(versions), len(pins))
+                if pkg not in LIBRARY_PACKAGES:      # #5769 (R): a helper's conflicting pins, each by file and line
+                    text += ': ' + ', '.join(sorted({src for _v, src in pins}))
+                    conflicts.add(pkg)
+                out[pkg] = {'unread': text, 'source': pins[0][1]}
         elif len(ranges) == 1 and not _RANGE.fullmatch(ranges[0]):
             # a range the checker does not read is sent as unread, never as a value that refuses the whole record
             out[pkg] = {'unread': '%s is required by a range Assure does not read: %s' % (pkg, ranges[0][:80]),
@@ -684,11 +691,13 @@ def library_versions(files):
     for pkg in out:
         if len(library_versions_bytes(out)) > 4096:
             out[pkg] = {'unread': '%s dependency source locator exceeds the 4096-byte record limit' % pkg, 'source': None}
-    # seat a4-pins2: a helper package's exact pin, only where the guard packages leave it room
+    # seat a4-pins2: a helper package's exact pin, only where the guard packages leave it room; #5769 (R): its
+    # conflicting exact pins as the bounded `unread` entry that names them, on the same terms
     for pkg, entry in sorted(helpers.items()):
         path, _sep, line = entry['source'].rpartition(':')
-        if set(entry) == {'version', 'source'} and entry['version'] in HELPER_VERSION_PACKAGES.get(pkg, ()) \
-                and path and re.fullmatch(r'[1-9][0-9]*', line) \
+        exact = set(entry) == {'version', 'source'} and entry['version'] in HELPER_VERSION_PACKAGES.get(pkg, ())
+        conflict = pkg in conflicts and set(entry) == {'unread', 'source'} and len(entry['unread']) <= 512
+        if (exact or conflict) and path and re.fullmatch(r'[1-9][0-9]*', line) \
                 and not any(ord(c) < 32 or ord(c) == 127 for c in path) \
                 and len(library_versions_bytes({**out, pkg: entry})) <= 4096:
             out[pkg] = entry
@@ -996,8 +1005,7 @@ def bound_of(doc):
     # `from_object(<factory parameter>)` from every call site of a declared factory, anywhere in the repository; a
     # bounded send would withhold those in sibling directories (tests/conftest.py) and read the load as resolved where
     # the wide read refuses it. Until the send keeps a factory's call sites, a declared factory reads the checkout wide.
-    objs = doc.get('app_objects')
-    if isinstance(objs, list) and any(isinstance(o, dict) and o.get('factory') for o in objs):
+    if names_factory(doc):
         return None
     resource = doc.get('resource_roots')
     resource = [r for r in resource if isinstance(r, str)] if isinstance(resource, list) else []
@@ -1016,6 +1024,13 @@ def bound_of(doc):
                 base = '/'.join(parts[:k])
                 named.update((base + '.py', base + '/__init__.py'))
     return Bound(roots, resource_roots or [], named)
+
+
+def names_factory(doc):
+    """Whether a declaration object's `app_objects` names a `factory` (#3882: such a declaration reads the checkout
+    wide, whatever its `app_roots`)."""
+    objs = doc.get('app_objects') if isinstance(doc, dict) else None
+    return isinstance(objs, list) and any(isinstance(o, dict) and o.get('factory') for o in objs)
 
 
 def bound_line(top, files, cap):
@@ -1064,7 +1079,8 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
     only) that is Python source or requirements.md becomes `raw/repository/<path>`; other tracked files are not read.
     Issue #3841: with `app_roots` in the checkout's `.assure/declaration.json`, only the Python files under those roots
     are sent, with what the checker loads by name outside them (`Bound`). When the files to send would encode past
-    `limits.body_bytes`, `oversize_input` names the encoded size, the limit and `app_roots` before any file is sent;
+    `limits.body_bytes`, `oversize_input` names the encoded size, the limit and `app_roots` before any file is sent
+    (issue #4748: for a declared factory, that `app_roots` does not narrow the read);
     with `app_roots`, the kept modules are parsed first for config loaded by name (`Bound.config_loads`).
     Returns (bundle.Collected, {path: git mode}). A name the profile does not admit is listed in `ignored`."""
     from serve import bundle
@@ -1126,6 +1142,12 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         encoded += _encoded(name, st.st_size)
     if encoded > limits.body_bytes:
         python = sum(1 for _n, rel, _m, _f in chosen if rel.endswith('.py'))
+        if roots is None and names_factory(_declaration(top, limits.file_bytes)):
+            # issue #4748: app_roots narrows nothing for a declared factory (`bound_of`), so it is not the next step
+            raise Refusal('oversize_input', 'the checkout holds %d tracked Python files that encode to %d bytes; the '
+                          'limit is %d bytes: %s names a factory in app_objects, so every tracked Python file is read '
+                          '(the check reads every place the factory is called) and app_roots does not narrow it'
+                          % (python, encoded, limits.body_bytes, CHECKOUT_DECLARATION), measure='total', factory=True)
         if roots is None:
             raise Refusal('oversize_input', 'the checkout holds %d tracked Python files that encode to %d bytes; the '
                           'limit is %d bytes: name the directories your app runs from in app_roots in %s (for example '
@@ -1288,7 +1310,9 @@ def checkout_for_plan(top, allow, limits, env, *, draft):
     Refused before any upload, typed `oversize_input` with `measure: total` (the Action adds the plan's sentence:
     the plan, its limit, app_roots and the plan that reads more), never a partial app sent silently: no app object
     found (`app_subset: none`); app objects in several places (`app_subset: several`, with `candidates`); the app's
-    own subset still over the limit (`from_checkout`'s refusal naming the roots, `app_subset: over`)."""
+    own subset still over the limit (`from_checkout`'s refusal naming the roots, `app_subset: over`). Issue #4748:
+    for a declared factory (`factory` in the detail) app_roots narrows nothing, so none of these names it as a step:
+    the subset over the limit keeps the wide read's factory reason, and the Action's sentence leaves app_roots out."""
     try:
         collected, modes = from_checkout(top, allow, limits, env)
         return collected, modes, None
@@ -1322,6 +1346,11 @@ def checkout_for_plan(top, allow, limits, env, *, draft):
     try:
         collected, modes = from_checkout(top, allow, limits, env, bound=bound)
     except Refusal as e:
+        if e.outcome == 'oversize_input' and e.detail.get('measure') == 'total' and first.detail.get('factory'):
+            # issue #4748: "narrow app_roots" narrows nothing for a declared factory; keep the wide read's reason
+            raise Refusal(e.outcome, '%s; the app Assure found (under %s) is over the limit too'
+                          % (first.reason, json.dumps(list(roots))),
+                          **dict(e.detail, factory=True, app_subset='over', roots=list(roots))) from None
         if e.outcome == 'oversize_input' and e.detail.get('measure') == 'total':
             raise Refusal(e.outcome, e.reason, **dict(e.detail, app_subset='over', roots=list(roots))) from None
         raise

@@ -2969,8 +2969,10 @@ def _collect(args, out, started, state):
     (raw / 'command_line.json').write_text(dump(command), encoding='utf-8')
 
     # ---- catalog snapshot (a key only for a catalog that was read)
+    # rf33 (supabase-profile-001): every failed catalog read is listed (permission, transport, or a missing relation
+    # or column, which classify() calls unsupported), so a reader says unread, never 'not collected'
     unreadable_views = sorted({view for q in QUERIES if q['key'] and q['key'] in raw_results
-                               and raw_results[q['key']][0] == 'unreadable'
+                               and raw_results[q['key']][0] in ('unreadable', 'unsupported')
                                and q['min_major'] <= major <= q['max_major'] for view in q['views'][:1]})
     snapshot = flagged({'collection': {'role': args.role, 'privileges': args.privilege_list,
                                        'unreadable_views': unreadable_views,

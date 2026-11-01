@@ -83,7 +83,10 @@ customer must use the sidecar and manifest written by the same collector run as 
 whole-line marker for a withheld rule or setting is no longer a comment (tests/serving/test_faithful.py pins the gap).
 
 SQL expressions (raw/catalog_snapshot.json `policies[].polqual` and `policies[].polwithcheck`, and
-raw/declaration.json `declared_predicate`, the one expression the declared profile compares them with): every quoted
+raw/declaration.json `declared_predicate`, the one expression the declared profile compares them with, and the bucket names of
+raw/declaration.json `supabase.buckets` and `supabase.buckets_without_policy`, each numbered as its literal `'name'`
+would be and written `<withheld literal N>`; a storage.objects policy's literals and these names are numbered by their
+exact text, so bucket ids match only when byte-identical): every quoted
 string literal (standard `'...'` with `''`, `E'...'` with backslash escapes, `U&'...'`, `B'...'`, `X'...'`, `N'...'`
 and dollar-quoted `$tag$...$tag$`) is replaced by `'<withheld literal N>'`, except a standard-quoted `'...'` setting name
 directly after `current_setting(` or `pg_catalog.current_setting(`, not qualified by another schema (a configuration setting name, not a customer value; issue #2551), which is kept; the
@@ -487,9 +490,11 @@ def _setting_call(before):
     return bool(m) and not before[:m.start()].rstrip().endswith('.')
 
 
-def withhold_sql(text, literals, counts):
+def withhold_sql(text, literals, counts, exact=False):
     """An SQL expression with every string literal but a `current_setting(` setting name withheld; the whole expression
-    as one marker when it cannot be tokenised safely. Never raises."""
+    as one marker when it cannot be tokenised safely. Never raises. With `exact` (a storage.objects policy, refutation
+    7043), each literal is numbered by its exact text, apart from the normalised key, so a bucket id matches a declared
+    bucket only when byte-identical."""
     if not isinstance(text, str):
         counts['expressions'] += 1
         return literals.mark('value:' + json.dumps(text, sort_keys=True, default=repr))
@@ -504,7 +509,7 @@ def withhold_sql(text, literals, counts):
             out.append(piece)                     # issue #2551: a current_setting name is not a customer value
         elif is_literal:
             counts['literals'] += 1
-            out.append(literals.mark('lit:' + _WS.sub(' ', piece).lower()))
+            out.append(literals.mark(('exact:' + piece) if exact else ('lit:' + _WS.sub(' ', piece).lower())))
         else:
             out.append(piece)
     return ''.join(out)
@@ -538,21 +543,48 @@ def _withhold_json(files, literals, counts):
         for row in rows if isinstance(rows, list) else ():
             if not isinstance(row, dict):
                 continue
+            storage = row.get('schema') == 'storage' and row.get('polrelid') == 'objects'
             for key in POLICY_FIELDS:
                 if row.get(key) is not None:
-                    new = withhold_sql(row[key], literals, counts)
+                    new = withhold_sql(row[key], literals, counts, exact=storage)
                     if new != row[key]:
                         row[key], changed = new, True
         if changed:
             out[SNAPSHOT] = _dump(doc, SNAPSHOT)
     if DECLARATION in files:
-        doc = _load(files, DECLARATION)
+        doc, changed = _load(files, DECLARATION), False
         if isinstance(doc, dict) and doc.get('declared_predicate') is not None:
             new = withhold_sql(doc['declared_predicate'], literals, counts)
             if new != doc['declared_predicate']:
-                doc['declared_predicate'] = new
-                out[DECLARATION] = _dump(doc, DECLARATION)
+                doc['declared_predicate'], changed = new, True
+        supa = doc.get('supabase') if isinstance(doc, dict) else None
+        tenant = supa.get('tenant') if isinstance(supa, dict) else None
+        if isinstance(tenant, dict) and isinstance(tenant.get('caller'), str):
+            # tenant-key-001: the declared caller-tenant expression, numbered as the non-storage policies are
+            new = withhold_sql(tenant['caller'], literals, counts)
+            if new != tenant['caller']:
+                tenant['caller'], changed = new, True
+        for key in SUPABASE_BUCKET_KEYS if isinstance(supa, dict) else ():
+            if isinstance(supa.get(key), list):
+                supa[key] = [bucket_mark(b, literals, counts) if isinstance(b, str) else b for b in supa[key]]
+                changed = True
+        if changed:
+            out[DECLARATION] = _dump(doc, DECLARATION)
     return out
+
+
+#: supabase-profile-001 (refutation 6938 HIGH-2): the declared bucket names, compared by the checker with the bucket_id
+#: literals of the storage.objects policies, which this pass withholds
+SUPABASE_BUCKET_KEYS = ('buckets', 'buckets_without_policy')
+
+
+def bucket_mark(name, literals, counts):
+    """A declared bucket name as the number its literal `'name'` takes in this upload's numbering, without the quotes
+    (`<withheld literal N>`): a storage.objects policy's `bucket_id = 'name'` reads `bucket_id = '<withheld literal N>'`,
+    so the checker compares the two by number and never sees the name. Both are keyed by their exact text (refutation
+    7043): ids differing in case or spacing take different numbers."""
+    counts['literals'] += 1
+    return literals.mark("exact:'%s'" % name.replace("'", "''"))[1:-1]
 
 
 # ---------- the pass ----------

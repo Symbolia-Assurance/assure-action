@@ -42,7 +42,7 @@
     "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "description": "Valid unrevoked Assure API key; no credential examples are included"}},
     "responses": {
       "BadInput": {"description": "bad_input: malformed JSON, body, header or unsupported query", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
-      "Unauthenticated": {"description": "unauthenticated: absent, invalid or revoked API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
+      "Unauthenticated": {"description": "unauthenticated: absent, invalid or revoked API key; a single Authorization value that is not `Bearer asr_…` reads \"the Authorization value is not an Assure key (Bearer asr_…)\" (issue #3271), never echoing it", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
       "MethodNotAllowed": {"description": "bad_input: method not allowed; detail.allowed lists the route's methods (the same list as Allow) and detail.route names the route", "headers": {"Allow": {"schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
       "OversizeInput": {"description": "oversize_input: body exceeds 16384 bytes; text field size violations are bad_input", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},
       "NotFound": {"description": "not_found: no feedback note with that id exists for this account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Failure"}}}},

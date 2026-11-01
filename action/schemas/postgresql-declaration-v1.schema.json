@@ -594,5 +594,8 @@
   "self_approved": false,
   "simulation": true,
   "title": "PostgreSQL declaration, version 1",
-  "type": "object"
+  "type": "object",
+  "x-other-profile-keys": {
+    "row_security_intent": "postgresql-observed-baseline"
+  }
 }

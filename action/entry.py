@@ -56,14 +56,16 @@ connection or a runner token.
   or a workflow-written file path holding either sends each note in order only in api mode, after the primary file,
   outputs and summary. The actual server check id overrides each note's id. Each note's bounded, single-attempt
   request adds only a validated receipt or a known typed outcome to the summary, and the first note not confirmed
-  stops the rest; a list adds one closing count line. No note
+  stops the rest; a list adds one closing count line. A refused input adds a bounded error annotation with a repair
+  step; an unconfirmed delivery adds a warning. No note
   text, path, server reason or exception message is displayed. A feedback fault never changes the check result.
   serve-015: `allow-overage` (`true` or `false`, default false; any other word is `bad_input` before anything is
   read) sends `allow_overage: true` with the report request, so a report beyond the account's monthly allowance runs
   and its overage is charged. The summary adds one line from the record, "Report: cost USD x.xxx, charged USD y.yyy,
   allowance remaining USD z.zz" (`serve.render.report_cost_line`), or, for `allowance_exhausted` past a monthly
   allowance, "Report: allowance exhausted: USD q needed; set allow-overage or top up", or, when the account has no overage budget
-  and allow-overage cannot admit the report, "...; top up, or ask Symbolia to set an overage budget" (serve-039 R1;
+  and allow-overage cannot admit the report, "...; top up, or set an overage budget with PATCH /v1/account (or ask your
+  agent to)" (serve-039 R1; issue #3078: the customer sets the budget;
   serve-030: past the free
   report balance, which no top-up or overage admits, the refusal's own sentence alone, as for `job_ceiling`, DD-079
   Decision 10); the outputs add `report-cost-usd`, `report-charge-usd` and
@@ -91,6 +93,11 @@ summary's first line and one notice, and on a pull request as the one Assure com
 `mode: local` runs the check in the runner with the engine this tree vendors. Its code is `action/local_mode.py`,
 imported only in that branch; the public Action tree does not ship it, and there `mode: local` is `bad_input`. No
 engine byte runs before the engine pin is verified (`serve.pin`, which imports no engine module).
+Issue #6818: local mode runs on CPython 3.14 (`ENGINE_PYTHON`), the Python the adapters' parser pins name. In local
+mode `action.yml` provisions it (actions/setup-python, python-version 3.14, without changing the job's PATH) and hands
+its path over as ASSURE_ENGINE_PYTHON; run as a script on another Python, the entry runs again on that interpreter, or
+else on the `python3.14` on PATH (`engine_rerun`), and with none that runs 3.14 the run is `bad_input` naming the Python
+it found (`ENGINE_PYTHON_REASON`).
 
 The last stdout line reads `Assure: <the verdict line>; <outcome>; policy exit <n>; <path>` (serve-016: the verdict
 line is `serve.render.verdict_line`, the job summary's headline and the first `::notice`), for example `Assure: green: 5
@@ -191,13 +198,25 @@ if str(_ROOT) not in sys.path:
 from action import client as client_mod, declaration_draft, http_identity, repository_manifest, withhold  # noqa: E402
 from action.client import CHECK_ID_RE, DEFAULT_URL, FEEDBACK_BODY_BYTES, FEEDBACK_LIMITS, LINT_SCHEMA, VERDICT_SCHEMA, Client, GitHub, allow_list, canonical_fail_on  # noqa: E402
 from serve import FLAGS, bundle, is_development, markers, proof_tree, render  # noqa: E402
-from serve.outcomes import OUTCOMES, Refusal, malformation  # noqa: E402
+from serve.outcomes import OUTCOMES, Refusal, identity_declared_stack, identity_required_step, malformation  # noqa: E402
 FEEDBACK_LIST_NOTES = 10                         # issue #5569: the most notes one feedback input may hold
 
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
 MODES = ('api', 'lint', 'local')
+# Issue #6818: `mode: local` runs the engine on CPython 3.14, the Python the adapters' parser pins name (they take the
+# version from the running interpreter), whatever the runner's python3 is: run as a script on another Python, the
+# entry re-runs itself on the interpreter action.yml's setup-python step provisioned (ASSURE_ENGINE_PYTHON), else on the
+# `python3.14` on PATH, and with neither the run is refused by name, never checked on the runner's interpreter. Api and lint modes run where they are (the engine runs on the server).
+ENGINE_PYTHON = (3, 14)
+ENGINE_PYTHON_NAME = 'python3.14'
+ENGINE_PYTHON_PATH = 'ASSURE_ENGINE_PYTHON'          # action.yml: the python-path setup-python 3.14 provisioned, or ''
+ENGINE_PYTHON_SEEN = 'ASSURE_ENGINE_PYTHON_RERUN'    # set on the re-run, so a python3.14 that is not 3.14 runs once
+ENGINE_PYTHON_REASON = ('local mode needs CPython 3.14 to run the engine; found Python %s (%s), and no Python 3.14 '
+                        'could be provisioned by actions/setup-python or found as python3.14 on PATH: check the '
+                        'Action\'s setup-python step in the job log, or set the python input to a Python 3.14 '
+                        'interpreter')
 MAX_INPUT = 4096
 MAX_SCOPE_FILE = 65536
 # serve-007 F2: the API's own reason (serve.profiles.SCOPE_REF_REASON; a test holds the two equal). The server refuses
@@ -329,12 +348,16 @@ def with_lead(body, line):
 def with_plan_line(refusal, plan):
     """The per-plan input limits (the Director, 19 Oct 2026): an `oversize_input` on the whole upload (`measure:
     total`) that the server did not already word for the plan carries the plan's sentence (`bundle.plan_sentence`):
-    the plan and its limit, app_roots, and the plan that reads more. Anything else, or no published plan, unchanged."""
+    the plan and its limit, app_roots (not for a declared factory, `factory` in the detail, issue #4748), and the plan
+    that reads more. Anything else, or no published plan, unchanged."""
     if (refusal.outcome != 'oversize_input' or refusal.detail.get('measure') != 'total' or 'plan' in refusal.detail
             or not isinstance(plan, dict) or not isinstance(plan.get('tier'), str)):
         return refusal
-    return Refusal(refusal.outcome, '%s; %s' % (refusal.reason, bundle.plan_sentence(plan['tier'], declaration_draft.CHECKOUT_PATH)),
-                   **dict(refusal.detail, plan=plan['tier']))
+    sentence = bundle.plan_sentence(plan['tier'], declaration_draft.CHECKOUT_PATH)
+    if refusal.detail.get('factory'):
+        # issue #4748: app_roots narrows nothing for a declared factory (`repository_manifest.bound_of`)
+        sentence = sentence.replace(': ' + bundle.APP_ROOTS_STEP % declaration_draft.CHECKOUT_PATH, '', 1)
+    return Refusal(refusal.outcome, '%s; %s' % (refusal.reason, sentence), **dict(refusal.detail, plan=plan['tier']))
 
 def _cmd_data(value, cap=300):
     s = '' if value is None else str(value)
@@ -550,6 +573,28 @@ def _mode(env):
     return m
 
 
+def engine_python_reason(version=None, executable=None):
+    """Issue #6818: the named refusal for local mode on an interpreter other than CPython 3.14."""
+    v = sys.version_info if version is None else version
+    return ENGINE_PYTHON_REASON % ('%d.%d.%d' % tuple(v[:3]), executable or sys.executable or 'unknown')
+
+
+def engine_rerun(env, argv, version=None, which=shutil.which):
+    """Issue #6818: the argv that re-runs this entry when the run is `mode: local` on another Python: on the interpreter
+    action.yml provisioned (ASSURE_ENGINE_PYTHON), else on the PATH's python3.14; or None (another mode, already 3.14,
+    already re-run once, or neither interpreter there: `main` then refuses by name)."""
+    v = sys.version_info if version is None else version
+    if tuple(v[:2]) == ENGINE_PYTHON or env.get(ENGINE_PYTHON_SEEN):
+        return None
+    flags, _ = argv_inputs(argv)
+    if str({**env, **flags}.get('INPUT_MODE') or '').strip().lower() != 'local':
+        return None
+    provisioned = str(env.get(ENGINE_PYTHON_PATH) or '').strip()
+    found = which(provisioned) if provisioned else None
+    found = found or which(ENGINE_PYTHON_NAME, path=env.get('PATH') or os.defpath)
+    return None if not found else [found, '-I', '-B', os.path.abspath(__file__), *argv]
+
+
 def _json_input(env, name, kind, field, cwd):
     """serve-006 gap 1: the JSON value of the file an input names (relative to the working directory, a regular file of
     at most 64 KiB, never a link), or None when the input is unset. `bad_input` with the malformation `kind`
@@ -646,6 +691,32 @@ def _head_commit(env):
     return sha
 
 
+def _release_tag(env):
+    """Issue #3850: the release tag the workflow run is on, or None. On a `release` event it is the event file's
+    (GITHUB_EVENT_PATH, bounded as `_head_commit` reads it) `release.tag_name` when the event's action is `published`
+    or `released`; on a `push` of a tag it is GITHUB_REF after `refs/tags/`. Either must be 1 to 255 printable
+    characters (the API's bound); any other event, an unreadable event file or a name beyond it is None."""
+    def fit(tag):
+        return tag if isinstance(tag, str) and 0 < len(tag) <= 255 and tag.isprintable() else None
+    event = str(env.get('GITHUB_EVENT_NAME') or '').strip()
+    if event == 'push':
+        ref = str(env.get('GITHUB_REF') or '').strip()
+        return fit(ref[len('refs/tags/'):]) if ref.startswith('refs/tags/') else None
+    if event != 'release':
+        return None
+    path = str(env.get('GITHUB_EVENT_PATH') or '').strip()
+    if not path:
+        return None
+    try:
+        doc = bundle.parse_json(bundle._read_capped(Path(path), MAX_EVENT_BYTES),
+                                bundle.Limits(body_bytes=MAX_EVENT_BYTES, json_depth=128))
+        if not isinstance(doc, dict) or doc.get('action') not in ('published', 'released'):
+            return None
+        return fit((doc.get('release') or {}).get('tag_name'))
+    except (OSError, Refusal, AttributeError):
+        return None
+
+
 PR_EVENTS = ('pull_request',)              # the event the docs name for the comment
 PR_COMMENT_NOTICE = ('the pull request comment was not posted: GitHub answered 403. To have it posted, add '
                      '`pull-requests: write` under the job\'s `permissions:` (keep `contents: read` beside it)')
@@ -679,11 +750,64 @@ def setup_run(env, cwd):
     return top is not None and declaration_draft.base_has(top, SETUP_WORKFLOW, env) is False
 
 
+def _pr_comment_marker(env, verdict):
+    """#2566: stable ownership per profile/job, including refused and lint runs.
+
+    Hash the tuple as data so neither field can become comment markup. A caller
+    without job context retains a stable profile-only owner. Run/check/commit ids
+    are deliberately absent so reruns update the same comment.
+    """
+    profile = verdict.get('profile') if isinstance(verdict, dict) else None
+    if not isinstance(profile, str) or not profile.strip():
+        profile = str(env.get('INPUT_PROFILE') or '').strip() or DEFAULT_PROFILE
+    return render.pr_comment_owner(profile, env.get('GITHUB_JOB'))
+
+
+def _with_owner(body, owner):
+    """`body` (render.PR_COMMENT_MARKER its first line, unchanged) with `owner` on its own line just above the
+    footer's `---` rule (the last such line), else just below the marker line (a body with no footer, a lint run's).
+    Line 1, the header and opening lines (#6045, readable-report-001, #5083) and the footer from its rule to the
+    final link (#3100, #4578, #6197, #6332) keep main's bytes. An HTML comment line renders as nothing, and before
+    the rule it ends its own HTML block, so the rule stays a rule."""
+    return render.pr_with_owner(body, owner)
+
+
+def _owns(text, owner):
+    """True when a comment body `text` is an Assure comment (render.PR_COMMENT_MARKER its first line) carrying
+    exactly the line `owner`; a lookalike line, or the owner without the marker, is not this job's comment."""
+    head, sep, rest = text.partition('\n')
+    return head == render.PR_COMMENT_MARKER and bool(sep) and owner in rest.split('\n')
+
+
+_OWNER_LINE = render.PR_COMMENT_OWNER_LINE
+
+
+def _unowned_legacy(text):
+    """True for an Assure comment no job owns (#5702): render.PR_COMMENT_MARKER its first line and no `_pr_comment_marker`
+    owner line of any job in it, as an Action before #2566 wrote it. A comment another job owns carries its own owner
+    line and is never this, so one job never supersedes another job's current reading."""
+    head, sep, rest = text.partition('\n')
+    return head == render.PR_COMMENT_MARKER and bool(sep) and not any(_OWNER_LINE.fullmatch(line)
+                                                                         for line in rest.split('\n'))
+
+
+def _superseded_pr_comment(body):
+    """Keep the exact old reading as history, independently of the current job."""
+    return ('<!-- assure:pr-comment:legacy-superseded -->\n'
+            '**Superseded Assure reading.** Read the current Assure comments and workflow job summaries for this '
+            'pull request.\n\n<details><summary>Historical Assure reading</summary>\n\n'
+            + body + '\n</details>\n')
+
+
 def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, lead=None, setup=False, report=None,
                     verdict_file=None, plan=()):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
-    request, or update in place the comment that carries `render.PR_COMMENT_MARKER` (the first 1000 comments are
-    looked through). Returns 'posted', 'updated', or None when the event is not a pull request or names no number.
+    request, or update in place the Assure comment that carries this profile/job's `_pr_comment_marker` owner line
+    (#2566; the first 1000 comments are looked through). The first line stays `render.PR_COMMENT_MARKER`. An unowned
+    legacy comment (the marker with no owner line, as an Action before #2566 wrote it) cannot be safely assigned to one
+    job: after the current comment is written it is marked superseded (#5702), its original reading kept folded as
+    history. Another job's owned comment is never touched. Returns 'posted', 'updated', or None when the event is not a
+    pull request or names no number.
     A GitHub answer that is not 2xx is `api_error` naming its status, with `detail.status` (a 403 is the missing
     `pull-requests: write`; `main` prints it as one notice). Issue #2651: `tree` ({url, proven, total}) adds the
     footer's proof tree line when its url is the verdict's `tree_url` on one of `tree_bases` (`render.pr_tree_line`).
@@ -707,25 +831,50 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, l
                                           plan=plan)
         body = render.pr_with_report(body, report, verdict, verdict_file)
         body = with_lead(body, lead)      # the plan's app subset: what was checked leads the comment
+    owner = _pr_comment_marker(env, verdict)
+    body = _with_owner(body, owner)       # line 1 stays render.PR_COMMENT_MARKER: the comment contracts read it
     root = '/repos/%s/issues' % repo
 
     def ok(status, what):
         if not 200 <= status < 300:
             raise Refusal('api_error', 'the pull request comment could not be %s (GitHub answered %d)' % (what, status),
                           status=status)
+    own_id, legacy = None, {}
     for page in range(1, PR_COMMENT_PAGES + 1):
         status, found = github.call('GET', '%s/%d/comments?per_page=100&page=%d' % (root, number, page))
         ok(status, 'read')
         found = found if isinstance(found, list) else []
         for c in found:
-            if isinstance(c, dict) and type(c.get('id')) is int and str(c.get('body') or '').startswith(
-                    render.PR_COMMENT_MARKER):
-                ok(github.call('PATCH', '%s/comments/%d' % (root, c['id']), {'body': body})[0], 'updated')
-                return 'updated'
+            if not isinstance(c, dict) or type(c.get('id')) is not int:
+                continue
+            previous = str(c.get('body') or '')
+            if own_id is None and _owns(previous, owner):
+                own_id = c['id']
+            elif _unowned_legacy(previous):
+                legacy.setdefault(c['id'], previous)
         if len(found) < 100:
             break
-    ok(github.call('POST', '%s/%d/comments' % (root, number), {'body': body})[0], 'posted')
-    return 'posted'
+    result = 'updated' if own_id is not None else 'posted'
+    if own_id is not None:
+        ok(github.call('PATCH', '%s/comments/%d' % (root, own_id), {'body': body})[0], result)
+    else:
+        ok(github.call('POST', '%s/%d/comments' % (root, number), {'body': body})[0], result)
+    # A complete bounded scan and the current reading's successful write gate retirement.
+    # Concurrent upgraded callers with the same old snapshot send identical history bytes.
+    for cid, previous in legacy.items():
+        context = {'comment_stage': 'legacy_supersession', 'current_comment_result': result}
+        try:
+            status = github.call('PATCH', '%s/comments/%d' % (root, cid),
+                                 {'body': _superseded_pr_comment(previous)})[0]
+        except Refusal as error:
+            if type(error.detail.get('status')) is int:
+                context['status'] = error.detail['status']
+            raise Refusal(error.outcome, 'the current pull request comment was %s; supersession of the legacy '
+                          'Assure reading is unconfirmed' % result, **context) from None
+        if not 200 <= status < 300:
+            raise Refusal('api_error', 'the current pull request comment was %s; the legacy Assure reading could '
+                          'not be marked superseded (GitHub answered %d)' % (result, status), status=status, **context)
+    return result
 
 
 # ---------- the release report (the Director, 18 Oct 2026: the launch customer journey) ----------
@@ -736,16 +885,17 @@ _REPO = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 _TAG = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}')
 
 
-def _event_doc(env):
+def _event_doc(env, *, strict=False):
+    unread = None if strict else {}
     path = str(env.get('GITHUB_EVENT_PATH') or '').strip()
     if not path:
-        return {}
+        return unread
     try:
         doc = bundle.parse_json(bundle._read_capped(Path(path), MAX_EVENT_BYTES),
                                 bundle.Limits(body_bytes=MAX_EVENT_BYTES, json_depth=128))
     except (OSError, Refusal):
-        return {}
-    return doc if isinstance(doc, dict) else {}
+        return unread
+    return doc if isinstance(doc, dict) else unread
 
 
 def release_event(env):
@@ -772,7 +922,8 @@ def release_event(env):
 
 
 class ReleaseReadError(Exception):
-    """A previous-release reading failed; this is distinct from a readable empty list."""
+    """A previous-release reading failed; this is distinct from a readable empty list. Its message is a fixed reason,
+    never a value read, and `release_step`'s warning names it (issue #5066)."""
 
 
 def _releases(github, repo):
@@ -787,8 +938,10 @@ def previous_release(github, repo, tag, releases=None, *, require_current=False,
     None when there is none. An unread list or commit raises ReleaseReadError. A release event also needs its
     current publication boundary; a tag push with no release can compare with the newest published release."""
     releases = _releases(github, repo) if releases is None else releases
-    if not isinstance(releases, list) or len(releases) >= 100:
-        raise ReleaseReadError('the release history is incomplete')
+    if not isinstance(releases, list):
+        raise ReleaseReadError('the releases list could not be read')
+    if len(releases) >= 100:
+        raise ReleaseReadError('the release history is incomplete: 100 or more releases, and one page of 100 is read')
     published, tags = [], set()
     for release in releases:
         if not isinstance(release, dict) or type(release.get('draft')) is not bool:
@@ -879,6 +1032,8 @@ def release_step(env, verdict, client, github, say):
                 previous = {'tag': prev['tag'], 'states': previous_states(prev, client, repo, verdict.get('profile'),
                                                                           rows)}
             previous_unread = False
+        except ReleaseReadError as e:  # its fixed reason (issue #5066), never a value
+            warnings.append('the previous release could not be read (%s)' % e)
         except Exception as e:  # the class name only, never a value
             warnings.append('the previous release could not be read (%s)' % type(e).__name__)
     else:
@@ -980,7 +1135,8 @@ def requirements_upload(env, cwd, goals=None, source=None, not_yet_ok=False):
     requirements.md (GITHUB_WORKSPACE) is sent when it is a regular file within the bounds; a missing one is silent;
     REFUTATION-034 F1: one that cannot be sent (a link, beyond the bounds, ...) is not sent, the check goes on, and the
     notice says why (`skipped_notice`), so a file the operator never named never stops the run. GITHUB_REPOSITORY and the head commit (`_head_commit`)
-    go as repository and commit with `provenance: runner`; the API reads them as metadata, never as authority.
+    go as repository and commit with `provenance: runner`, and on a release run its tag as `release_tag`
+    (`_release_tag`, issue #3850); the API reads them as metadata, never as authority.
     Issue #1186: a sent file with the draft's typed companion beside it goes through `typed_requirements`, and the
     notice then names the lines changed since they were compiled, if any; `goals`, a list when given, receives the
     goals sent, and `source`, a list when given, the requirements text as read, before any goal was expanded (issue
@@ -1020,7 +1176,11 @@ def requirements_upload(env, cwd, goals=None, source=None, not_yet_ok=False):
             pass
     repo, sha = str(env.get('GITHUB_REPOSITORY') or '').strip(), _head_commit(env)
     if repo and sha:
-        out.update(bundle.upload_fields({'repository': repo, 'commit': sha, 'provenance': 'runner'}))
+        fields = {'repository': repo, 'commit': sha, 'provenance': 'runner'}
+        tag = _release_tag(env)                      # issue #3850: only beside the repository and commit
+        if tag is not None:
+            fields['release_tag'] = tag
+        out.update(bundle.upload_fields(fields))
     if goals is not None:
         goals[:] = sent
     if source is not None:
@@ -1238,7 +1398,7 @@ def _report_usage(report, first_checked_at=None):
     if isinstance(report, Refusal) and report.outcome == 'allowance_exhausted' and 'topup_needed_usd' in report.detail:
         # serve-030: a once-only balance (no top-up needed, overage never admits it) has its reason line only
         line = render.report_exhausted_line(report.detail.get('topup_needed_usd'), report.detail.get('admits'),
-                                            report.detail.get('overage_budget_usd'))
+                                            report.detail.get('overage_budget_usd'), agent=True)    # issue #3078
     elif isinstance(report, Refusal):
         line = None
     elif replay:
@@ -1662,6 +1822,28 @@ def _scratch(env):
     return Path(tempfile.mkdtemp(prefix='assure-', dir=temp_root))
 
 
+_FEEDBACK_INPUT_MESSAGES = {
+    'check_id': 'Feedback needs the server check id; run with mode: api and let the check finish before sending feedback.',
+    'input_bytes': 'The feedback input exceeds %d bytes; shorten the inline JSON or file contents and send feedback again.'
+                   % FEEDBACK_BODY_BYTES,
+    'body_bytes': 'The feedback body, including the server check id, exceeds %d bytes; shorten the note and send feedback again.'
+                  % FEEDBACK_BODY_BYTES,
+    'json_bounds': 'The feedback JSON exceeds its nesting limit of %d; reduce the nested objects or arrays and send feedback again.'
+                   % FEEDBACK_LIMITS.json_depth,
+    'shape': 'The feedback body must be one JSON object or a list of 1 to %d objects; send one object or shorten the list.'
+             % FEEDBACK_LIST_NOTES,
+    'file': 'The feedback file cannot be read as a regular JSON file; provide a readable regular file or inline UTF-8 JSON.',
+    'secret': 'The feedback input contains a known secret; remove keys, tokens or passwords from the note and send feedback again.',
+    'invalid': 'The feedback input is invalid; send valid UTF-8 JSON containing one object or a list of 1 to %d objects.'
+               % FEEDBACK_LIST_NOTES,
+}
+
+
+def _feedback_input_refusal(outcome, fault):
+    """A closed local tag, never a parser message, path or input value (#5484)."""
+    return Refusal(outcome, 'the feedback input is invalid', feedback_fault=fault)
+
+
 def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
     """Bounded JSON string or plain regular-file path; input values are never shown.
 
@@ -1674,19 +1856,19 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
         raw_text = str(text)
         text = raw_text.strip()
         if len(raw_text.encode('utf-8')) > FEEDBACK_BODY_BYTES:
-            raise Refusal('oversize_input', 'the feedback input exceeds its byte limit')
+            raise _feedback_input_refusal('oversize_input', 'input_bytes')
         inline = text[:1] in ('{', '[', '"', '-') or text[:1].isdigit() \
             or re.match(r'^(?:true|false|null|NaN|Infinity)(?:\b|$)', text) is not None
         if inline:
             data = raw_text.encode('utf-8')
         else:
             if _CONTROL.search(raw_text):
-                raise Refusal('bad_input', 'the feedback input is invalid')
+                raise _feedback_input_refusal('bad_input', 'file')
             path = Path(text) if Path(text).is_absolute() else Path(cwd) / text
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise Refusal('bad_input', 'the feedback input is invalid')
+                    raise _feedback_input_refusal('bad_input', 'file')
                 chunks, remaining = [], FEEDBACK_BODY_BYTES + 1
                 while remaining:
                     part = os.read(fd, remaining)
@@ -1697,10 +1879,15 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
                 data = b''.join(chunks)
             finally:
                 os.close(fd)
-        parsed = bundle.parse_json(data, FEEDBACK_LIMITS)
+        if len(data) > FEEDBACK_BODY_BYTES:
+            raise _feedback_input_refusal('oversize_input', 'input_bytes')
+        try:
+            parsed = bundle.parse_json(data, FEEDBACK_LIMITS)
+        except Refusal as e:
+            raise _feedback_input_refusal(e.outcome, 'json_bounds' if e.outcome == 'oversize_input' else 'invalid') from None
         notes = parsed if isinstance(parsed, list) else [parsed]
         if not 1 <= len(notes) <= FEEDBACK_LIST_NOTES or not all(isinstance(note, dict) for note in notes):
-            raise Refusal('bad_input', 'the feedback body must be one JSON object or a list of up to 10')
+            raise _feedback_input_refusal('bad_input', 'shape')
 
         def contains_secret(value):
             if isinstance(value, str):
@@ -1713,16 +1900,20 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
 
         for note in notes:                        # every note is checked before any is posted
             if contains_secret(note):
-                raise Refusal('bad_input', 'the feedback input contains a known secret')
+                raise _feedback_input_refusal('bad_input', 'secret')
             note['check_id'] = check_id
             encoded = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
             if len(encoded) > FEEDBACK_BODY_BYTES:
-                raise Refusal('oversize_input', 'the feedback body exceeds its byte limit')
+                raise _feedback_input_refusal('oversize_input', 'body_bytes')
         return notes if isinstance(parsed, list) else notes[0]
     except Refusal as e:
-        raise Refusal(e.outcome, 'the feedback input is invalid') from None
-    except (OSError, ValueError, UnicodeError):
-        raise Refusal('bad_input', 'the feedback input is invalid') from None
+        fault = e.detail.get('feedback_fault')
+        fault = fault if isinstance(fault, str) and fault in _FEEDBACK_INPUT_MESSAGES else 'invalid'
+        raise _feedback_input_refusal(e.outcome, fault) from None
+    except OSError:
+        raise _feedback_input_refusal('bad_input', 'file') from None
+    except (ValueError, UnicodeError):
+        raise _feedback_input_refusal('bad_input', 'invalid') from None
 
 
 def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=None, collector_dir=None, collector_sha256=_FROZEN,
@@ -1797,10 +1988,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     out_text, out_path, out_error = _output_path(env, cwd)
     state = {'mode': None, 'scratch': None, 'withheld': None, 'session': [], 'report_on': False, 'report': None,
              'report_url': '', 'allow_overage': False, 'requirements_notice': None, 'fresh_check': False,
-             'compile_requirements': True, 'draft': None, 'proposed': False, 'proposal_number': None, 'files': None,
+             'compile_requirements': True, 'draft': None, 'draft_client': None,     # issue #7018: drafts a first run
+             'proposed': False, 'proposal_number': None, 'files': None,
              'goals': [], 'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
              'requirements_text': [], 'tree': None, 'declared': None, 'kept_md': '', 'declared_accepted': False,
-             'foreign_passed': None, 'foreign_named': False}
+             'foreign_passed': None, 'foreign_named': False, 'declaration_context': None}
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -1809,19 +2001,31 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         text = env.get('INPUT_FEEDBACK')
         if text is None or not str(text).strip():
             return
+
+        def annotate(level, message):
+            try:
+                say('::%s title=Assure feedback::%s' % (level, _cmd_data(message)))
+            except Exception:
+                pass                              # even a secondary output fault preserves the primary result
+
         try:
             candidates = (state.get('server_check_id'), state.get('feedback_server_check_id'),
                           getattr(state.get('client'), '_feedback_check_id', None))
             cid = next((candidate for candidate in candidates
                         if isinstance(candidate, str) and CHECK_ID_RE.fullmatch(candidate)), None)
             if cid is None:
-                raise Refusal('bad_input', 'feedback needs the server check id')
+                raise _feedback_input_refusal('bad_input', 'check_id')
             read = _feedback_note(text, cwd, cid, feedback_known_secrets)
         except Refusal as e:
             outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
             read, lines = None, ['Feedback: %s; note not confirmed.' % outcome]
+            fault = e.detail.get('feedback_fault')
+            message = _FEEDBACK_INPUT_MESSAGES.get(fault, _FEEDBACK_INPUT_MESSAGES['invalid']) \
+                if isinstance(fault, str) else _FEEDBACK_INPUT_MESSAGES['invalid']
+            annotate('error', message)
         except Exception:
             read, lines = None, ['Feedback: api_error; note not confirmed.']
+            annotate('error', _FEEDBACK_INPUT_MESSAGES['invalid'])
         if read is not None:
             # issue #5569: notes go in order, one exchange each, and the first delivery failure stops the rest
             notes, lines, confirmed = (read if isinstance(read, list) else [read]), [], 0
@@ -1834,9 +2038,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 except Refusal as e:
                     outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
                     lines.append('Feedback: %s; note not confirmed.' % outcome)
+                    annotate('warning', lines[-1])
                     break
                 except Exception:
                     lines.append('Feedback: api_error; note not confirmed.')
+                    annotate('warning', lines[-1])
                     break
             if isinstance(read, list):
                 lines.append('Feedback: %d of %d notes confirmed.' % (confirmed, len(notes)))
@@ -1889,7 +2095,20 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         # field only while the refusal names it; a draft that left out only such fields is still proposed, with a step
         # naming none of them (REFUTATION-r5 MEDIUM-2)
         step, decl_line, decl_md, decl_out = '', '', '', ''
-        if unread or partial and declaration_draft.unread_defaulted(d['data']):
+        context = state.get('declaration_context') or {}
+        identity = identity_required_step(e.detail, stack=context.get('stack'), path=context.get('rel')) \
+            if e.outcome == 'profile_refused' else None
+        if identity is not None:
+            if partial:
+                try:
+                    decl_line, decl_md, decl_out = declaration_note()
+                except Exception as w:
+                    say('::warning title=Assure declaration::%s' % _cmd_data(
+                        'the draft could not be proposed (%s)' % type(w).__name__))
+            step = identity_required_step(e.detail, stack=context.get('stack'), path=context.get('rel'),
+                draft=partial, proposed=bool(state['proposed']),
+                number=state.get('proposal_number'))
+        elif unread or partial and declaration_draft.unread_defaulted(d['data']):
             try:
                 decl_line, decl_md, decl_out = declaration_note()
             except Exception as w:  # the class name only, never a value; the refusal stands as it is
@@ -1900,9 +2119,25 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                                                number=state.get('proposal_number'))
         # issue #3118: with the next step shown, the customer reads it alone; the raw reason (a declaration pointer) and
         # its 'What to do' stay in the failure file and the outcome, never in the summary or the annotation
+        # Human renderers may use the caller's known stack when an older API
+        # omitted it. The stored failure and feedback/output data stay canonical.
+        display_doc = doc
+        if identity is not None and context.get('stack') in ('python/django', 'python/fastapi'):
+            display_doc = dict(doc, detail=dict(doc['detail'], declared_stack=context['stack']))
+        failure = render.failure_markdown(display_doc, reason=not step)
+        # issue #6383 (chief-of-staff 9222): a refused run after collection also says what it withheld and why the
+        # requirements text was not sent, as the verdict path does; both go before the failure's last line, so the first
+        # line stays the reason and the last line stays "Check <id>." or the refusal line
+        held = withhold.summary_markdown(state['withheld']) if state['withheld'] is not None else ''
+        if state['requirements_notice']:
+            held += '\n' + render.esc(state['requirements_notice']) + '\n'
+        if held:
+            head, last = failure.rstrip('\n').rsplit('\n', 1)
+            failure = head + '\n' + held + '\n' + last + '\n'
+        summary_step = render.esc(step, max(render.CAP, len(step))) if identity is not None else step
+        summary = ('## Assure: next step\n\n%s\n\n' % summary_step if step else '') + failure + decl_md
         try:
-            _append(env.get('GITHUB_STEP_SUMMARY'), ('## Assure: next step\n\n%s\n\n' % step if step else '')
-                    + render.failure_markdown(doc, reason=not step) + decl_md)
+            _append(env.get('GITHUB_STEP_SUMMARY'), summary)
         except OSError:
             pass
         if decl_line:
@@ -1910,7 +2145,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         if state['mode'] != 'lint':      # assure-on-itself-001 (requirements.md A2): the refusal on the pull request too
             try:                         # never changes the failure file or the exit; pr_comment types its own faults
                 named = requirements_named(env) not in ('', NONE_SENTINEL)   # issue #2174: the default too
-                body = render.pr_refusal_markdown(doc, (state['requirements_text'] or [None])[0], step or None,
+                body = render.pr_refusal_markdown(display_doc, (state['requirements_text'] or [None])[0], step or None,
                                                   _head_commit(env), named=named, reason=not step)
                 pr_comment(None, body=body.split('\n', 1)[1].rstrip('\n'))
             except Exception as w:  # the class name only, never a value (a refusal before the comment step exists)
@@ -1961,6 +2196,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             from action import local_mode                      # standard library only at its top
         except ImportError:
             raise absent from None
+        if tuple(sys.version_info[:2]) != ENGINE_PYTHON:       # issue #6818: never the runner's other Python
+            raise Refusal('bad_input', engine_python_reason())
         engine = local_mode.verify_engine_pin(root, pin_path)   # before any engine byte is imported
         state['requirements_notice'] = local_requirements_notice(env)     # REFUTATION-034 F2
         if state['requirements_notice']:
@@ -1979,18 +2216,27 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                        mysql=mysql, path=env.get('PATH') or '/usr/bin:/bin',
                        timeout=collect.DEFAULT_TIMEOUT if collect_timeout is None else collect_timeout,
                        runner_env=env)
-        elif inputs.get('artefacts'):
+        elif inputs.get('artefacts') or inputs.get('checkout'):
             ckw = None
         else:
             ckw = collect_kw(collect, inputs)
+        checkout = None
+        if inputs.get('checkout'):    # issue #7018: python-auth from the checkout, read as api mode reads it
+            state['draft_client'] = local_mode.LocalClient(engine, limits)
+            allow = allow_list(state['draft_client'].profiles(), inputs['profile'])
+            checkout = read_checkout(inputs, allow, limits if limits is not None else allow.limits)
         held = []
+        def withheld(counts):    # issue #6383 (#6398): kept as it is logged, so a check refused after collection says it too
+            state['withheld'] = counts
+            say(WITHHELD_LINE % {'withheld': withhold.describe(counts)})
         verdict, ignored, state['withheld'] = local_mode.run(
             engine=engine, inputs=inputs, fail_on_text=inputs['fail_on'], conn=conn, allow_partial=inputs['allow_partial'],
             collect_kw=ckw, scratch=state['scratch'], cwd=cwd,
             check_id=check_id, load_checker=load_checker, check_timeout=check_timeout, limits=limits,
-            on_withheld=lambda counts: say(WITHHELD_LINE % {'withheld': withhold.describe(counts)}), on_collected=session,
+            on_withheld=withheld, on_collected=session,
             is_mysql=is_mysql, root=root, on_bundle=held.append,   # issue #206: the identity producer's tree
-            observe=lambda c: observed_bundle(c, inputs['profile']))   # issue #3153: proposed as in api mode
+            observe=lambda c: observed_bundle(c, inputs['profile']),   # issue #3153: proposed as in api mode
+            collected=checkout)                                # issue #7018: the checkout's bundle, already withheld
 
         def declared_check(pid, files, counts):  # issue #2928: the same withheld bundle, never a second pass
             work = state['scratch'] / 'declared'
@@ -2058,11 +2304,65 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             got = Refusal(unexpected, 'the declared check failed unexpectedly (%s)' % type(e).__name__)
         state['declared'] = (pid, got, rel)
 
+    def declaration_at_event_commit(top, rel, data, sha):
+        """Native HEAD and committed declaration bytes agree with the event's commit."""
+        if not bundle.commit_ok(sha):
+            return False
+        head = (declaration_draft._git(top, env, 'rev-parse', '--verify', 'HEAD^{commit}') or b'').decode().strip()
+        return head == sha and declaration_draft._git(top, env, 'show', 'HEAD:' + rel) == bytes(data)
+
     def declared_accepted(rel, data):
-        """Issue #4594: True when the declared reading's declaration is accepted: any run but a pull request's, or a
-        pull request whose base branch carries the same bytes at `rel`; an unknown reading is not accepted."""
+        """#4594/#4694: the known default branch, or a PR base with these exact declaration bytes.
+
+        Missing default metadata on a valid scheduled/manual event needs an independent repository-default read
+        joined to native checkout/commit/blob identity. Unknown identity never accepts a branch's own intent.
+        """
         if not declaration_draft.is_pull_request(env):
-            return True
+            event = _event_doc(env, strict=True)
+            if event is None:
+                return False
+            repository = event.get('repository')
+            if 'repository' in event and not isinstance(repository, dict):
+                return False
+            if isinstance(repository, dict) and 'default_branch' in repository:
+                default = repository['default_branch']
+                if not (isinstance(default, str) and default and env.get('GITHUB_REF') == 'refs/heads/' + default):
+                    return False
+                if env.get('GITHUB_EVENT_NAME') not in ('issue_comment', 'workflow_run'):
+                    return True
+                workspace = env.get('GITHUB_WORKSPACE')
+                if not isinstance(workspace, str) or not workspace:
+                    return False
+                try:
+                    checkout = Path(workspace)
+                    top = declaration_draft.toplevel(checkout, env)
+                    return top is not None and top.resolve() == checkout.resolve() and declaration_at_event_commit(
+                        top, rel, data, str(env.get('GITHUB_SHA') or ''))
+                except (OSError, ValueError, Refusal):
+                    return False
+            if env.get('GITHUB_EVENT_NAME') not in ('schedule', 'workflow_dispatch'):
+                return False
+            repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
+            sha = str(env.get('GITHUB_SHA') or '')
+            token = str(env.get('GITHUB_TOKEN') or '').strip()
+            workspace = env.get('GITHUB_WORKSPACE')
+            if not (_REPO.fullmatch(repo) and bundle.commit_ok(sha) and token and isinstance(workspace, str) and workspace):
+                return False
+            try:
+                checkout = Path(workspace)
+                top = declaration_draft.toplevel(checkout, env)
+                if top is None or top.resolve() != checkout.resolve():
+                    return False
+                branch = (declaration_draft._git(top, env, 'symbolic-ref', '--quiet', 'HEAD') or b'').decode().strip()
+                if not branch.startswith('refs/heads/') or branch != env.get('GITHUB_REF'):
+                    return False
+                if not declaration_at_event_commit(top, rel, data, sha):
+                    return False
+                github = GitHub(_plain(env, 'GITHUB_API_URL') or None, token)
+                default = declaration_draft.proposal_base(env, github, repo)
+                return branch == 'refs/heads/' + default
+            except (OSError, ValueError, Refusal):
+                return False
         top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd), env)
         return top is not None and declaration_draft.on_base(top, rel, data, env) is True
 
@@ -2103,7 +2403,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 repo.update({rel: data for rel, data in repository_manifest.draft_dependency_files(top, env).items()
                              if rel not in repo})
             record = drafted if drafted is not None else declaration_draft.draft(
-                repo, client=state['client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
+                repo, client=state['draft_client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
             data = declaration_draft.dumps(record['declaration'])
             collected.files[declaration_draft.NAME] = data
             state['draft'] = {'record': record, 'data': data, 'top': top, 'rel': rel}
@@ -2119,6 +2419,15 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 top, rel, collected.files[declaration_draft.NAME] if data is None else data, env)
             if on_base is not True:
                 state['draft'] = {'record': None, 'data': None, 'top': top, 'rel': rel, 'unread': on_base is None}
+        # Supplied-carrier context does not make a supplied declaration a draft.
+        try:
+            declared = json.loads(bytes(data if data is not None else collected.files[declaration_draft.NAME]))
+        except (KeyError, TypeError, ValueError):
+            declared = None
+        stack = identity_declared_stack(declared)
+        edit_path = rel if top is not None and target.resolve().is_relative_to(top.resolve()) \
+            else str(target.resolve())
+        state['declaration_context'] = {'stack': stack, 'rel': edit_path} if stack is not None else None
 
     def declaration_note(verdict=False):
         """(log line, summary markdown, output line) for a run bounded by an unaccepted draft, proposing a new draft
@@ -2295,6 +2604,44 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                           if (b := _raw_bounded(raw, n[len('raw/'):], cap)) is not None})
         return observe
 
+    def read_checkout(inputs, allow, lim):
+        """serve-102: the python-auth bundle read from the checkout in one step, under `allow` (the profile's
+        allow-list) and `lim`: the manifest, the committed declaration or a first run's draft (drafted by
+        `state['draft_client']`), withheld. Issue #7018: api mode and local mode read it the same way."""
+        top = Path(env.get('GITHUB_WORKSPACE') or cwd)
+        drafted = {}
+
+        def plan_draft(repo, library_versions):         # the plan's app subset: drafted from the whole read
+            drafted['record'] = declaration_draft.draft(repo, client=state['draft_client'],
+                                                        library_versions=library_versions)
+            return drafted['record']
+        collected, modes, subset = repository_manifest.checkout_for_plan(top, allow, lim, env, draft=plan_draft)
+        if subset is not None:
+            state['subset'] = subset
+            say('Assure: ' + subset_line(subset, (state.get('plan') or {}).get('tier')))
+        kept = repository_manifest.kept_lock_line(top, env, lim.file_bytes)   # #5727 (remodel 3780)
+        if kept is not None:
+            say(kept)
+        line = repository_manifest.bound_line(top, collected.files, lim.file_bytes)
+        if line is not None:                  # issue #3841: the declaration bounds what leaves the runner
+            say(line)
+        collected = withhold.apply(collected, allow)
+        target = top / declaration_draft.CHECKOUT_PATH
+        checked = repository_manifest.checkout_path(top, declaration_draft.CHECKOUT_PATH)   # issue #5736
+        if isinstance(checked, Path):
+            collected.files[declaration_draft.NAME] = checked.read_bytes()
+        # issue #5778: the first run drafts its declaration before the manifest is completed, so the manifest binds
+        # it and the pin files it names are collected under the committed declaration's rules
+        declaration(collected, top, target, checkout=True, drafted=drafted.get('record'))
+        if state['draft'] is not None and state['draft'].get('record') is not None:
+            try:
+                drafted_doc = json.loads(bytes(collected.files[declaration_draft.NAME]).decode('utf-8'))
+            except (KeyError, ValueError):
+                drafted_doc = None
+            repository_manifest.add_declared_pins(collected, top, drafted_doc, env, lim, modes, allow)
+        manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
+        return collected
+
     def run_api():
         if out_error is not None:
             raise out_error
@@ -2314,6 +2661,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         key = raw_key.strip() or oidc_sign_in(url)            # issue #1263: no api-key, the GitHub OIDC sign-in
         client = (client_factory or Client)(url, key)
         state['client'] = client
+        state['draft_client'] = client            # issue #7018: the client a first run drafts with
         listing = client.profiles()
         state['plan'] = listing.get('plan') if isinstance(listing, dict) else None   # the Director, 19 Oct 2026
         allow = allow_list(listing, inputs['profile'])
@@ -2350,38 +2698,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             scope = sorted(binding['endpoint_tokens'])
             collected = withhold.apply(bundle.from_directory(produced, allow, lim), allow)
         elif inputs.get('checkout'):              # serve-102: python-auth from the checkout, in one step
-            top = Path(env.get('GITHUB_WORKSPACE') or cwd)
-            drafted = {}
-
-            def plan_draft(repo, library_versions):         # the plan's app subset: drafted from the whole read
-                drafted['record'] = declaration_draft.draft(repo, client=state['client'],
-                                                            library_versions=library_versions)
-                return drafted['record']
-            collected, modes, subset = repository_manifest.checkout_for_plan(top, allow, lim, env, draft=plan_draft)
-            if subset is not None:
-                state['subset'] = subset
-                say('Assure: ' + subset_line(subset, (state.get('plan') or {}).get('tier')))
-            kept = repository_manifest.kept_lock_line(top, env, lim.file_bytes)   # #5727 (remodel 3780)
-            if kept is not None:
-                say(kept)
-            line = repository_manifest.bound_line(top, collected.files, lim.file_bytes)
-            if line is not None:                  # issue #3841: the declaration bounds what leaves the runner
-                say(line)
-            collected = withhold.apply(collected, allow)
-            target = top / declaration_draft.CHECKOUT_PATH
-            checked = repository_manifest.checkout_path(top, declaration_draft.CHECKOUT_PATH)   # issue #5736
-            if isinstance(checked, Path):
-                collected.files[declaration_draft.NAME] = checked.read_bytes()
-            # issue #5778: the first run drafts its declaration before the manifest is completed, so the manifest binds
-            # it and the pin files it names are collected under the committed declaration's rules
-            declaration(collected, top, target, checkout=True, drafted=drafted.get('record'))
-            if state['draft'] is not None and state['draft'].get('record') is not None:
-                try:
-                    drafted_doc = json.loads(bytes(collected.files[declaration_draft.NAME]).decode('utf-8'))
-                except (KeyError, ValueError):
-                    drafted_doc = None
-                repository_manifest.add_declared_pins(collected, top, drafted_doc, env, lim, modes, allow)
-            manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
+            collected = read_checkout(inputs, allow, lim)
         elif inputs['artefacts']:
             art = Path(inputs['artefacts'])
             art = art if art.is_absolute() else Path(cwd) / art
@@ -2459,7 +2776,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             post_pr_comment(env, verdict, GitHub(_plain(env, 'GITHUB_API_URL') or None,
                                                  str(env.get('GITHUB_TOKEN')).strip()), **kw)
         except Refusal as e:
-            if e.detail.get('status') == 403:          # the token cannot write comments: say the line to add, once
+            if e.detail.get('status') == 403 and e.detail.get('comment_stage') != 'legacy_supersession':
+                # The current comment could not be written; legacy failures retain their partial-success warning.
                 say('::notice title=Assure comment::%s' % _cmd_data(PR_COMMENT_NOTICE))
             else:
                 say('::warning title=Assure comment::%s' % _cmd_data(scrub(e.reason)))
@@ -2480,6 +2798,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             return failed(Refusal('api_error', 'the lint record could not be rendered (%s)' % type(e).__name__))
         decl_line, decl_md, decl_out = declaration_note()       # serve-102
         summary += decl_md
+        if state['withheld'] is not None:        # issue #6383: the lint upload withheld as an api run does
+            summary += withhold.summary_markdown(state['withheld'])
+        if state['requirements_notice']:
+            summary += '\n' + render.esc(state['requirements_notice']) + '\n'
         try:
             _write_file(out_path, bundle.dumps(doc))
         except (OSError, ValueError) as w:
@@ -2706,6 +3028,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
 
 if __name__ == '__main__':
     _env = dict(os.environ)
+    _rerun = engine_rerun(_env, sys.argv[1:])
+    if _rerun is not None:                             # issue #6818: before anything is printed or scrubbed
+        try:
+            os.execve(_rerun[0], _rerun, {**_env, ENGINE_PYTHON_SEEN: '1'})
+        except OSError:                                # not runnable: `main` refuses by name
+            pass
+    _env.pop(ENGINE_PYTHON_SEEN, None)
     scrub_process_env(os.environ)
     sys.exit(main(_env, root=_ROOT, argv=sys.argv[1:]))
 

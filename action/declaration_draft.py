@@ -27,6 +27,7 @@ import json
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 from urllib.parse import quote
 
@@ -186,15 +187,28 @@ def starter_requirements(decl):
 # #4398 r2: the checker's REQUIREMENT_LINE_STRICT, held equal by test; a customer's own line on the proposal branch
 # ("one per line") that is not in this form is no promise, and never an error (the next run after a served check)
 STARTER_LINE = re.compile(r'^- R([0-9]+)(?: \[([\x20-\x5a\x5c\x5e-\x7e]*)\])?: (.+)$', re.S)
+_STARTER_BOUNDARY = frozenset('\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029')
+
+
+def _starter_hazard(ch):
+    """Issue #4430: the checker's requirements._hazard, held equal by test: a line holding one is not understood."""
+    o = ord(ch)
+    return ch in _STARTER_BOUNDARY or unicodedata.category(ch) == 'Cf' or (ch.isspace() and o > 0x7f) \
+        or (o < 0x20 and ch != '\t') or o == 0x7f
 
 
 def starter_promises(data):
-    """The promise sentences of starter bytes `data`, in order: the lines in the strict house form. Any other line
-    (a customer's own words, non-UTF-8 bytes) is not a promise and raises nothing."""
+    """The promise sentences of starter bytes `data`, in order: the lines in the strict house form that the checker
+    reads as a promise (issue #4430: untagged or tagged `auth`, no character the checker refuses; one trailing CR
+    removed, as the checker's lines_of does). Any other line (a customer's own words, another profile's tag,
+    non-UTF-8 bytes) is not listed and raises nothing."""
     out = []
     for line in bytes(data).decode('utf-8', 'replace').split('\n'):
+        line = line.removesuffix('\r')
         m = STARTER_LINE.match(line)
-        if m is not None:
+        if m is None or any(_starter_hazard(ch) for ch in line):
+            continue
+        if m.group(2) is None or ' '.join(m.group(2).casefold().split()) == 'auth':
             out.append(m.group(3))
     return out
 

@@ -40,6 +40,8 @@ A complete `manifest.json` for two endpoints:
           artefacts: http-fixture
 ```
 
+If your repository admits only actions pinned to a commit SHA, pin a release instead: `git ls-remote https://github.com/Symbolia-Assurance/assure-action refs/tags/v0.1.N 'refs/tags/v0.1.N^{}'` prints the release's commit SHA (on the `^{}` line when the tag is annotated, else on its only line), and each release's notes print the line to copy. Write the `uses:` line as `Symbolia-Assurance/assure-action@<40-hex sha> # v0.1.N`, so the comment names the release the SHA belongs to, and move both together to a newer release.
+
 The inputs: `profile: http-observed-baseline`; `artefacts`, the folder above. `scope` is optional: a JSON file listing the endpoint ids to check, which must name exactly the manifest's ids (the Action stops before collecting otherwise). Leave `scope-binding` unset so the Action produces it: before collection it runs the identity producer and then the collector over your manifest, and sends their record as the scope binding with the endpoint tokens. `identity-key` stays `pipe`, its default: the Action makes a fresh key for each job and passes it on a pipe, so no key is an input, an environment variable or a file.
 
 A `scope` file, when you give one, is a JSON list of the manifest's ids, for example `["endpoint-001", "endpoint-002"]`.

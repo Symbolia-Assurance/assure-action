@@ -143,6 +143,8 @@ The declared profile, `postgresql-declared-model`, reads your declaration from `
           fail-on: fails
 ```
 
+If your repository admits only actions pinned to a commit SHA, pin a release instead: `git ls-remote https://github.com/Symbolia-Assurance/assure-action refs/tags/v0.1.N 'refs/tags/v0.1.N^{}'` prints the release's commit SHA (on the `^{}` line when the tag is annotated, else on its only line), and each release's notes print the line to copy. Write the `uses:` line as `Symbolia-Assurance/assure-action@<40-hex sha> # v0.1.N`, so the comment names the release the SHA belongs to, and move both together to a newer release.
+
 ## Bringing the folder to the runner
 
 Show the operator `docs/DATA.md` before the first run, and ask before committing collected files to the repository.

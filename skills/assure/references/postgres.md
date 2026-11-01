@@ -172,7 +172,7 @@ jobs:
 
 The job is named `assure`, so it never shares a name with your repository's own jobs, such as a `check` job that a ruleset requires. A workflow you added earlier whose Assure job is named `check` keeps working. Rename that job to `assure`, so your own required `check` reads only your own job; if a ruleset or branch protection requires Assure's job, require `assure`.
 
-Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.N`.
+Use `@v0` on the `Symbolia-Assurance/assure-action` line. It moves to each new release when Symbolia publishes, so you get fixes without editing your workflow. A moving ref runs what Symbolia last published; every release is first served by production and reviewed before merge, and each release also has an immutable tag `v0.1.N`. If your repository admits only actions pinned to a commit SHA, pin a release instead: `git ls-remote https://github.com/Symbolia-Assurance/assure-action refs/tags/v0.1.N 'refs/tags/v0.1.N^{}'` prints the release's commit SHA (on the `^{}` line when the tag is annotated, else on its only line), and each release's notes print the line to copy. Write the `uses:` line as `Symbolia-Assurance/assure-action@<40-hex sha> # v0.1.N`, so the comment names the release the SHA belongs to, and move both together to a newer release.
 
 To freeze, pin a full 40-character commit SHA of `Symbolia-Assurance/assure-action` in place of `@v0`; in a clone, `git -C assure-action rev-parse HEAD` prints it. If your repository requires SHA pins, pin the commit that `@v0` resolves to; `gh api repos/Symbolia-Assurance/assure-action/commits/v0 -q .sha` prints it. Pin every third-party action to the full commit SHA of the release you trust. The `source:` line of `skills/assure/VERSION` names another commit: the Assure source commit the Action was built from. It is not a commit of the Action repository, so it never goes in a `uses:` line. The `pin:` line of `skills/assure/VERSION` says the same: the build cannot know which Action commit you pin, so it names none.
 
@@ -186,7 +186,7 @@ This workflow runs on every pull request, on every push to `main`, when you star
           api-key: ${{ secrets.ASSURE_API_KEY }}
 ```
 
-**A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). Leave out `data-dir` and `config-dirs`: the runner cannot read the container's files, so each configuration file reads as a recorded gap (section 6, option c).
+**A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). Leave out `data-dir` and `config-dirs`: the runner cannot read the container's files, so each configuration file reads as a recorded gap (section 6, option c). The two grants on `pg_hba_file_rules` in the role step let the collector read the server's own parse of pg_hba.conf without `data-dir`, so the host authentication rules are still checked.
 
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (references/postgres-local.md, section 9).
 
@@ -246,7 +246,7 @@ jobs:
         run: <your migrator's command, reading DATABASE_URL>
 
       - name: Create the collection role
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '<the CI-only password>';" -c "GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;"
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '<the CI-only password>';" -c "GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;" -c "GRANT SELECT ON pg_catalog.pg_hba_file_rules TO assure_collector;" -c "GRANT EXECUTE ON FUNCTION pg_catalog.pg_hba_file_rules() TO assure_collector;"
 
       - name: Assure check
         id: assure

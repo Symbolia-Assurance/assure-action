@@ -126,7 +126,7 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '5889f75a6ffe68adbd4e2cecece7b29462af87b4cedcb086c13e006c80410dd8'      # rf33 (candidate)
+FROZEN_COLLECTOR_SHA256 = '2a0744b77023a41838d7f8684bfd5f022f9693b13029415d67e06ab086d62807'      # rf33 (candidate)
 RF32_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'        # the pin's `previous`
 RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'
 RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'
@@ -666,7 +666,7 @@ def _refused(out, stdout_text, conn, rc, role=None):
         return Refusal('collector_cannot_connect', sanitise('the first query could not reach the server as the '
                        'collection role: ' + tail, conn), collector_exit=rc, collector_refusal=kind)
     if not doc:
-        return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc)
+        return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc, cause_code='REFUSAL-DOCUMENT-MISSING')
     text = sanitise('%s: %s' % (kind, reason or 'no reason given'), conn)
     step = _pooler_step(kind, reason, conn, role) or NEXT_STEPS.get(kind, '')
     if step:                                   # the next step is kept whole; the collector's reason gives way
@@ -914,7 +914,7 @@ def _refused_mysql(out, stdout_text, conn, rc):
     reason. No value is quoted (the collector scrubs the reason; it is sanitised again here)."""
     doc = _refusal_doc(out, stdout_text)
     if not doc:
-        return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc)
+        return Refusal('collector_refused', 'the collector refused without a refusal document', collector_exit=rc, cause_code='REFUSAL-DOCUMENT-MISSING')
     kind = doc.get('refusal_type') if isinstance(doc.get('refusal_type'), str) else 'unknown'
     kind = kind if re.fullmatch(r'[a-z_]{1,64}', kind) else 'unknown'
     reason = doc.get('reason') if isinstance(doc.get('reason'), str) else ''

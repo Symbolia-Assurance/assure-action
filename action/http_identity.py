@@ -49,6 +49,10 @@ FILES = {
     'scope_binding.py': '64889563b2b974c736dab5f45f66c9cf1be464a9a16e81cb17e3508f2220be8c',
     'collector/collect_http.py': 'd0b86d977e5495025f755fda8d5c90a825479424a642b57815c6cb967021d153',
 }
+#: issue #5313: the words production's GET /v1/profiles names in the http-observed-baseline row's `collector_pin`. The
+#: build refuses an Action whose collector differs (the served checker refuses its bundles); set it only once the engine
+#: that pins a new collector is served (deploy/RUNBOOK.md section 14)
+SERVED_COLLECTOR_PIN = 'collector/collect_http.py sha256 d0b86d977e54'
 SCOPE_FILE = 'identity-scope.json'
 MAX_SCOPE_BYTES = 65536
 TIMEOUT_S = 60
@@ -182,10 +186,10 @@ def produce_and_collect(root, manifest_dir, scratch, *, scope=None, run=None):
                 data = fh.read(MAX_SCOPE_BYTES + 1)
             binding = json.loads(data.decode('utf-8'))
         except (OSError, UnicodeDecodeError, ValueError):
-            raise Refusal('checker_error', 'the HTTP identity producer wrote no readable record') from None
+            raise Refusal('checker_error', 'the HTTP identity producer wrote no readable record', cause_code='HTTP-IDENTITY-RECORD-UNREADABLE') from None
         if (len(data) > MAX_SCOPE_BYTES or not isinstance(binding, dict)
                 or set(binding) != {'endpoint_tokens', RECORD} or not isinstance(binding['endpoint_tokens'], dict)):
-            raise Refusal('checker_error', 'the HTTP identity producer wrote a record of another shape')
+            raise Refusal('checker_error', 'the HTTP identity producer wrote a record of another shape', cause_code='HTTP-IDENTITY-RECORD-SHAPE')
         if scope is not None and (not isinstance(scope, list) or sorted(scope) != sorted(binding['endpoint_tokens'])):
             raise Refusal('bad_input', 'scope must list exactly the endpoint ids of the endpoint manifest; leave it '
                                        'empty to check every endpoint the manifest names',

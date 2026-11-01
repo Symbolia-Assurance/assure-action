@@ -506,6 +506,20 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 'the account.',
                 ('bad_input', 'bad_purpose'):
                 "Send purpose 'serve' or 'product', then send the request again.",
+                # issue #3078 (DD-101): PATCH /v1/account sets the account's own overage budget; every refusal of it
+                # writes nothing, and nothing else ever raises the budget
+                ('bad_input', 'overage_budget'):
+                'Send PATCH /v1/account with the body {"overage_budget_usd": <number>}, a number from 0 to '
+                'detail.overage_budget_max_usd and no other key; nothing was changed.',
+                ('bad_input', 'overage_budget_ceiling'):
+                'Set a budget up to detail.overage_budget_max_usd with PATCH /v1/account, or ask Symbolia about a '
+                'higher ceiling; nothing was changed.',
+                ('bad_input', 'overage_budget_committed'):
+                'Send an overage budget of at least detail.committed_usd, what this period already holds or charged '
+                'beyond the allowance, or wait for the monthly reset; nothing was changed.',
+                ('tier_required', 'overage_free'):
+                'Move this account to Premium (USD 20 a month) with POST /v1/billing/checkout, then set the overage '
+                'budget; the free plan takes no overage, and nothing was changed.',
                 # issue #841: the key is bound to the raw body bytes and the query (serve/api.py _known), so a body
                 # re-serialised with other whitespace is "a different request" though every file is allow-listed and
                 # well formed; the file action sent an agent to re-validate file names
@@ -624,7 +638,7 @@ FREE_ACTIONS = {
                                 'gives, regenerate raw/REPOSITORY.json (' + MANIFEST_RECIPE + '), then send again.',
     ('representation', 'parse'): 'Fix raw/repository/%(path)s so it is UTF-8 Python that parses (the reason gives the '
                                  'position), regenerate raw/REPOSITORY.json (' + MANIFEST_RECIPE + '), then send again.',
-    ('declaration_invalid', None): 'Fix raw/declaration.json at %(pointer)s so it meets its schema there (the reason '
+    ('declaration_invalid', None): 'Fix raw/declaration.json at %(pointer)s so it meets its schema there (the detail '
                                    'gives the keyword; QUICKSTART-API.md section 15 gives the shape), then send again.',
     ('declaration_invalid', 'parse'): 'Rewrite raw/declaration.json as UTF-8 JSON (the reason gives the position), '
                                       'then send again.',
@@ -666,8 +680,62 @@ def bridge_action(detail):
     return (BRIDGE_FAULT_ACTION if isinstance(rule, str) and rule.startswith('bridge:') else BRIDGE_BUILD_ACTION) % doc
 
 
+IDENTITY_REQUIRED_STACKS = {'python/django': 'Django', 'python/fastapi': 'FastAPI'}
+
+
+def identity_declared_stack(declaration):
+    """Presentation context from the already-read identity declaration, never inferred roots."""
+    stack = declaration.get('stack') if isinstance(declaration, dict) else None
+    if isinstance(stack, str) and stack in IDENTITY_REQUIRED_STACKS \
+            and declaration.get('schema') == 'assure.identity.declaration/v1':
+        return stack
+    return None
+
+
+def identity_required_fields(detail):
+    """Actual required-fault pointers, in server order; no Flask draft/default field union."""
+    if not isinstance(detail, dict) or detail.get('kind') != 'declaration_invalid':
+        return ()
+    faults = detail.get('faults')
+    rows = faults if isinstance(faults, list) else [detail]
+    fields = []
+    for row in rows:
+        pointer = row.get('pointer') if isinstance(row, dict) else None
+        if isinstance(row, dict) and row.get('keyword') == 'required' and isinstance(pointer, str) \
+                and re.fullmatch(r'/[a-z_][a-z0-9_]*(?:/(?:[a-z_][a-z0-9_]*|[0-9]+))*', pointer):
+            field = pointer[1:]
+            if field not in fields:
+                fields.append(field)
+    return tuple(fields)
+
+
+def identity_required_step(detail, *, stack=None, path='raw/declaration.json', draft=False,
+                           proposed=False, number=None, submit=False):
+    """Required-field advice for Django/FastAPI; caller path/proposal state is presentation only."""
+    if not isinstance(detail, dict):
+        return None
+    stack = stack if isinstance(stack, str) and stack in IDENTITY_REQUIRED_STACKS else detail.get('declared_stack')
+    fields = identity_required_fields(detail)
+    if not isinstance(stack, str) or stack not in IDENTITY_REQUIRED_STACKS or not fields \
+            or not isinstance(path, str) or not path or any(ord(c) < 32 for c in path):
+        return None
+    missing = fields[0] if len(fields) == 1 else ', '.join(fields[:-1]) + ' and ' + fields[-1]
+    lead = 'No rule was checked yet: your %s declaration at %s is missing %s.' % (
+        IDENTITY_REQUIRED_STACKS[stack], path, missing)
+    if draft:
+        if proposed:
+            where = 'pull request #%d' % number if type(number) is int else "Assure's pull request"
+            return '%s Review and complete that file in %s, then merge it.' % (lead, where)
+        return ('%s Assure could not open its pull request; complete the draft shown in the job summary, '
+                'commit it at %s, then run again.' % (lead, path))
+    return '%s Complete that file, then %s.' % (lead, 'send it again' if submit else 'run again')
+
+
 def free_action(detail):
     """The free run's own action for a profile_refused `detail` (kind, rule, path, pointer), or None."""
+    identity = identity_required_step(detail, submit=True)
+    if identity is not None:
+        return identity
     kind, rule = detail.get('kind'), detail.get('rule')
     fields = {k: detail.get(k) if isinstance(detail.get(k), str) and detail.get(k) else None
               for k in ('path', 'pointer')}

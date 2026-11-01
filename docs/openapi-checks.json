@@ -94,6 +94,71 @@
     }
    }
   },
+  "/v1/settings/remodel-on-release": {
+   "get": {
+    "operationId": "getRemodelOnRelease",
+    "description": "Issue #3850: the account's remodel-on-release setting. Free on every tier and not admitted on a rate window; default {\"remodel_on_release\": false, \"tag_pattern\": \"v*\", \"max_usd\": null}. On the free tier remodel_on_release reads false, after a downgrade too; the stored choice comes back on an upgrade.",
+    "security": [
+     {
+      "bearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "remodel_on_release (boolean), tag_pattern (fnmatch glob), max_usd (non-negative number or null: the cap on one remodel's quote) and charged_usd 0"
+     }
+    }
+   },
+   "post": {
+    "operationId": "setRemodelOnRelease",
+    "description": "Issue #3850: sets any of remodel_on_release (boolean), tag_pattern (fnmatch glob) and max_usd (non-negative number or null) (JSON body, at most 1024 bytes, no other field). A release is a published GitHub release (release event, action published or released: its tag_name) or a pushed tag (push of refs/tags/<tag>) whose tag name matches tag_pattern, on a workflow run of the Assure Action, which sends the tag with the check of that commit as release_tag; the remodel runs on that check (GET /v1/checks/{id}/shadow of the release's check reads it). The customer can also post it as POST /v1/releases. A free account turning it on is refused 403 tier_excludes with detail.tier_needed premium, detail.upgrade /v1/billing/checkout and detail.charged_usd 0; the setting stays off. Counts against the minute rate window.",
+    "x-body-max-bytes": 1024,
+    "security": [
+     {
+      "bearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The setting as stored, with charged_usd 0"
+     },
+     "403": {
+      "description": "tier_excludes (free account turning it on)"
+     }
+    }
+   }
+  },
+  "/v1/releases": {
+   "get": {
+    "operationId": "listReleases",
+    "description": "Issue #3850: the account's release events (the Action's release_tag on a release run, or POST /v1/releases), oldest first, each with the remodel's cost and outcome. Free on every tier and not admitted on a rate window. A rerun of the same release keeps its first row; another tag of an already remodelled commit is a row of its own (already_started). Rows are kept as long as the account's checks (30 days) and are then deleted.",
+    "security": [
+     {
+      "bearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "releases (rows of {repository, commit, tag, check_id, started, reason, quote_usd, shadow}: reason as for POST /v1/releases or the refusal the quote met, quote_usd the remodel's cost shown or null, shadow /v1/checks/{check_id}/shadow when started, else null), charged_usd 0"
+     }
+    }
+   },
+   "post": {
+    "operationId": "postRelease",
+    "description": "Issue #3850: a release event, body {\"repository\": \"owner/name\", \"commit\": 40 hex, \"tag\": name}. The customer posts it themselves; the Action's release_tag on a release run starts the same remodel without it. With remodel_on_release on, the tag matching tag_pattern and a Premium or Pro tier at release time, it fetches and accepts the proof tree's shadow quote (the same remodel as POST /v1/checks/{id}/shadow/quote) on the newest check of that repository and commit: one queued remodel, its quote held on the formalisation allowance (the plan's allowance and job ceiling apply; their refusals pass through). A quote above max_usd starts none (cap_exceeded, nothing held). A free tier at release time starts none (tier_excludes). A redelivered event for the same repository and commit, or another tag of that commit, answers the first remodel with started false (already_started); nothing more is held. An accept that queues no remodel (the check's proof tree already carries a remodel result or job) starts none (not_queued, nothing held); an accept that fails without a refusal answers 500 and its row reads remodel_failed. Off, or a tag outside the pattern, starts none (started false, remodel null). Remodelling needs the shadow draft enabled on the server; otherwise remodel_unavailable. Later checks' shadow block carries model_release: the tag of the release whose remodel built the model the check reads, or null; their pull request comment names it. Counts against the minute rate window.",
+    "x-body-max-bytes": 1024,
+    "security": [
+     {
+      "bearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "started (boolean), remodel ({repository, commit, tag, check_id, quote_usd, shadow} or null; shadow is /v1/checks/{check_id}/shadow, where the remodel's result is read), reason (started, off, tag_outside_pattern, already_started, tier_excludes, remodel_unavailable, no_check_on_commit, cap_exceeded, not_queued or remodel_failed), quote_usd (the remodel's cost shown, or null), charged_usd 0"
+     }
+    }
+   }
+  },
   "/v1/lint": {
    "post": {
     "operationId": "lintUpload",
@@ -156,14 +221,27 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "check_id"
+        "oneOf": [
+         {
+          "required": [
+           "check_id"
+          ]
+         },
+         {
+          "required": [
+           "repository"
+          ]
+         }
         ],
         "additionalProperties": false,
         "properties": {
          "check_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{32}$"
+         },
+         "repository": {
+          "type": "string",
+          "description": "Issue #6241: owner/name instead of check_id: the account's newest check with a verdict for that repository (a newer check still running or ended in a failure is passed over); not_found (404) when there is none."
          },
          "allow_overage": {
           "type": "boolean"
@@ -345,7 +423,8 @@
        "route",
        "check_id",
        "quote_usd",
-       "metered"
+       "metered",
+       "overage_usd"
       ],
       "description": "Issue #6055, Premium and above: present when the saved formal model predates this check's code; POST /v1/premium/recheck refreshes it at this quote.",
       "properties": {
@@ -369,8 +448,23 @@
          "allowance",
          "overage"
         ]
+       },
+       "overage_usd": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Issue #6259: the overage part of quote_usd, rounded up to the cent (the overage_usd of POST /v1/premium/recheck); 0 within the allowance. Above 0 and below quote_usd, the refresh draws partly from the allowance and the pull request comment names both parts."
        }
       }
+     },
+     "probe": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/Probe"
+       },
+       {
+        "$ref": "#/components/schemas/ProbeError"
+       }
+      ]
      }
     }
    },
@@ -435,7 +529,7 @@
      },
      "upgrade": {
       "$ref": "#/components/schemas/Upgrade",
-      "description": "Issue #4577: present only on a free account's allowance_exhausted refusal with detail.rule once_balance (a quote past what is left of its free USD 1) when the server has a Premium payment link, with notice when detail.allowance_remaining is 0 or less; the Action prints it in the job summary and the pull request comment."
+      "description": "Issue #4577: present on a free account's allowance_exhausted refusal with detail.rule once_balance (a quote past what is left of its free USD 1) when the server has a Premium payment link, with notice when detail.allowance_remaining is 0 or less; issue #5822: on a stored check's failure envelope a free account reads back; gift-premium-001: on a keyed refusal or a stored check's failure envelope of a gifted plan that ends within 30 days (gift_upgrade_for: notice \"Your gifted <plan> plan ends on <date>.\", line \"To keep it, upgrade at <url>\"). The Action prints it in the job summary and the pull request comment."
      },
      "schema": {
       "const": "assure.serve.failure/v1"
@@ -1265,6 +1359,118 @@
      "job_id": {
       "type": "string",
       "pattern": "^[0-9a-f]{16}$"
+     }
+    }
+   },
+   "ProbeError": {
+    "type": "object",
+    "description": "The probe block when no variant was checked: on the free plan (error \"the probe is on paid plans\"), or when the probe itself could not be computed. The verdict, its counts and its charge are those of the same request without the probe.",
+    "required": [
+     "schema",
+     "error"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "schema": {
+      "type": "string",
+      "const": "assure.serve.probe/v1"
+     },
+     "error": {
+      "type": "string"
+     }
+    }
+   },
+   "Probe": {
+    "type": "object",
+    "description": "Present only when the request sent \"probe\": true (QUICKSTART-API.md, section 4, \"Asking what review will find\"). Near neighbours of the accepted case that break a binding a reader trusts, each read by a check of the varied files within a time budget. It never changes the verdict, its counts or its charge.",
+    "required": [
+     "schema",
+     "generated",
+     "evaluated",
+     "cap",
+     "stopped",
+     "variants",
+     "refuted"
+    ],
+    "properties": {
+     "schema": {
+      "type": "string",
+      "const": "assure.serve.probe/v1"
+     },
+     "generated": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "evaluated": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "cap": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "budget_s": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "stopped": {
+      "type": "string",
+      "enum": [
+       "cap",
+       "budget"
+      ]
+     },
+     "refuted": {
+      "type": "boolean",
+      "description": "true when an evaluated variant reads holds where it was expected not to; unevaluated variants are never counted as passing"
+     },
+     "variants": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "required": [
+        "kind",
+        "binding",
+        "row",
+        "hint",
+        "variant_sha256",
+        "reading",
+        "expected"
+       ],
+       "properties": {
+        "kind": {
+         "type": "string"
+        },
+        "binding": {
+         "type": "object",
+         "description": "names only (for example callee, scope, target)"
+        },
+        "row": {
+         "type": "string"
+        },
+        "hint": {
+         "type": "string"
+        },
+        "variant_sha256": {
+         "type": "string",
+         "pattern": "^[0-9a-f]{64}$"
+        },
+        "reading": {
+         "type": "string",
+         "enum": [
+          "holds",
+          "fails",
+          "not_established"
+         ]
+        },
+        "expected": {
+         "type": "string",
+         "const": "not_holds"
+        }
+       }
+      }
      }
     }
    }

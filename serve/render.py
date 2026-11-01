@@ -112,7 +112,9 @@ text in it stays a code span.
 from __future__ import annotations
 
 import ast
+import contextvars
 import datetime
+import hashlib
 import html
 import json
 import math
@@ -120,7 +122,7 @@ import re
 import unicodedata
 from types import MappingProxyType
 
-from .outcomes import BRIDGE_DOC_RE, OUTCOMES, REPO_PATH_RE
+from .outcomes import BRIDGE_DOC_RE, OUTCOMES, REPO_PATH_RE, identity_required_step
 
 CAP = 300
 MAX_ANNOTATIONS = 50
@@ -455,21 +457,24 @@ def report_replay_line(record, first_checked_at=None):
         _money(cost.get('usd') or 0.0, 3), _money(cost.get('charge_usd'), 3), when)
 
 
-def report_exhausted_line(needed_usd, admits=None, overage_budget_usd=None):
+def report_exhausted_line(needed_usd, admits=None, overage_budget_usd=None, *, agent=False):
     """serve-015: the line for a report refused `allowance_exhausted`. serve-039 fix 2 (REFUTATION-FIX1-001 MEDIUM-2,
     LOW-4): the Action's client keeps only scalar detail values, so the line keys on `overage_budget_usd`, which every
-    budget refusal carries. A budget of 0 (none set) says a top-up or a budget from Symbolia; a budget above 0 that is
-    spent says a raise or a top-up. Without the figure, `admits` (a list, when the caller has it) decides as before:
-    one that does not name `allow_overage` says the no-budget sentence."""
+    budget refusal carries. A budget of 0 (none set) says a top-up or a budget set with PATCH /v1/account; a budget
+    above 0 that is spent says a raise with PATCH /v1/account or a top-up (issue #3078: the customer sets it, never
+    Symbolia). `agent` (the Action) adds "(or ask your agent to)" after the call. Without the figure, `admits` (a list,
+    when the caller has it) decides as before: one that does not name `allow_overage` says the no-budget sentence."""
     needed = _money(needed_usd, 3)
+    call = 'PATCH /v1/account' + (' (or ask your agent to)' if agent else '')
     budget = overage_budget_usd if isinstance(overage_budget_usd, (int, float)) \
         and not isinstance(overage_budget_usd, bool) else None
     if budget is not None:
         if budget > 0:
-            return 'Report: allowance exhausted: USD %s needed; ask Symbolia to raise your overage budget, or top up' % needed
-        return 'Report: allowance exhausted: USD %s needed; top up, or ask Symbolia to set an overage budget' % needed
+            return 'Report: allowance exhausted: USD %s needed; raise your overage budget with %s, or top up' % (
+                needed, call)
+        return 'Report: allowance exhausted: USD %s needed; top up, or set an overage budget with %s' % (needed, call)
     if isinstance(admits, list) and 'allow_overage' not in admits:
-        return 'Report: allowance exhausted: USD %s needed; top up, or ask Symbolia to set an overage budget' % needed
+        return 'Report: allowance exhausted: USD %s needed; top up, or set an overage budget with %s' % (needed, call)
     return 'Report: allowance exhausted: USD %s needed; set allow-overage or top up' % needed
 
 
@@ -480,11 +485,15 @@ _MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct',
 
 
 def usage_notice_lines(block):
-    """One line per usage line whose threshold was crossed since the last check (`crossed` true): "Report allowance:
+    """Issue #3078: after the line notices, one "Allowance and overage budget: 80 % used (USD 24.00 of 30.00); ..."
+    line when the block's `budget` was crossed since the last check (`crossed` true).
+    One line per usage line whose threshold was crossed since the last check (`crossed` true): "Report allowance:
     90 % used (USD 4.50 of 5.00); resets 1 Nov; past the limit: metered at cost x 1.2", or "...; past the limit: hard
     stop (overage budget USD 0.00)". A once-only balance (`renews` false) reads "Report allowance: 90 % used (USD
     0.90 of 1.00); does not renew; past the limit: reports stop", with ", and USD x is owed" after "does not renew"
-    while something is owed. [] for none, or for a block of another shape."""
+    while something is owed. Issue #5415 (F3): when a line says `overage_crossed`, one more line follows: "Overage
+    budget: 90 % used (USD 4.50 of 5.00); resets 1 Nov; past the budget: hard stop". [] for none, or for a block of
+    another shape."""
     lines = block.get('lines') if isinstance(block, dict) and isinstance(block.get('lines'), dict) else {}
     resets = block.get('resets') if isinstance(block, dict) else None
     m = re.fullmatch(r'[0-9]{4}-([0-9]{2})-([0-9]{2})', resets) if isinstance(resets, str) else None
@@ -509,6 +518,18 @@ def usage_notice_lines(block):
         out.append('%s: %s %% used (USD %s of %s); resets %s; past the limit: %s' % (
             USAGE_LINE_NAMES[name], ln.get('percent') if type(ln.get('percent')) is int else '?',
             _money(ln.get('used_usd'), 2), _money(ln.get('included_usd'), 2), when, past))
+    # issue #5415 (F3): the account's post-paid overage nearing its budget, said once (every monthly line carries it)
+    budget = next((ln for ln in lines.values() if isinstance(ln, dict) and ln.get('overage_crossed') is True), None)
+    if budget is not None:
+        out.append('Overage budget: %s %% used (USD %s of %s); resets %s; past the budget: hard stop' % (
+            budget.get('overage_percent') if type(budget.get('overage_percent')) is int else '?',
+            _money(budget.get('overage_used_usd'), 2), _money(budget.get('overage_budget_usd'), 2), when))
+    spend = block.get('budget') if isinstance(block, dict) else None
+    if isinstance(spend, dict) and spend.get('crossed') is True:     # issue #3078: 80 % of allowance + budget, once
+        out.append('Allowance and overage budget: %s %% used (USD %s of %s); resets %s; past it, requests are refused '
+                   'until the reset unless you raise the budget (PATCH /v1/account)' % (
+                       spend.get('percent') if type(spend.get('percent')) is int else '?',
+                       _money(spend.get('spent_usd'), 2), _money(spend.get('limit_usd'), 2), when))
     return out
 
 
@@ -565,6 +586,8 @@ HTTP_TLS_BOUND_FIELD = 'tls.status'
 HTTP_TLS_BOUND_ACTION = 'TLS is outside this profile (a captured head carries no TLS session); nothing to do'
 HTTP_TLS_BOUND_OWNER = 'symbolia'
 HTTP_TLS_BOUND_NEEDS = 'a live capture with TLS (issue #2181)'
+# Issue #4329: the green meaning sentence's "mostly because" when the top entry is that bound (`_meaning_line`)
+HTTP_TLS_BOUND_BECAUSE = 'TLS is outside this profile (a captured head carries no TLS session)'
 
 
 def profile_bound(entry):
@@ -711,7 +734,9 @@ COVERAGE_REFUSAL_KINDS = frozenset({
     'unattributed_credential_write', 'unrecognised_credential_op', 'unresolved_call', 'call_depth',
     'app_object_escape', 'attribute_store', 'unsupported_server_idiom', 'credential_kind_unsupported',
     'language_unsupported', 'conditional_registration', 'library_version_unresolved', 'outside_view'})
-COVERAGE_CLASSES = ('missing_method', 'representation', 'scope_mismatch', 'not_observable_at_pin', 'missing_baseline')
+# Issue #5069: `representation` is not one: its owner is the customer's agent (CLASS_OWNERS), whose fix is a faithful
+# input (its row's own reason), so it keeps its own next step and names no proposal.
+COVERAGE_CLASSES = ('missing_method', 'scope_mismatch', 'not_observable_at_pin', 'missing_baseline')
 _COVERAGE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 _COVERAGE_AT = re.compile(r'(?:%s)(?::[1-9][0-9]{0,6})?' % REPO_PATH_RE.pattern)
 
@@ -752,6 +777,53 @@ def refusal_coverage(outcome, detail):
         line = m.get('line')
         at = m['file'] + (':%d' % line if type(line) is int and line > 0 else '')
     return coverage_step(shape, at)
+
+
+# Issue #6052 (REFUTATION-r2 HIGH-1): the python-auth profile stores a refused machine's reason as 'the checker refused
+# the machine: <row reason>' (serve/profiles.py), the row reason being 'refused guard listed on a route: <guard>
+# (<kind>: <text>[ at <path>:<line>])[, <guard> (...)]' or 'incomplete reading: <kind> (<module>, <line>, <what>)[; ...]'
+# (python-auth grade.py); a refusal row of an envelope without a machines block carries the row reason alone.
+_RELAYED = 'the checker refused the machine: '
+_ROUTE_GUARDS = 'refused guard listed on a route: '
+_INCOMPLETE = 'incomplete reading: '
+_ROUTE_GUARD = re.compile(r'(?:^|, )([A-Za-z_][A-Za-z0-9_.]{0,127}) \(([a-z_]+): ')
+_INCOMPLETE_KIND = re.compile(r'(?:^|; )([a-z_]+) \(')
+_REFUSED_AT = re.compile(r' at (%s:[1-9][0-9]{0,6})\)?$' % REPO_PATH_RE.pattern)
+
+
+def _reader_refusals(reason):
+    """[(shape, guard, at)] of a refused machine's reason: each guard listed on a route and refused for a shape the
+    reader does not read yet (COVERAGE_REFUSAL_KINDS), with the ' at <path>:<line>' its entry ends with (None when it
+    names none); each such kind of an incomplete reading (guard and at None: it names a module, not a path). [] for
+    a reason that is not text or names neither form."""
+    if not isinstance(reason, str):
+        return []
+    text = reason[len(_RELAYED):] if reason.startswith(_RELAYED) else reason
+    out = []
+    if text.startswith(_ROUTE_GUARDS):
+        body = text[len(_ROUTE_GUARDS):]
+        found = list(_ROUTE_GUARD.finditer(body))
+        for i, m in enumerate(found):
+            if m.group(2) in COVERAGE_REFUSAL_KINDS:
+                entry = body[m.end():found[i + 1].start() if i + 1 < len(found) else len(body)]
+                at = _REFUSED_AT.search(entry)
+                out.append((m.group(2), m.group(1), at.group(1) if at else None))
+    elif text.startswith(_INCOMPLETE):
+        for m in _INCOMPLETE_KIND.finditer(text[len(_INCOMPLETE):]):
+            if m.group(1) in COVERAGE_REFUSAL_KINDS and (m.group(1), None, None) not in out:
+                out.append((m.group(1), None, None))
+    return out
+
+
+def quote_unavailable(env):
+    """Issue #6052: why a formalisation quote of this verdict cannot execute, {reason, refused: [{machine, shape, guard,
+    at}]}. reason 'reader_coverage_gap' when a refused machine (`refused_machine_entries`) names a shape the reader does
+    not read yet (`_reader_refusals`), one entry per such shape; else 'execution_not_served' with no machines: the free
+    quote is not an executable offer (serve/formalisation.py `free_quote` mints every quote with execution_available
+    false)."""
+    refused = [{'machine': r.get('machine'), 'shape': shape, 'guard': guard, 'at': at}
+               for r in refused_machine_entries(env) for shape, guard, at in _reader_refusals(r.get('reason'))]
+    return {'reason': 'reader_coverage_gap' if refused else 'execution_not_served', 'refused': refused}
 
 
 def requirement_coverage(row):
@@ -839,10 +911,11 @@ def coverage_rows(envelope):
 
 
 def _pr_paid_row(env, r):
-    """codex-conflicts 4229 / serving 4232: a requirement row the footer already counts as paid-supported, by the
-    footer's own predicates: a route Premium decides (`premium_row`, PR_PREMIUM_ROWS) or a rule a formal model can
-    check (`_pr_formalisable`, PR_FORMALISE_ROWS). It keeps its plain explanation and is never offered coverage, so
-    the Add coverage count and the row words agree."""
+    """A known route or quoted formalisation keeps its ordinary explanation.
+
+    These rows retain their existing next-step and coverage treatment. Footer
+    claims separately require confirmed served tier evidence (#6332).
+    """
     return isinstance(r, dict) and (premium_row(r) or _pr_formalisable(env, r))
 
 
@@ -1222,6 +1295,33 @@ def kept_on_refused(envelope, row):
     return row.get('status') in _verdicts(env) and row.get('machine') not in _read_set(env)
 
 
+# ---------- supabase-profile-001: rows the managed provider holds ----------
+# The observed PostgreSQL checker lists, on a managed Supabase host, the readings of machines M2, M3, M4 and SU-1 that
+# are not verdicts under `readings.supabase.provider_managed` [{id, machine, status, text}]. Serving reads them and never
+# derives them: they leave the not-established list, the first line counts them as `provider-managed: n`, they never
+# bind an exit under strict or a chosen fail-on, and the summary lists them under their own heading.
+PROVIDER_MANAGED_WORDS = 'provider-managed'
+
+
+def provider_managed(envelope):
+    """The well-formed `readings.supabase.provider_managed` entries: each with string `id`, `machine` and `text`, and a
+    status that is not a verdict. [] when there are none."""
+    env = envelope if isinstance(envelope, dict) else {}
+    rd = env.get('readings') if isinstance(env.get('readings'), dict) else {}
+    block = rd.get('supabase') if isinstance(rd.get('supabase'), dict) else {}
+    out = []
+    for e in block.get('provider_managed') if isinstance(block.get('provider_managed'), list) else ():
+        if (isinstance(e, dict) and all(isinstance(e.get(k), str) and e.get(k) for k in ('id', 'machine', 'text'))
+                and e.get('status') not in _VERDICTS_DEFAULT):
+            out.append(e)
+    return out
+
+
+def provider_managed_keys(envelope):
+    """{(machine, id)} of `provider_managed`."""
+    return {(e['machine'], e['id']) for e in provider_managed(envelope)}
+
+
 # ---------- serve-077 (3817): the attribution consumer ----------
 # OB-ATTRIBUTION-001 (#102) puts `readings.attribution` {rule, platform, extension_members, counts, scope_limits} on the
 # observed checker's output and `findings` on every reading whose witnesses name a function: {object, object_kind, owner,
@@ -1346,6 +1446,7 @@ def red_findings(envelope):
                               or (r.get('status') == 'holds' and r.get('machine') in read)):
             continue
         out.append(('not_proven', i, r))
+    managed = provider_managed_keys(env)
     if STRICT in words:
         named_ids = {i for _, i, _ in out}
         # DD-079 W3: every unresolved security obligation binds, intent-bound and unobservable at the pin included
@@ -1353,11 +1454,13 @@ def red_findings(envelope):
             r = by_id.get(i)
             if i in named_ids or (r is not None and r.get('status') in verdicts and r.get('machine') in read):
                 continue
+            if r is not None and (r.get('machine'), i) in managed:       # supabase-profile-001: the provider's
+                continue
             out.append(('strict', i, r))
     named_ids = {i for _, i, _ in out if i is not None}
     for r in rows:
         key = (r.get('machine'), r.get('id'))
-        if key in listed or (r.get('id') is not None and r.get('id') in named_ids):
+        if key in listed or (r.get('id') is not None and r.get('id') in named_ids) or key in managed:
             continue
         if r.get('status') in named and r.get('status') not in verdicts and r.get('status') not in MET:
             out.append(('chosen', r.get('id'), r))
@@ -1956,6 +2059,30 @@ def machine_refusal_rows(env):
     return [r for r in _rows(env) if is_machine_refusal(r)]
 
 
+# issue #6423 (first-verdict fix 2): a vacuous row (nothing to check) leaves the row listing of every surface and is
+# said once, on this one footer line: the row count ('1 row', 'n rows'), then the ids in the verdict's row order. The
+# envelope's counts are unchanged; the status-count table still counts them.
+VACUOUS_FOOTER = '{rows} had nothing to check: {ids}'
+
+
+def vacuous_rows(envelope):
+    """The rows whose status is vacuous, in the order of `rows`: obligation rows only, and never one the checker kept
+    on a refused machine (`kept_on_refused`: it reads as not observed)."""
+    env = envelope if isinstance(envelope, dict) else {}
+    return [r for r in _rows(env) if r.get('status') == 'vacuous' and not is_machine_refusal(r)
+            and not kept_on_refused(env, r)]
+
+
+def vacuous_footer(envelope, escape=True):
+    """VACUOUS_FOOTER for the envelope's `vacuous_rows`, each id escaped with `esc` (plain text when `escape` is
+    False, for a page that sets text, never markup); None when there is none."""
+    rows = vacuous_rows(envelope)
+    if not rows:
+        return None
+    ids = [esc(r.get('id')) if escape else _clip(r.get('id')) for r in rows]
+    return VACUOUS_FOOTER.format(rows=_plural(len(rows), 'row', 'rows'), ids=', '.join(ids))
+
+
 def refused_machine_entries(env):
     """The refused machines as {machine, status, ...}: the entries of `machines.refused` when the block names any
     (issue #793: the observed profile reports refusals through its readings and writes no refusal row), else the
@@ -2088,6 +2215,8 @@ def verdict_line(envelope):
     # serve-064 (dogfood fb-20261009-b841067fe3d852c9): every reading class on the machines read is named, so the parts
     # add up to N; a vacuous reading was counted nowhere ("established: 4 of 12; not established: 3" hid five)
     counted = {e.get('id') for e in entries}
+    managed = provider_managed_keys(env)               # supabase-profile-001: counted apart, never as not established
+    counted |= {i for _, i in managed}
     others = {}
     for r in obligations:
         st = r.get('status')
@@ -2103,6 +2232,8 @@ def verdict_line(envelope):
     if deviations:
         parts.append('deviations: %d' % deviations)
     parts += ['%s: %d' % (word, n) for word, n in sorted(others.items())]
+    if managed:
+        parts.append('%s: %d' % (PROVIDER_MANAGED_WORDS, len(managed)))
     top = top_entry(entries, env)
     if top is not None and collection_unread(env):   # issue #1208: the gaps below come from the absent collection
         parts.append(NO_COLLECTION_WORDS)
@@ -2358,6 +2489,10 @@ def requirement_line(row, envelope=None):
     state, reason = _requirement_label(r), _clip(label(r.get('reason_class')))
     loc, quote = ' — %s' % locator if locator else '', _quote_words(r.get('formalisation_quote'))
     said_once = (isinstance(envelope, dict) and envelope.get('profile') == SAID_ONCE_PROFILE and reason == state)
+    unread = _refused_offer_unread(r, envelope)
+    if unread:      # #6238: a formalisation cannot establish a line on a machine the reader refused
+        action, quote = 'Assure could not read %s; request coverage at %s' % (
+            _pr_unread_parts(unread), COVERAGE_ROUTE), ''
     # each said-once template names its state, so tools/ci/phrase_pins.py --explain-line resolves it here (#1397)
     if said_once and state == 'holds':
         return format_space('%s — "%s"%s — holds%s — %s%s' % (_clip(r.get('id')), sentence, checked, loc, action, quote))
@@ -2366,6 +2501,17 @@ def requirement_line(row, envelope=None):
     line = '%s — "%s"%s — %s — %s%s — %s%s' % (
         _clip(r.get('id')), sentence, checked, state, reason, loc, action, quote)
     return format_space(line)
+
+
+def _refused_offer_unread(row, envelope):
+    """#6238: the unread lines (`_pr_unread`) a `machines.refused` reason of a coverage kind (COVERAGE_REFUSAL_KINDS)
+    names, for a not-established missing_method row whose formalisation quote cannot run; [] for any other row."""
+    q = row.get('formalisation_quote')
+    if not (isinstance(envelope, dict) and row.get('state') == 'not_established'
+            and row.get('reason_class') == 'missing_method'
+            and isinstance(q, dict) and q.get('execution_available') is False):
+        return []
+    return _pr_unread(envelope, COVERAGE_REFUSAL_KINDS)
 
 
 def _requirement_findings(env, found):
@@ -2442,7 +2588,8 @@ def _meaning_line(envelope):
     """DD-073 Addendum 2 (a): one sentence (or two) under the first line saying what it means, from a closed template
     per colour; None for an envelope without `colour`.
     - green: "Nothing in your <subject> contradicts what is known about safe <family> setups. <n> of <N> checks could
-      not be completed, mostly because <the top reason class in words>. That is a gap in what we could see; your
+      not be completed, mostly because <the top reason class in words, or the bound's when the top entry is a bound
+      of the profile, issue #4329>. That is a gap in what we could see; your
       <subject> is unchanged by it." ("All <N> checks could be completed." when n is 0);
     - red: the first finding's consequence, then for a disproof "The finding is at <locator> (<object>, <access
       path>)." when its witness names a locator, else "The reading <id> fails; the record carries no witness to point
@@ -2472,7 +2619,8 @@ def _meaning_line(envelope):
         top = top_entry(entries, env)
         if not entries or top is None:
             return '%s All %d checks could be completed.' % (head, n_all)
-        because = CLASS_BECAUSE.get(top.get('reason_class'), CLASS_BECAUSE['representation'])
+        because = (HTTP_TLS_BOUND_BECAUSE if profile_bound(top)          # issue #4329: a bound, not a fact to collect
+                   else CLASS_BECAUSE.get(top.get('reason_class'), CLASS_BECAUSE['representation']))
         # heading 2203 (the Director's "state the positive" rule): no "x, not y" tail
         verb = 'are' if subject.endswith('s') else 'is'          # "your HTTP responses are unchanged by it"
         return ('%s %d of %d checks could not be completed, mostly because %s. That is a gap in what we could see; your '
@@ -2701,9 +2849,12 @@ _UPGRADE_URL = re.compile(r'https://buy\.stripe\.com/[A-Za-z0-9_./-]+(\?[A-Za-z0
 
 
 def upgrade_markdown(envelope):
-    """The job summary's first line and a blank line when the answer carries `upgrade` {"url", "line"} (a free account
-    on a server with a Premium payment link): the line's words escaped, then its url as `<url>`. '' when `upgrade` is
-    absent or malformed: a url that is not a buy.stripe.com link, or a line that does not end in its url."""
+    """The job summary's first line and a blank line when the answer carries `upgrade` {"url", "line"}, which a server
+    with a Premium payment link adds for a free account (serve/api.py `upgrade_for`, with `notice` when its once-only
+    balance is spent) or for a gifted Premium or Pro plan in its last 30 days (`gift_upgrade_for`: `notice` "Your gifted
+    <plan> plan ends on <until>." and `line` "To keep it, upgrade at <url>"): `notice` when it is one plain sentence,
+    then the line's words, escaped, then its url as `<url>`. '' when `upgrade` is absent or malformed: a url that is not
+    a buy.stripe.com link, or a line that does not end in its url."""
     up = envelope.get('upgrade') if isinstance(envelope, dict) else None
     if not isinstance(up, dict):
         return ''
@@ -2791,7 +2942,17 @@ def summary_steps(envelope, reading=None):
     return steps or [SUMMARY_STEP_NONE]
 
 
-def readable_summary_markdown(envelope):
+def readable_summary_markdown(*args, **kwargs):
+    """serving 12498: the render with its own premise registry, so adapter-level premises are numbered P1, P2 ... once
+    per summary and listed under its sections (`_with_premise`, `_premise_list`)."""
+    token = _PREMISE_REG.set({})
+    try:
+        return _readable_summary_markdown_body(*args, **kwargs)
+    finally:
+        _PREMISE_REG.reset(token)
+
+
+def _readable_summary_markdown_body(envelope):
     """The job summary's readable part (issue #4580): '## <summary_headline>', the job's exit in words,
     "What to do next" as numbered steps, then the comment's sections in words (`_pr_sections`)."""
     env = envelope if isinstance(envelope, dict) else {}
@@ -2862,17 +3023,19 @@ def config_default_premise_lines(envelope):
 def summary_markdown(envelope, now=None):
     """The job summary for a verdict (issue #4580): `readable_summary_markdown`, then the agents' full reading
     (`agent_summary_markdown`) in one <details> fold, its heading line kept as a bold first line inside it."""
-    agent = agent_summary_markdown(envelope, now, include_adapter=False)
+    agent = agent_summary_markdown(envelope, now, include_adapter=False, footer=False)
     head, _, rest = agent.partition('\n')
     head = head[len('## '):] if head.startswith('## ') else head
     return (readable_summary_markdown(envelope) + '\n' + SUMMARY_FOLD + '\n\n**%s**\n' % head + rest.rstrip('\n')
             + '\n\n</details>\n')
 
 
-def agent_summary_markdown(envelope, now=None, *, include_adapter=True):
+def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=True):
     """The full reading for agents and for the fold (main's summary before issue #4580): the verdict line as its
     heading, the statuses, reason codes, obligation ids and the exit. The combined summary prints the coverage
-    request above its fold, so only that caller omits its duplicate here."""
+    request above its fold, so only that caller omits its duplicate here. Issue #6423: a vacuous row (`vacuous_rows`)
+    is never listed; the one `vacuous_footer` line follows the listing (`footer`; the combined summary says it above
+    its fold instead)."""
     env = envelope
     precedence = list(env.get('vocabulary', {}).get('precedence') or sorted(env.get('counts', {})))
     counts = env.get('counts', {})
@@ -3027,6 +3190,11 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True):
     if kept:                                      # R3-1 (ii): the raw counts stand; the kept rows are coverage
         out += ['', 'Readings the checker kept on refused machines and read as not observed: %d.' % len(kept)]
         rows = [r for r in rows if not any(r is k for k in kept)]
+    footed = vacuous_rows(env)                    # issue #6423: said once, on the footer line under the listing
+    rows = [r for r in rows if not any(r is v for v in footed)]
+    managed = provider_managed(env)                      # supabase-profile-001: listed apart, never by status
+    managed_keys = {(e['machine'], e['id']) for e in managed}
+    rows = [r for r in rows if (r.get('machine'), r.get('id')) not in managed_keys]
     for s in precedence:
         group = [r for r in rows if r.get('status') == s]
         if not group:
@@ -3042,9 +3210,17 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True):
             named = objects_text(env, r) if s == 'deviates' else None
             if named:                                     # issue #2176: one entry per object, its roles as a list
                 out.append('  - %s' % esc(named))
+    vacuous = vacuous_footer(env) if footer else None
+    if vacuous is not None:
+        out += ['', vacuous]
     if machines is not None and machines.get('source') == 'inferred' and not machines['refused']:
         out += ['', 'The checker did not report which machines it refused; which machines were read is inferred from the '
                 'readings.']
+    if managed:
+        out += ['', '### Provider-managed', '']
+        for e in managed[:MAX_ANNOTATIONS]:
+            out.append('- %s %s: %s (reading: %s)' % (esc(e['machine']), esc(e['id']), esc(e['text']),
+                                                      esc(label(e.get('status')))))
     limits = scope_limits(env) if line is not None else []
     limited = scope_limited_machines(env) if line is not None else set()
     if limits:                                    # serve-077 (3817 point 3): each permanent limit said once
@@ -3322,9 +3498,16 @@ def _input_step(failure_envelope):
 BRIDGE_STEP_CAP = 600
 
 
-def step_cap(failure_envelope):
-    """The bound of a failure's next-step line: BRIDGE_STEP_CAP when it carries the adapter bridge's contract link."""
+def step_cap(failure_envelope, *, explicit=False, text=None):
+    """Keep actual identity advice complete; retain all legacy explicit/implicit caps otherwise."""
     detail = failure_envelope.get('detail') if isinstance(failure_envelope.get('detail'), dict) else {}
+    identity = identity_required_step(detail) if failure_envelope.get('outcome') == 'profile_refused' else None
+    if identity is not None:
+        # Required rows are already bounded by the server/client. The path is an
+        # already-accepted caller file, with no invented presentation length limit.
+        return max(CAP, len(text if isinstance(text, str) else identity))
+    if explicit:
+        return CAP
     doc = detail.get('adapter_bridge')
     return BRIDGE_STEP_CAP if isinstance(doc, str) and BRIDGE_DOC_RE.fullmatch(doc) else CAP
 
@@ -3458,8 +3641,9 @@ def _outcome_line(failure_envelope):
 def failure_markdown(failure_envelope, reason=True):
     """The job summary's failure section. `reason` False (issue #3118: the Action shows its own plain next step above
     it) leaves out the reason, its 'What to do', the hint, the malformation and the fault lines; the failure file keeps
-    them. Issue #4577: a failure that carries `upgrade` (a free account's refusal on its spent once-only balance) prints
-    its line (`upgrade_markdown`: the notice, Premium's price, the payment link) under the outcome, with or without
+    them. Issue #4577: a failure that carries `upgrade` (a free account's refusal on its spent once-only balance, or a
+    gifted plan's keyed refusal in its last 30 days, `gift_upgrade_for`) prints its line (`upgrade_markdown`: the
+    notice, then Premium's price and the payment link, or the gift's renewal link) under the outcome, with or without
     `reason`."""
     f = failure_envelope
     hint = hint_line(f) if reason else None
@@ -3470,10 +3654,11 @@ def failure_markdown(failure_envelope, reason=True):
                       _outcome_line(f), ''] +
                      ([upgrade, ''] if upgrade else []) +
                      (['Reason: %s' % esc(f.get('reason')), '',
-                       'What to do: %s' % esc(next_step(f), step_cap(f)), ''] if reason else []) +
+                       'What to do: %s' % esc(next_step(f), step_cap(f, text=next_step(f))), ''] if reason else []) +
                      ([esc(hint), ''] if hint else []) +
                      ([esc(malformation), ''] if malformation else []) +
-                     (_fault_lines(f.get('detail')) if reason else []) +
+                     (_fault_lines(f.get('detail')) if reason or identity_required_step(
+                         f.get('detail') if isinstance(f.get('detail'), dict) else {}) is not None else []) +
                      ([esc('Add coverage: ' + coverage_words(f['detail']['coverage'])), '']
                       if isinstance(f.get('detail'), dict) and isinstance(f['detail'].get('coverage'), dict)
                       else []) +
@@ -3504,6 +3689,26 @@ def _fault_lines(detail):
 
 # ---------- issue #2189: the pull request comment, from the stored envelope, no model ----------
 PR_COMMENT_MARKER = '<!-- assure:pr-comment -->'
+PR_COMMENT_OWNER_LINE = re.compile(re.escape('<!-- assure:pr-comment-owner:v2:') + '[0-9a-f]{64}' + re.escape(' -->'))
+
+
+def pr_comment_owner(profile, job=None):
+    """Stable profile/job ownership, or no owner when a standalone caller supplies no usable profile."""
+    if not isinstance(profile, str) or not profile.strip():
+        return None
+    identity = json.dumps([profile.strip(), str(job or '')], ensure_ascii=True, separators=(',', ':'))
+    return '<!-- assure:pr-comment-owner:v2:%s -->' % hashlib.sha256(identity.encode('utf-8')).hexdigest()
+
+
+def pr_with_owner(body, owner):
+    """Set one exact owner line above the last footer rule, else below the unchanged legacy marker."""
+    if not isinstance(owner, str) or not PR_COMMENT_OWNER_LINE.fullmatch(owner):
+        return body
+    lines = [line for line in body.split('\n') if not PR_COMMENT_OWNER_LINE.fullmatch(line)]
+    at = next((i for i in range(len(lines) - 1, 0, -1) if lines[i] == '---'), 1)
+    return '\n'.join(lines[:at] + [owner] + lines[at:])
+
+
 NO_READING_HEAD = 'no reading of this change'
 # the red findings that are not a broken rule, in the summary's own words (`_red_words`): one count each in the heading
 PR_OTHER_KINDS = (('not_proven', 'not proven', 'not proven: it must hold, and no machine that was read shows it holds'),
@@ -3555,8 +3760,6 @@ PR_UNCHECKED_FALLBACK = 'the check could not decide this yet; the job summary gi
 # (requirements_compiler.WHY_SPECIFIC). Rows use the ordinary not-established wording; the footer counts these rows.
 PREMIUM_ROW_SENTENCES = {'route-sign-in': 'Only a signed-in user can reach {route}.',
                          'route-role': 'Only a signed-in {role} can reach {route}.'}
-# the Director, 20 Oct 2026: the footer's one sentence for those rows, above the one upgrade link (`_pr_footer`)
-PR_PREMIUM_ROWS = '%d of your requirements %s established by Premium, which checks each for the route it names.'
 _PREMIUM_ROW = re.compile(r'Only a signed-in [\w-]+ can reach (?:GET|POST|PUT|PATCH|DELETE) /[^\s{}]*\.')
 
 
@@ -3792,24 +3995,101 @@ def _pr_checked(env, req, row):
     return _with_premise(_pr_checked_words(env, req, row), rows)
 
 
+# serving 12498 / 12501: the premise clauses a row carries inline, as on main: python-auth's own row evidence. Every
+# other premise is an adapter-level constant (an adapter's run-time premise, a graded census or early-error premise):
+# while a comment or summary renders (`_PREMISE_REG` set), its cell names it by a marker "premised: P1, P2" and
+# `_pr_sections` lists each one in full, once, under the sections.
+INLINE_PREMISES = ('premised: stated by you', 'premised: password fields')
+_PREMISE_REG = contextvars.ContextVar('assure_premise_registry', default=None)
+_PREMISE_MARK = re.compile(r'premised: (P\d+(?:, P\d+)*)')
+
+
+def _premise_spans(text):
+    """[(label, full)] for every premise clause of a status text: `label` cut as `_premise_label` cuts it, `full` the
+    premise's own text (after "premised: ") up to the next top-level "; premised" or the end, so a premise that holds
+    a "; " of its own (the census premise) is listed whole."""
+    out = []
+    for lab in _premise_clauses(text):
+        i = text.find(lab)
+        k = text.find('; premised', i + len(lab))
+        full = text[i:k if k >= 0 else len(text)].rstrip(' .;')
+        out.append((lab, full[len('premised: '):] if full.startswith('premised: ') else full))
+    return out
+
+
 def _with_premise(words, rows):
     """codex-conflicts 4237 / 4363: `words` (the row's plain wording, kept) followed by each served premise clause
     ("premised: stated by you (...)") of `rows` that it does not already carry, for every row state the comment and
-    the readable summary reach (holds, broken, not checked yet)."""
-    labels = [x for x in _premise_labels(rows) if not (isinstance(words, str) and x in words)]
-    if not labels:
+    the readable summary reach (holds, broken, not checked yet). serving 12498 / 12501: while a comment or summary
+    renders, an adapter-level premise is named by its marker ("premised: P1, P2"), after the inline clauses."""
+    reg = _PREMISE_REG.get()
+    inline, listed = [], []
+    for r in rows or ():
+        text = r.get('status_text') if isinstance(r, dict) else None
+        for lab, full in (_premise_spans(text) if isinstance(text, str) else ()):
+            if reg is None or lab.startswith(INLINE_PREMISES):
+                inline.append(lab)
+            else:
+                listed.append(full)
+    labels = [x for x in dict.fromkeys(inline) if not (isinstance(words, str) and x in words)]
+    listed = list(dict.fromkeys(listed))
+    if not labels and not listed:
         return words
-    return '; '.join(([words] if words else []) + labels)
+    parts = ([words] if words else []) + labels
+    if listed:
+        parts.append('premised: ' + ', '.join('P%d' % reg.setdefault(t, len(reg) + 1) for t in listed))
+    return '; '.join(parts)
+
+
+def _premise_list(lines, reg):
+    """serving 12498: `lines` with the markers renumbered P1, P2, ... in first-appearance order, then "Premises:" and
+    one "- P<n>: <full premise text>" line per premise some row names, in label order; `lines` unchanged when none."""
+    text_of = {n: t for t, n in reg.items()}
+    order = []
+    for line in lines:
+        for m in _PREMISE_MARK.finditer(line):
+            for ref in m.group(1).split(', '):
+                if int(ref[1:]) not in order:
+                    order.append(int(ref[1:]))
+    if not order:
+        return lines
+    new = {old: i for i, old in enumerate(order, 1)}
+
+    def renumber(m):
+        return 'premised: ' + ', '.join('P%d' % new[int(r[1:])] for r in m.group(1).split(', '))
+    out = [_PREMISE_MARK.sub(renumber, line) for line in lines]
+    return out + ['Premises:', ''] + ['- P%d: %s' % (new[old], esc(text_of[old], cap=4096)) for old in order] + ['']
+
+
+def _premise_clauses(text):
+    """Every served premise clause of a status text, in order (serving 12471: a reading names every premise it rests
+    on, e.g. an adapter's run-time premise then its census premise). Each is cut as `_premise_label` cuts the first, so
+    a text with one premise gives exactly [_premise_label(text)]."""
+    out, start, low = [], 0, text.lower()
+    while True:
+        i = low.find('premised', start)
+        if i < 0:
+            return out
+        depth, j = 0, i
+        while j < len(text):
+            c = text[j]
+            depth += (c == '(') - (c == ')')
+            if depth <= 0 and text.startswith('; ', j):
+                break
+            j += 1
+        lab = text[i:j].rstrip(' .;')
+        if lab:
+            out.append(lab)
+        start = j + 2
 
 
 def _premise_labels(rows):
-    """The distinct served premise clauses of `rows`' status texts, in order."""
+    """The distinct served premise clauses of `rows`' status texts, in order: every clause of each text."""
     labels = []
     for r in rows or ():
         text = r.get('status_text') if isinstance(r, dict) else None
-        lab = _premise_label(text) if isinstance(text, str) else None
-        if lab:
-            labels.append(lab)
+        if isinstance(text, str):
+            labels.extend(_premise_clauses(text))
     return list(dict.fromkeys(labels))
 
 
@@ -3865,30 +4145,21 @@ def _pr_reason_class(env, row):
 # Formal-model eligibility and its legacy wording remain available to callers. Requirement rows use the ordinary
 # reason-class wording; Free conversion belongs in the shared footer.
 PR_FORMALISE_WORDS = 'this profile does not check this yet; Premium can check it with a formal model of the rule'
-PR_FORMALISE_ROWS = 'Premium can check %d of your requirements with a formal model of %s.'
 
-# Issue #5584 (#3364 acceptance 5, the wording half): a missing_method requirement row whose stage is beyond the
-# account's plan names the plan it needs in place of the class sentence, the one exception to the plain-row rule above.
-# The plan is the one the server graded: the python-auth check writes `beyond_tier` / `tier_needed` onto the
-# `readings.<machine>.requirements` rows (a served verdict's top-level `requirements` rows carry neither field: serve/
-# shadow.py `annotate_requirement_rows` writes them into shadow-model records only), and serve/api.py re-grades them
-# for the account's tier (serve/shadow.py `reread_readings_for_tier`), so a row the plan covers reads `beyond_tier`
-# false. The row carries no link: a free comment's one upgrade link stays in its footer (the Director, 20 Oct 2026;
-# chief-of-staff 2079), below the row that names Premium. A row needing Pro names the plan with no link on any account:
-# the free account's link is the Premium payment link (serve/api.py `premium_payment_link`), which does not buy the
-# rule, and main holds no Pro link; adding one is a key and host decision outside this change. A row needing
-# Enterprise (the `codebase` stage, serve/shadow.py STAGE_TIER) names Enterprise with no link either: Enterprise is sold
-# per contract (hosted/tiers.json) and main holds no Enterprise link (REFUTATION-r11 MEDIUM-1). Every other class
-# reads as before.
-PR_BEYOND_PLAN_WORDS = 'not established: needs %s'
+# #6332, Director 20/21 and 27 Oct: rows keep their ordinary undecided reason.
+# Only the footer names plans, counted from this app's served reading rows.
 PLAN_WORDS = {'premium': 'Premium', 'pro': 'Pro', 'enterprise': 'Enterprise'}
 
 
 def _pr_plan_needed(env, r):
-    """'premium', 'pro' or 'enterprise' when requirement row `r` is a missing_method row whose reading row (same id, on
-    `r`'s machine when it names one, else on any machine) is graded `beyond_tier` true with that `tier_needed`; None
-    otherwise."""
-    if not isinstance(r, dict) or r.get('reason_class') != 'missing_method':
+    """The additional tier whose live method decides this row, or None.
+
+    A stage estimate is insufficient. The known one-route method is also served
+    for the setup draft's route sentences, even when the free matcher estimates
+    their stage. Account re-grading clears beyond_tier for stages it covers.
+    """
+    if (not isinstance(r, dict) or r.get('reason_class') != 'missing_method'
+            or r.get('state') != 'not_established'):
         return None
     readings = env.get('readings')
     if not isinstance(readings, dict):
@@ -3903,9 +4174,26 @@ def _pr_plan_needed(env, r):
             if not (isinstance(q, dict) and q.get('id') == r.get('id') and q.get('beyond_tier') is True):
                 continue
             need = q.get('tier_needed')
-            if isinstance(need, str) and need in PLAN_WORDS:
+            if (isinstance(need, str) and need in ('premium', 'pro') and q.get('stage_live') is True
+                    and (q.get('stage_estimated') is False or (need == 'premium' and premium_row(r)))):
                 return need
     return None
+
+
+def additional_checks_line(env):
+    """One grounded footer line; count each requirement once, omit zero tiers."""
+    counts = {'premium': 0, 'pro': 0}
+    seen = set()
+    for r in requirement_rows(env) or ():
+        key = (r.get('machine'), r.get('id'))
+        if key in seen:
+            continue
+        seen.add(key)
+        need = _pr_plan_needed(env, r)
+        if need is not None:
+            counts[need] += 1
+    return '; '.join('%s can decide %d additional checks' % (PLAN_WORDS[tier], count)
+                     for tier, count in counts.items() if count) or None
 
 
 # Night read of #5006 at a860ed09 (HIGH-1): the paid formalisation serves only the profiles the bound Premium runner
@@ -4263,7 +4551,7 @@ _PR_UNREAD = re.compile(r'([a-z][a-z0-9_]+) \(([^,()\r\n]{1,200}), ([1-9][0-9]{0
 _PR_UNREAD_WHAT = re.compile(r'[A-Za-z_][A-Za-z0-9_.]{0,79}')
 # note 5 (chief 5629): a guard the reader refused, as the checker reports it: 'refused guard listed on a route: <guard>
 # (<class>: <what it could not read> at <path>:<line>)'
-_PR_UNREAD_GUARD = re.compile(r'refused guard listed on a route: ([A-Za-z_][A-Za-z0-9_]{0,79}) \([a-z_]{1,40}: '
+_PR_UNREAD_GUARD = re.compile(r'refused guard listed on a route: ([A-Za-z_][A-Za-z0-9_]{0,79}) \(([a-z_]{1,40}): '
                               r'[^\r\n;]{0,300}? at (%s):([1-9][0-9]{0,6})\)' % REPO_PATH_RE.pattern)
 MAX_PR_UNREAD = 1                   # issue #3174: the first cause, then "and other lines"
 # issue #3174: the next step when Assure could not read the app (the reason classes are forms the reader does not
@@ -4642,26 +4930,31 @@ def adapter_line(step):
     return line
 
 
-def _pr_unread(env):
+def _pr_unread(env, kinds=None):
     """[(what, 'path:line')] for the lines a refused check names as unread (`machines.refused` reasons, then the rows'
     reasons), each module resolved to the one repository file the manifest holds for it (`source_candidates`; none or
     several: that line is skipped, never guessed); `what` is the source text when it is a plain dotted name, else
-    None. At most MAX_PR_UNREAD + 1 (the comment says how many more), deduplicated, in order."""
+    None. At most MAX_PR_UNREAD + 1 (the comment says how many more), deduplicated, in order. With `kinds` (#6238),
+    only the `machines.refused` reasons are read and only the lines whose refusal class is in `kinds`."""
     m = _machines(env)
     reasons = [r.get('reason') for r in (m['refused'] if m is not None else ()) if isinstance(r, dict)]
-    reasons += [r.get('reason') for r in _rows(env)]
+    reasons += [r.get('reason') for r in _rows(env)] if kinds is None else []
     files = (env.get('input') or {}).get('files') if isinstance(env.get('input'), dict) else None
     out = []
     for reason in reasons:
         if not isinstance(reason, str):
             continue
         for x in _PR_UNREAD_GUARD.finditer(reason[:_STRUCTURAL_REASON_CLIP]):     # note 5: a refused guard's line
-            what, path, line = x.groups()
+            what, kind, path, line = x.groups()
             item = (what, '%s:%s' % (path, line))
+            if kinds is not None and kind not in kinds:
+                continue
             if _PR_LOCATOR.fullmatch(item[1]) and item not in out:
                 out.append(item)
         for x in _PR_UNREAD.finditer(reason[:_STRUCTURAL_REASON_CLIP]):
-            _, source, line, what = (g.strip() for g in x.groups())
+            kind, source, line, what = (g.strip() for g in x.groups())
+            if kinds is not None and kind not in kinds:
+                continue
             if '/' in source:
                 path = source if REPO_PATH_RE.fullmatch(source) else None
             else:
@@ -4679,14 +4972,18 @@ def _pr_unread_words(unread, where=None):
     """'Assure could not read <what> at <where>[, ... and ...], so it checked nothing in this change.': plain text
     (the proof tree) when `where` is None, else Markdown with each `what` a code span (`_PR_UNREAD_WHAT` admits no
     character Markdown reads) and each locator rendered by `where` (a link or code span, `_pr_where`)."""
+    return 'Assure could not read %s, so it checked nothing in this change.' % _pr_unread_parts(unread, where)
+
+
+def _pr_unread_parts(unread, where=None):
+    """'<what> at <where>[, ... and ...]', the unread lines `_pr_unread_words` names."""
     code = where is not None
     where = where or (lambda loc: loc)
     parts = [('%s at %s' % ('`%s`' % w if code else w, where(loc)) if w else where(loc))
              for w, loc in unread[:MAX_PR_UNREAD]]
     if len(unread) > MAX_PR_UNREAD:
         parts.append('other lines')     # a count would be a floor: the checker bounds the reasons it reports
-    joined = parts[0] if len(parts) == 1 else '%s and %s' % (', '.join(parts[:-1]), parts[-1])
-    return 'Assure could not read %s, so it checked nothing in this change.' % joined
+    return parts[0] if len(parts) == 1 else '%s and %s' % (', '.join(parts[:-1]), parts[-1])
 
 
 def pr_reading(envelope):
@@ -4764,20 +5061,12 @@ def pr_reading(envelope):
             scope = _pr_scope_words(env, r)         # note 3: written for another check, apart from no method yet
             if scope is not None:
                 words = scope
-            need = _pr_plan_needed(env, r) if words is not None else None
-            plain = words
-            if need:                                # issue #5584: the plan the rule needs, the coverage step kept
-                tail = '; ' + PROPOSE_COVERAGE
-                words = PR_BEYOND_PLAN_WORDS % PLAN_WORDS[need] + (tail if words.endswith(tail) else '')
             if spent_rows and _pr_unread_row(r):    # the Director, 14 Oct 2026: the spent balance left it unread
                 words = PR_SPENT_ROW if words is None else words + '; ' + PR_SPENT_ROW
-                plain = PR_SPENT_ROW if plain is None else plain + '; ' + PR_SPENT_ROW    # pre-check r9, check 8
             if words is not None:                   # codex-conflicts 4363: a served premise stays on the row
                 words = _with_premise(words, [r] + _pr_matched_rows(env, r))
-                plain = _with_premise(plain, [r] + _pr_matched_rows(env, r))
             unchecked.append({'label': lab, 'name': name, 'requirement': r.get('id'), 'words': words,
-                              'cls': r.get('reason_class'), **({'mapped': True} if name and _checked_as(r) else {}),
-                              **({'plain': plain} if need else {})})
+                              'cls': r.get('reason_class'), **({'mapped': True} if name and _checked_as(r) else {})})
     for r in obligations:
         key = (r.get('machine'), r.get('id'))
         if key in shown_rows or r.get('id') in shown_ids:
@@ -4880,12 +5169,18 @@ _PR_REQ_SEGMENT = r'(?!\.\.?(?:/|$))[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}'
 _PR_REQ_FILE = re.compile(r'(?:%s/){0,10}%s' % (_PR_REQ_SEGMENT, _PR_REQ_SEGMENT))
 
 
+class _PrRequirementsSource(str):
+    """A validated source label, distinct from the Action's raw off input."""
+
+
 def pr_requirements_file(named, workspace=None):
     """The requirements file `named` (the Action's `requirements` input) as a path relative to the checkout, for the
     comment's quotes: a leading './' dropped, an absolute path inside `workspace` made relative to it; None when it is
-    empty, 'none', outside the checkout or not a plain relative path (`_PR_REQ_FILE`). Never a guessed name."""
+    empty, 'none', outside the checkout or not a plain relative path (`_PR_REQ_FILE`). Never a guessed name. The
+    in-memory source label preserves a real file named 'none' when the Action and renderer both validate it."""
+    validated = type(named) is _PrRequirementsSource
     named = str(named or '').strip()
-    if not named or named == 'none':
+    if not named or (named == 'none' and not validated):
         return None
     if named.startswith('/'):
         root = str(workspace or '').strip().rstrip('/')
@@ -4894,7 +5189,7 @@ def pr_requirements_file(named, workspace=None):
         named = named[len(root) + 1:]
     while named.startswith('./'):
         named = named[2:]
-    return named if _PR_REQ_FILE.fullmatch(named) else None
+    return _PrRequirementsSource(named) if _PR_REQ_FILE.fullmatch(named) else None
 
 
 def _pr_broken(item, repository, commit, requirements_file=None, setup=False):
@@ -5176,7 +5471,9 @@ def _free_upgrade_url(block):
 PR_VERIFY_MORE = 'Verify more of your requirements.'
 
 # The Premium footer cases (chief of staff 4967/4973): one fixed line per comment, chosen by the account (the server's
-# `upgrade` block: a free account carries one, a paid account none) and by whether the run decided. Never in a row.
+# `upgrade` block read by `_free_upgrade_url`: a free account carries `upgrade_for`'s; a paid account none, but
+# a gifted plan in its last 30 days carries `gift_upgrade_for`'s, read as paid) and by whether the run decided. Never in
+# a row.
 PREMIUM_DECIDES_MORE = 'Premium decides more checks.'
 PREMIUM_MAY_COVER = ("Premium may cover this. We're building priority coverage for premium customers continuously. "
                      "Cancel any time.")
@@ -5185,15 +5482,13 @@ PREMIUM_NOT_YET = ("Premium could not decide this yet. We're building priority c
 
 
 def premium_case_line(envelope, decided):
-    """The comment's one Premium footer line: PREMIUM_DECIDES_MORE (free, decided), PREMIUM_MAY_COVER (free, refused
-    or unread), PREMIUM_NOT_YET (no free block: a paid account, refused or unread), or None (paid and decided)."""
+    """The comment's grounded additional-checks line, omitted without evidence.
+
+    The check must have read this app. Live-looking row metadata alone cannot
+    promise a decision after input refusal or a no-verdict outcome.
+    """
     env = envelope if isinstance(envelope, dict) else {}
-    free = _free_upgrade_url(env.get('upgrade')) is not None or (
-        'upgrade' not in env and isinstance(env.get('detail'), dict)
-        and _free_upgrade_url(env['detail'].get('upgrade')) is not None)
-    if free:
-        return PREMIUM_DECIDES_MORE if decided else PREMIUM_MAY_COVER
-    return None if decided else PREMIUM_NOT_YET
+    return additional_checks_line(env) if decided else None
 
 
 def pr_verify_more(envelope):
@@ -5251,6 +5546,37 @@ PR_TREE_LINE = 'Proof tree: %d of %d checks proven%s →'
 # built (the verdict's `formal_model_status`, serve/upgrade_build.py `building`; a test holds the two lines equal).
 PR_BUILDING_LINE = ('Formal model: Premium is building it from this check. It appears in this comment on your next '
                     'Assure run, a few minutes from now.')
+
+
+# Issue #4321: the line for a build that was released (formalised nothing, charge 0): why, and what happens next
+# (serve/upgrade_build.py `RELEASED_LINE`; a test holds the two lines equal).
+PR_RELEASED_LINE = ('Formal model: Premium did not build it from this repository\'s check: the build was released '
+                    '(`%s`) and nothing was charged. Premium\'s monthly remodel tries again at the start of your next '
+                    'monthly period (%s), from your account\'s newest check, now this repository\'s.')
+# REFUTATION-r1 HIGH-1: the account's newest check is another repository's, so the remodel builds that one
+# (serve/upgrade_build.py `RELEASED_ELSEWHERE_LINE`, `remodel_period`)
+PR_RELEASED_ELSEWHERE_LINE = ('Formal model: Premium did not build it from this repository\'s check: the build was '
+                              'released (`%s`) and nothing was charged. Premium\'s monthly remodel at the start of '
+                              'your next monthly period (%s) builds one model for your account, from its newest '
+                              'check, now another repository\'s: this repository is tried again only when its check '
+                              'is your account\'s newest.')
+_PR_RELEASE_REASON = re.compile(r'[a-z][a-z0-9_]{0,63}')
+_PR_PERIOD = re.compile(r'[0-9]{4}-(?:0[1-9]|1[0-2])')
+
+
+def pr_formal_model_status_line(env):
+    """The comment's line for a verdict whose `formal_model_status` is `released` (issue #4321), formatted here from
+    its reason and retry period (or, with none, its remodel period: REFUTATION-r1 HIGH-1), each checked for shape;
+    None for any other status."""
+    st = env.get('formal_model_status') if isinstance(env, dict) else None
+    if not isinstance(st, dict) or st.get('state') != 'released':
+        return None
+    retry = 'retry_period' in st
+    reason, period = st.get('reason'), st.get('retry_period' if retry else 'remodel_period')
+    if not (isinstance(reason, str) and _PR_RELEASE_REASON.fullmatch(reason)
+            and isinstance(period, str) and _PR_PERIOD.fullmatch(period)):
+        return None
+    return (PR_RELEASED_LINE if retry else PR_RELEASED_ELSEWHERE_LINE) % (reason, period)
 
 
 def pr_building(env):
@@ -5390,20 +5716,32 @@ PR_MODEL_REFRESH_LINE = ("This check's result stands; your saved formal model pr
                          '`%s` (USD %s %s).')
 # refutation-pr6142-001 MEDIUM-2: the amount is what is paid (the hold's draw), named by where it comes from
 PR_MODEL_REFRESH_METERED = {'allowance': 'from your allowance', 'overage': 'as overage'}
+# issue #6259: a split draw (part allowance, part overage) names both parts; the overage part is `overage_usd`
+PR_MODEL_REFRESH_SPLIT = '%s from your allowance + USD %s'      # then 'as overage'
 _PR_REFRESH_ROUTE = 'POST /v1/premium/recheck'
+
+
+def _usd_amount(v):
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
 
 
 def pr_model_refresh_line(env):
     """The one refresh line (PR_MODEL_REFRESH_LINE) for a verdict whose `model_refresh` reads {state: drifted, route:
     the recheck route, quote_usd >= 0, metered: allowance | overage}; None otherwise (a free account's verdict carries
-    none)."""
+    none). Metered `overage` with an `overage_usd` above 0 and below `quote_usd` is a split draw (issue #6259): the line
+    names the allowance part (quote_usd - overage_usd) and the overage part."""
     r = env.get('model_refresh') if isinstance(env, dict) else None
     if not isinstance(r, dict) or r.get('state') != 'drifted' or r.get('route') != _PR_REFRESH_ROUTE \
             or r.get('metered') not in PR_MODEL_REFRESH_METERED:
         return None
     q = r.get('quote_usd')
-    if isinstance(q, bool) or not isinstance(q, (int, float)) or not math.isfinite(q) or q < 0:
+    if not _usd_amount(q):
         return None
+    o = r.get('overage_usd')
+    if r['metered'] == 'overage' and _usd_amount(o) and 0 < round(o * 100) < round(q * 100):
+        cents = round(q * 100) - round(o * 100)
+        return PR_MODEL_REFRESH_LINE % (_PR_REFRESH_ROUTE, PR_MODEL_REFRESH_SPLIT % ('%d.%02d' % divmod(cents, 100),
+                                                                                    '%.2f' % o), 'as overage')
     return PR_MODEL_REFRESH_LINE % (_PR_REFRESH_ROUTE, '%.2f' % q, PR_MODEL_REFRESH_METERED[r['metered']])
 
 
@@ -5622,6 +5960,23 @@ def _pr_objects_lines(objects):
     return [head] + _pr_details('All %d objects' % len(objects), [one(*o) for o in objects], indent='  ')
 
 
+PR_MODEL_RELEASE_LINE = 'Model: built by the remodel of release %s.'
+PR_MODEL_NO_RELEASE_LINE = 'Model: not built by a release\'s remodel.'
+
+
+def pr_model_release_line(env):
+    """Issue #3850: one line naming the release whose remodel built the model the check's `shadow` block reads
+    (`model_release`), or saying no release's remodel built it when the block reads a model with no release; None
+    when the envelope carries no shadow block or the block reads no model."""
+    block = env.get('shadow') if isinstance(env, dict) else None
+    if not isinstance(block, dict) or block.get('model_commit') is None:
+        return None
+    tag = block.get('model_release')
+    if isinstance(tag, str) and tag:
+        return PR_MODEL_RELEASE_LINE % esc(tag)
+    return PR_MODEL_NO_RELEASE_LINE
+
+
 # ---------- assure-on-itself-001 (the Director, 17 Oct 2026; night read of #3843, H1) ----------
 # The comment states no model provenance until a verdict carries it (#3870's served remodel data): `engine` names the
 # engine that ran the check, so a Premium or Pro comment (one carrying the proof-tree link the server adds for those
@@ -5644,7 +5999,8 @@ def _pr_listed_unchecked(env, rd):
 
 
 def _pr_sections(env, rd, repository=None, commit=None, requirements_file=None, names=None, setup=False):
-    """The comment's sections in words, shared by the readable job summary (issue #4580).
+    """The comment's sections in words, shared by the readable job summary (issue #4580), then the one
+    `vacuous_footer` line when a row is vacuous (issue #6423).
     Keep a comment's machine names shared with its footer; a standalone summary starts fresh names. F10 (#4994): `setup`
     (the pull request adds Assure's own workflow) leads each broken rule with 'Found in your code:'.
     """
@@ -5695,10 +6051,24 @@ def _pr_sections(env, rd, repository=None, commit=None, requirements_file=None, 
             out += _pr_unchecked_lines(env, unchecked, names) + ['']
         if skipped:
             out += _pr_skipped_lines(env, skipped, names) + ['']
-    return out
+    vacuous = vacuous_footer(env)                 # issue #6423: the vacuous rows, never listed above, said once
+    if vacuous is not None:
+        out += [vacuous, '']
+    reg = _PREMISE_REG.get()
+    return _premise_list(out, reg) if reg else out
 
 
-def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_bases=(), requirements_file=None,
+def pr_comment_markdown(*args, **kwargs):
+    """serving 12498: the render with its own premise registry, so adapter-level premises are numbered P1, P2 ... once
+    per comment and listed under its sections (`_with_premise`, `_premise_list`)."""
+    token = _PREMISE_REG.set({})
+    try:
+        return _pr_comment_markdown_body(*args, **kwargs)
+    finally:
+        _PREMISE_REG.reset(token)
+
+
+def _pr_comment_markdown_body(envelope, commit=None, repository=None, tree=None, tree_bases=(), requirements_file=None,
                         setup=False, plan=()):
     """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
     finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
@@ -5714,7 +6084,7 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     closing line (`_pr_closing`) under it. A free account whose once-only USD 1 is spent (`upgrade.notice`) reads one
     line above that rule (`pr_spent_line`, its words only beside the Premium line); every free account reads
     `premium_tree_line` above the rule, the comment's one upgrade link (issue #4576; the Director, 20 Oct 2026), after
-    one PR_PREMIUM_ROWS sentence when a row only Premium establishes (`premium_row`) is listed, and a requirement row the spent balance left unread says so on its "Not
+    one counted additional-checks line (#6332), and a requirement row the spent balance left unread says so on its "Not
     checked yet" row (PR_SPENT_ROW). Issue #3221: each machine is named in the profile's words the first time it appears
     (`_PrMachines`); off the python-* profiles, rows sharing one reason are one line with a count (`_pr_holds_rows`,
     `_pr_unchecked_lines`), a list past MAX_PR_GROUP in <details>; a deviation lists its objects, most roles first
@@ -5762,7 +6132,7 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
                 out += [_pr_rewrite_next(env, repository, commit, rd['unread']) or PR_UNREAD_NEXT, '']
             out += _pr_scope_lines(env)        # note 3: a requirement line written for another check, still said
             return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, read=False, names=names,
-                                               decided=False, plan=plan, upsell=False,
+                                               decided=False, plan=plan,
                                                header=header is not None)) + '\n'
     elif rd['no_reading'] is not None:
         out += [esc(rd['no_reading']), '']
@@ -5772,13 +6142,11 @@ def pr_comment_markdown(envelope, commit=None, repository=None, tree=None, tree_
     if covered is not None:                      # issue #4230: the rows a coverage proposal could decide, read runs only
         out += [esc(covered, COVERAGE_CAP), '']
     decided = rd['no_reading'] is None and not rd['unread']
-    # note 5: an input fault (the integrity gate, `a0`) keeps its case line; any other run with no reading leads with no
-    # "Premium may cover this"
     return '\n'.join(out + _pr_footer(env, commit, tree, tree_bases, names=names, decided=decided, plan=plan,
-                                       upsell=decided or env.get('a0') is not None, header=header is not None)) + '\n'
+                                       header=header is not None)) + '\n'
 
 
-def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=True, plan=(), upsell=True,
+def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=True, plan=(),
                header=False):
     """The comment's footer, the same lines whether or not the app was read (refs #3201 r4): the engine line, the spent
     line, the plan and checks lines (`plan`, issue #3219), the rule, the tree line, the formal-model line, the building
@@ -5792,12 +6160,7 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=Tru
     # the Director, 20 Oct 2026 (#4994): exactly one upgrade link per free comment, in the footer, none in a row. A free
     # account's Premium proof-tree line (issue #4576) carries it; the spent line (14 Oct 2026) then says its words only
     premium = premium_tree_line(env) if pr_tree_line(tree, tree_bases) is None else None
-    case = premium_case_line(env, decided)       # chief 4967: the one Premium footer line, first in the footer
-    if not upsell and case == PREMIUM_MAY_COVER:
-        # note 5 (chief 5629): a check with no reading never says Premium may cover it, since paying never reads code
-        # Assure cannot read (the Director's honest-upsell rule). The comment leads with the line it could not read
-        # and the next step; the one upgrade link stays last in the footer (#5822: one link on every free path).
-        case = None
+    case = premium_case_line(env, decided) if read else None
     if header:          # issue #6045: the credit header carries the one link; no other upsell line in this comment
         premium = case = None
     if case is not None:
@@ -5805,13 +6168,7 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=Tru
     spent = pr_spent_line(env) if not header else None     # the Director, 14 Oct 2026: the spent free balance
     if spent is not None:
         out += [_esc_line(PR_SPENT_WORDS) if premium is not None else spent, '']
-    n_premium = sum(1 for r in requirement_rows(env) or () if premium_row(r))
-    if premium is not None and n_premium:        # journey F14: the rows only Premium establishes, counted once here
-        out += [PR_PREMIUM_ROWS % (n_premium, 'is' if n_premium == 1 else 'are'), '']
     if premium is not None:
-        n_formalise = sum(1 for r in requirement_rows(env) or () if _pr_formalisable(env, r) and not premium_row(r))
-        if n_formalise:
-            out += [PR_FORMALISE_ROWS % (n_formalise, 'the rule' if n_formalise == 1 else 'each rule'), '']
         out += [premium, '']
     # #5649: an ending gift is already paid, so the Free promotion helpers leave it
     # out. Keep its server renewal block on every footer path, including paid trees.
@@ -5835,9 +6192,15 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=Tru
             out += [refresh, '']
     if pr_building(env):                          # issue #1226: the formal model is on the way
         out += [PR_BUILDING_LINE, '']
+    released_line = pr_formal_model_status_line(env)
+    if released_line is not None:                 # issue #4321: the build was released; why, and what next
+        out += [released_line, '']
     not_built = pr_not_built_line(env)            # issue #4348: a money refusal says why and what next
     if not_built is not None:
         out += [not_built, '']
+    model_line = pr_model_release_line(env)     # issue #3850: which release's remodel built the model read
+    if model_line is not None:
+        out += [model_line, '']
     out.append('<sub>%s</sub>' % _pr_closing(env, commit, read=read, names=names))
     return out
 
@@ -5869,14 +6232,15 @@ def pr_promises(text):
     return out
 
 
-def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None, named=False, reason=True):
+def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None, named=False, reason=True, *, job=None):
     """The one pull request comment for a refused run (a failure envelope): the marker; the heading; the refusal's
     outcome and reason; one next step (`step` when the Action has one, else `next_step`); each promise of the
     requirements text sent (`pr_promises`) reading `not established` with the refusal as its reason, or the line that
     names the input to send one; the proof tree's line (none for this run); and the commit. A validated `upgrade`
     line (`_comment_upgrade_markdown`) is the final conversion block, including a complete ending gift. Deterministic; every
     customer-facing value is escaped with `esc`. With `reason=False`, the raw reason stays in the failure file while
-    the comment retains the outcome and next step."""
+    the comment retains the outcome and next step. A usable failure profile adds its profile/job owner line;
+    an absent or unusable profile retains the unowned legacy output."""
     f = failure if isinstance(failure, dict) else {}
     outcome = f.get('outcome')
     if _manual_tier_step(f, step):
@@ -5887,8 +6251,10 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
         step = PR_HEADER_STEP
     out = [PR_COMMENT_MARKER] + ([header, ''] if header else []) + ['## %s' % PR_REFUSED_HEADING, '',
            'This run was refused (%s)%s' % (word, ': ' + esc(f.get('reason')) if reason else '.'), '',
-           '**Next step:** %s' % esc(step or next_step(f), CAP if step else step_cap(f)), '']
+           '**Next step:** %s' % esc(step or next_step(f), step_cap(f, explicit=bool(step), text=step or next_step(f))), '']
     detail = f.get('detail') if isinstance(f.get('detail'), dict) else {}
+    if identity_required_step(detail) is not None:
+        out += _fault_lines(detail)
     block = f.get('upgrade') if 'upgrade' in f else detail.get('upgrade')  # malformed top-level block wins (#4577)
     upgrade = _comment_upgrade_markdown({'upgrade': block})
     closing = pr_verify_more(f)
@@ -5920,7 +6286,7 @@ def pr_refusal_markdown(failure, requirements_text=None, step=None, commit=None,
         closing = ['', case] + closing
     if header:                                     # issue #6045: the header holds the one link; no closing upsell
         closing = []
-    return '\n'.join(out + closing) + '\n'
+    return pr_with_owner('\n'.join(out + closing) + '\n', pr_comment_owner(f.get('profile'), job))
 
 # ---------- readable-report-001 (the Director, 18 Oct 2026): the report leads the pull request comment ----------
 # "the readable ... comments written by agents on the PR to tell humans on the PR what it found, what's recorded". A
