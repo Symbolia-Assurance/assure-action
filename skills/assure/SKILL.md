@@ -1,6 +1,6 @@
 ---
 name: assure
-description: Set up Assure on GitHub: every pull request checked. One workflow, no key to store.
+description: "Set up Assure on GitHub: every pull request checked. One workflow, no key to store."
 ---
 
 # Assure
