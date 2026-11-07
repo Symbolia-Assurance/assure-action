@@ -728,12 +728,14 @@ COVERAGE_GUIDE = 'skills/assure/references/coverage.md'
 COVERAGE_COLLECTOR_KINDS = frozenset({'rule_withheld', 'setting_withheld'})
 # The python-auth reader's refusal classes that name a code shape it does not read yet (the checker's REFUSAL_CLASSES
 # less the ones whose fix is the customer's: representation, declaration_invalid, undeclared_app_object, the
-# definition and shadowing faults, bound, parser_unavailable and parse_error).
+# definition and shadowing faults, bound, parser_unavailable and parse_error, and #4373 library_version_unresolved: a
+# declared guard library's version that its lock or the runner's LIBRARY-VERSIONS.json does not read, a fact the
+# customer corrects at the lock or the declaration).
 COVERAGE_REFUSAL_KINDS = frozenset({
     'dynamic_registration', 'unknown_registration_form', 'unknown_guard_form', 'guard_shape', 'reflection_primitive',
     'unattributed_credential_write', 'unrecognised_credential_op', 'unresolved_call', 'call_depth',
     'app_object_escape', 'attribute_store', 'unsupported_server_idiom', 'credential_kind_unsupported',
-    'language_unsupported', 'conditional_registration', 'library_version_unresolved', 'outside_view'})
+    'language_unsupported', 'conditional_registration', 'outside_view'})
 # Issue #5069: `representation` is not one: its owner is the customer's agent (CLASS_OWNERS), whose fix is a faithful
 # input (its row's own reason), so it keeps its own next step and names no proposal.
 COVERAGE_CLASSES = ('missing_method', 'scope_mismatch', 'not_observable_at_pin', 'missing_baseline')
@@ -1551,12 +1553,19 @@ def decide(envelope):
 # action 'collect the facts <id> reads'; its line says so instead of reading as a collected locator.
 ACTION_SOURCES = ('row', 'class_default', 'locator_fallback')
 LOCATOR_FALLBACK_WORDS = 'no locator on the row; action from the profile default'
+# Issue #3264: the declared profile's sources a server's data directory holds (catalog views such as pg_settings or
+# pg_subscription are not among them); serve/envelope.py gives a not-observed entry whose source_not_visible gap names
+# one, in place of the locator fallback, DATA_DIR_ACTION with the files it names
+DATA_DIR_SOURCES = ('pg_hba.conf', 'pg_ident.conf', 'postgresql.conf', 'postgresql.conf/includes',
+                    'postgresql.auto.conf', 'PG_VERSION')
+DATA_DIR_ACTION = "pass the server's configuration files with --data-dir"
 
 
 def action_source(entry):
     """Where a not-established entry's action came from: 'locator_fallback' when a not-observed entry's action is the
     envelope's locator fallback ('collect the facts <id> reads', serve/envelope.py `_locator`); 'row' when a
-    not-observed entry's action names a locator the reading itself gave (its gap, premise locator or raw/ path);
+    not-observed entry's action names a locator the reading itself gave (its gap, premise locator or raw/ path) or,
+    issue #3264, the data-directory files its source_not_visible gap names (DATA_DIR_ACTION);
     'class_default' for every other class, whose action is the fixed text of CLASS_ACTIONS / representation_action."""
     e = entry if isinstance(entry, dict) else {}
     if e.get('reason_class') != 'not_observed' or profile_bound(e):      # issue #3222: the bound is fixed text
@@ -1589,6 +1598,8 @@ def reason_words(entry, envelope=None):
         if action_source(entry) == 'locator_fallback':
             return '%s: %s' % (words, LOCATOR_FALLBACK_WORDS)
         action = str(entry.get('action') or '')
+        if action.startswith(DATA_DIR_ACTION + ' (not visible: '):      # issue #3264: the files the action names
+            return '%s: %s' % (words, action[len(DATA_DIR_ACTION + ' (not visible: '):].rstrip(')'))
         return '%s: %s' % (words, action[len('collect '):] if action.startswith('collect ') else 'unknown')
     if cls == 'not_observable_at_pin':           # the pin the registry carries, or that it names none
         pin = ((envelope or {}).get('bias') or {}).get('collector_pin')

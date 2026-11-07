@@ -76,7 +76,7 @@
       "description": "The size pre-check (QUICKSTART-API.md, section 7): the byte count of the encoded body you are about to send to POST /v1/checks or POST /v1/declaration-proposal. Over your plan's limit the answer is the oversize_input refusal (413) that body would get, before any of it is sent; within it, the listing."
      }
     ],
-    "description": "The served profiles, each with its input allow-list, byte caps and fail_on words, plus the global limits, the engine that answers, the planned profiles not served and the route table (QUICKSTART-API.md, section 6, the GET /v1/profiles row). Free.",
+    "description": "The profiles served to your account, each with its input allow-list, byte caps and fail_on words, plus the global limits, the engine that answers, the planned profiles not served and the route table (QUICKSTART-API.md, section 6, the GET /v1/profiles row). Free.",
     "responses": {
      "200": {
       "description": "The profile listing",

@@ -18,16 +18,19 @@ it can check that declaration. No checker code is copied into the public Action.
 Standard library, serve.outcomes and the caller's action.client.Client only. The child processes are git
 with an argument list: read-only reads of the checkout, and for the proposal `fetch`, `hash-object -w`,
 `read-tree`/`update-index`/`write-tree` on a private index, `commit-tree` and `push` of that one commit to
-`assure/declaration-proposal` (and its deletion when the pull request cannot be opened). The work tree and the index are
-never touched. execution_authorized false; hardware_authorized false; industrial_release_authorized false;
-release_allowed false; physical_validation false; simulation true; self_approved false."""
+`assure/declaration-proposal` (and its deletion when the pull request cannot be opened, but on a 403: issue #7371).
+The work tree and the index are never touched. execution_authorized false; hardware_authorized false;
+industrial_release_authorized false; release_allowed false; physical_validation false; simulation true;
+self_approved false."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import subprocess
 import unicodedata
+import warnings
 from pathlib import Path
 from urllib.parse import quote
 
@@ -249,14 +252,49 @@ STDLIB_REASON = ('this repository serves HTTP with the standard library (http.se
                  'file: https://github.com/Symbolia-Assurance/assure-action/blob/main/docs/ADAPTER-BRIDGE.md')
 
 
+#: issue #7460: a file that imports the framework and builds its application object (Django builds none: a URLconf or
+#: the WSGI/ASGI entry stands for it)
+_BUILT = {b'fastapi': re.compile(rb'\b(?:FastAPI|APIRouter)[ \t]*\('),
+          b'flask': re.compile(rb'\b(?:Flask|Blueprint)[ \t]*\('),
+          b'django': re.compile(rb'(?m)^[ \t]*urlpatterns\b|\bget_(?:wsgi|asgi)_application[ \t]*\(')}
+
+
+def _quoted_lines(data):
+    """Issue #7459: the line numbers inside a string literal that spans lines (a docstring quoting an import line,
+    say), which import nothing; None when Python cannot parse the bytes or a lone CR makes its line numbers differ
+    from the newline count (every line is then read as on main). Compile warnings are not written to stderr."""
+    if re.search(rb'\r(?!\n)', data):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tree = ast.parse(data)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+    return {line for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))
+            for line in range(node.lineno + 1, node.end_lineno + 1)}
+
+
+def _imports(data):
+    """The web frameworks `_IMPORT` finds in `data`, leaving out the lines `_quoted_lines` places in a string."""
+    quoted = _quoted_lines(data) or ()
+    return {m.group(1) for m in _IMPORT.finditer(data) if data.count(b'\n', 0, m.start()) + 1 not in quoted}
+
+
 def stack_of(files):
     """Issue #3376: the identity stack the repository's Python files import: python/fastapi or python/django when
     that is the one web framework they import, STACK (main's reading) when they import Flask, more than one framework
-    or none. Issue #4590: STDLIB_STACK when they import no web framework and import http.server."""
-    py = [bytes(d) for n, d in files.items() if str(n).endswith('.py') and isinstance(d, (bytes, bytearray))]
-    seen = {m for d in py for m in _IMPORT.findall(d)}
-    if not seen and any(_HTTP_SERVER.search(d) for d in py):
+    or none. Issue #4590: STDLIB_STACK when they import no web framework and import http.server. Issue #7460: when they
+    import more than one framework and FastAPI is the only one a file both imports and builds an app or router of
+    (`_BUILT`), python/fastapi; every other mix keeps STACK. Issue #7459: a line inside a multi-line string literal
+    imports no web framework (`_imports`), for both of those readings; the http.server read is main's."""
+    py = [(d, _imports(d)) for d in (bytes(d) for n, d in files.items()
+                                     if str(n).endswith('.py') and isinstance(d, (bytes, bytearray)))]
+    seen = {m for _, found in py for m in found}
+    if not seen and any(_HTTP_SERVER.search(d) for d, _ in py):
         return STDLIB_STACK
+    if len(seen) > 1 and {m for d, found in py for m in found if _BUILT[m].search(d)} == {b'fastapi'}:
+        return FRAMEWORK_STACKS[b'fastapi']   # issue #7460
     return FRAMEWORK_STACKS.get(seen.pop(), STACK) if len(seen) == 1 else STACK
 
 
@@ -510,6 +548,22 @@ def pull_request_body(record, rel, source='this repository', kept=(), lead=None,
 
 
 PUSH_REFUSED = 'the push to'      # issue #2934: the observed profile reads a refused push as `contents: read`
+# issue #7371: a 403 from POST /pulls once the branch is on origin; `contents: write` is never the cause named there
+_KEPT = 'the pull request could not be opened (HTTP 403); the branch %s is on origin and was kept' % PROPOSAL_BRANCH
+_SETTING = "'Allow GitHub Actions to create and approve pull requests'"
+SETTING_REFUSED = '%s; turn on the repository (or organisation) setting %s, then re-run the job' % (_KEPT, _SETTING)
+RATE_LIMITED = '%s; GitHub answered with a rate limit, so re-run the job later' % _KEPT
+TOKEN_REFUSED = ('%s; give the job `pull-requests: write` under `permissions:`, or turn on the repository setting %s'
+                 % (_KEPT, _SETTING))
+
+
+def _refused_reason(doc):
+    """Issue #7371: the one remaining cause GitHub's 403 reply names (any reply, malformed ones included)."""
+    message = doc.get('message') if isinstance(doc, dict) else None
+    message = message.lower() if isinstance(message, str) else ''
+    if 'not permitted to create or approve pull requests' in message:
+        return SETTING_REFUSED
+    return RATE_LIMITED if 'rate limit' in message else TOKEN_REFUSED
 
 
 def _missing(why):
@@ -535,8 +589,10 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
     PROPOSAL_BRANCH, and a pull request from it into the base branch (the pull request's base, else the repository's
     default branch), or, when one is open already, that pull request's branch pushed and its body updated. No branch
     the customer works on is ever written. Returns {branch, commit, number, url, created}; raises Refusal naming the
-    reason (the permission lines when the token, the push or the pull request is refused) and leaves no proposal
-    branch it created behind. `github` is action.client.GitHub, or None when no workflow token reached the Action.
+    reason (the permission lines when the token, the push or the pull request is refused) and, but on a 403 from POST
+    /pulls, leaves no proposal branch it created behind. Issue #7371: that 403 keeps the branch and raises the one
+    remaining cause GitHub's reply names, with `compare` (compare_link) in its detail. `github` is action.client.GitHub,
+    or None when no workflow token reached the Action.
     Issue #4395: `starter` (bytes) is also written at STARTER_PATH in the same commit when the base branch's tip has no
     file there; when the proposal branch already carries that file, its bytes are kept (the customer's edits on the
     branch); the result's `starter` says whether the proposal carries it. Issue #5547: a companion at `rel`, or at
@@ -631,6 +687,8 @@ def propose(top, rel, data, record, env, scratch, github, title=TITLE, source='t
                 'created': False, 'starter': starter is not None}
     status, doc = github.call('POST', '/repos/%s/pulls' % repo,
                               {'title': title, 'head': branch, 'base': base, 'body': body})
+    if status == 403:                               # issue #7371: the branch stays for the customer to open by hand
+        raise Refusal('bad_input', _refused_reason(doc), compare=compare_link(env, base, branch))
     if status != 201 or not isinstance(doc, dict) or not isinstance(doc.get('number'), int):
         if existing is None:                        # leave no branch of ours without its pull request
             _git(top, env, 'push', '--quiet', 'origin', ':refs/heads/%s' % branch)
@@ -653,6 +711,23 @@ def commit_link(env, branch, rel, data):
     url = '%s/%s/new/%s?filename=%s&value=%s' % (server, repo, quote(branch, safe='/'), quote(rel, safe='/'),
                                                  quote(bytes(data), safe=''))
     return url if len(url) <= COMMIT_URL_MAX else None
+
+
+def compare_link(env, base, branch):
+    """Issue #7371: GitHub's compare page opening a pull request from `branch` into `base` (the way left when POST
+    /pulls is refused with the branch kept), or None when the repository, a branch or the server is not valid, as
+    commit_link."""
+    repo = str(env.get('GITHUB_REPOSITORY') or '').strip()
+    server = str(env.get('GITHUB_SERVER_URL') or '').strip().rstrip('/') or 'https://github.com'
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not base or not branch or \
+            not re.fullmatch(r'https://[^\s/?#]+', server):
+        return None
+    return '%s/%s/compare/%s...%s?expand=1' % (server, repo, quote(base, safe='/'), quote(branch, safe='/'))
+
+
+def compare_markdown(url):
+    """Issue #7371: the summary's line for the compare link."""
+    return '[Open the pull request](%s)' % url
 
 
 def commit_markdown(env, branch, rel, data):

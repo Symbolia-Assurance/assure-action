@@ -186,7 +186,7 @@ This workflow runs on every pull request, on every push to `main`, when you star
           api-key: ${{ secrets.ASSURE_API_KEY }}
 ```
 
-**A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). Leave out `data-dir` and `config-dirs`: the runner cannot read the container's files, so each configuration file reads as a recorded gap (section 6, option c). The two grants on `pg_hba_file_rules` in the role step let the collector read the server's own parse of pg_hba.conf without `data-dir`, so the host authentication rules are still checked.
+**A PostgreSQL your CI already starts.** When your workflow runs PostgreSQL as a service container and loads your schema, check that server: add the same `services:` block and schema step to this job, then create the collection role (section 2) in a step before the check, with a password that exists only in CI. Give the connection inline, for example `connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>`. That password guards a database that lives only for the length of the job, so it is not a secret; for any other database, pass `connection` from a secret (the inputs table). The runner cannot read the container's files, so copy the server's configuration files out of it in a step before the check and pass the folder as `data-dir`, for example `mkdir pgdata && d=$(docker exec ${{ job.services.postgres.id }} printenv PGDATA) && for f in postgresql.conf postgresql.auto.conf pg_hba.conf pg_ident.conf postmaster.opts PG_VERSION; do docker cp ${{ job.services.postgres.id }}:$d/$f pgdata/; done` (`postgres` is the service's name; the image's `PGDATA` is its data directory) and `data-dir: pgdata` in the step's `with:`. Without them the readings that need those files read as recorded gaps that name them (section 6, option c). The two grants on `pg_hba_file_rules` in the role step let the collector read the server's own parse of pg_hba.conf without `data-dir`, so the host authentication rules are still checked.
 
 This workflow uses the intent-free profile, which needs no declaration. To check against a declaration you write, use `postgresql-declared-model` with collected files (references/postgres-local.md, section 9).
 
@@ -248,6 +248,9 @@ jobs:
       - name: Create the collection role
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE assure_collector LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '<the CI-only password>';" -c "GRANT pg_read_all_settings, pg_read_all_stats TO assure_collector;" -c "GRANT SELECT ON pg_catalog.pg_hba_file_rules TO assure_collector;" -c "GRANT EXECUTE ON FUNCTION pg_catalog.pg_hba_file_rules() TO assure_collector;"
 
+      - name: Copy the server's configuration files
+        run: mkdir pgdata && d=$(docker exec ${{ job.services.postgres.id }} printenv PGDATA) && for f in postgresql.conf postgresql.auto.conf pg_hba.conf pg_ident.conf postmaster.opts PG_VERSION; do docker cp ${{ job.services.postgres.id }}:$d/$f pgdata/; done
+
       - name: Assure check
         id: assure
         uses: Symbolia-Assurance/assure-action@v0
@@ -256,6 +259,7 @@ jobs:
           connection: host=localhost port=5432 dbname=postgres user=assure_collector password=<the CI-only password>
           collection-role: assure_collector
           collection-privileges: pg_read_all_settings,pg_read_all_stats
+          data-dir: pgdata
           fail-on: fails
           output: assure-verdict.json
 

@@ -1874,18 +1874,21 @@ def redact_plain_text(text, record=None):                                       
 
 CONFIG_LIST_KEYS = ('setconfig', 'proconfig', 'useconfig', 'rolconfig')
 CONNINFO_FIELDS = ('subconninfo',)
-# RF-28 (c): pg_proc.proconfig 'search_path=<list>' is the fact the definer-function obligations read. Its value is
+# RF-28 (c): pg_proc.proconfig 'search_path=<list>' is the fact the definer-function obligations read, and
+# pg_db_role_setting.setconfig 'search_path=<list>' the session path they read for a login (issue #7154). Its value is
 # an identifier list (schema names, quoted or not), so it is retained byte for byte when it is at most
 # SEARCH_PATH_MAX characters, holds no control, line-separator or undecodable character, and shows no secret pattern
 # (has_secret: a URI with userinfo, a valued secret keyword, a passphrase command). A quoted identifier can hold any
 # printable text, so a value that shows a secret pattern takes the existing rule and is withheld and noted. Only the
-# exact spelling 'search_path=' at the start of a proconfig entry takes this rule; every other entry, and search_path
-# in setconfig, useconfig or rolconfig, keeps the existing rule.
+# exact spelling 'search_path=' at the start of a proconfig or pg_db_role_setting setconfig entry takes this rule;
+# every other entry, and search_path in useconfig or rolconfig, keeps the existing rule.
 SEARCH_PATH_MAX = 2048                                                                    # RF-28 (c)
+SEARCH_PATH_LISTS = ('.proconfig', '.pg_db_role_setting[].setconfig')                      # RF-28 (c), #7154
 
 
 def _function_search_path(item):
-    """RF-28 (c): True for a proconfig entry 'search_path=<value>' that is retained byte for byte."""
+    """RF-28 (c): True for a proconfig or pg_db_role_setting setconfig entry 'search_path=<value>' that is retained
+    byte for byte."""
     if not isinstance(item, str) or not item.startswith('search_path='):
         return False
     value = item[len('search_path='):]
@@ -1983,7 +1986,7 @@ def redact_tree(value, path, fields, config=False):
 def _redact_list(value, path, fields, config=False):
     out = []
     for item in value:
-        if config and path.endswith('.proconfig') and _function_search_path(item):     # RF-28 (c)
+        if config and path.endswith(SEARCH_PATH_LISTS) and _function_search_path(item):  # RF-28 (c), #7154
             out.append(item)                                                         # RF-28 (c)
             continue                                                                 # RF-28 (c)
         if isinstance(item, str) and re.match(r'(?i)(%s)\s*=' % '|'.join(HBA_SECRET_OPTIONS), item):
