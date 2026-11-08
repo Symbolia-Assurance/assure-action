@@ -314,6 +314,37 @@
       "type": "array",
       "uniqueItems": true
     },
+    "jsonb_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "schema_directory": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "schemas": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schemas",
+        "schema_directory",
+        "bindings"
+      ],
+      "type": "object"
+    },
     "key_file_mode": {
       "pattern": "^0?[0-7]{3}$",
       "type": "string"

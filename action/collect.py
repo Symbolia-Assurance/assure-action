@@ -107,6 +107,7 @@ if __name__ == '__main__' and sys.argv[1:2] == ['--psql-shim']:
     sys.exit(_psql_shim(sys.argv[2:]))
 
 import hashlib  # noqa: E402
+import json  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
@@ -126,17 +127,18 @@ from serve import FLAGS  # noqa: E402
 from serve.bundle import LIMITS, from_directory, parse_json  # noqa: E402
 from serve.outcomes import Refusal  # noqa: E402
 
-FROZEN_COLLECTOR_SHA256 = '50e4eb2ecb9f9a6d0e722ad75ab4a911397344a62846f117c93305795dd7900c'      # rf33 (candidate)
+FROZEN_COLLECTOR_SHA256 = '2831fd0c6163a954dc05bae2d4b29d54617c912c091774779d19bcb344c80b7a'      # rf34 (candidate)
+RF33_COLLECTOR_SHA256 = '50e4eb2ecb9f9a6d0e722ad75ab4a911397344a62846f117c93305795dd7900c'
 RF32_COLLECTOR_SHA256 = '0d181c324fc4638558a1c44f91dde82683d804559642650113eb9d556e310e75'        # the pin's `previous`
 RF31_COLLECTOR_SHA256 = '64e2b70068653eaf33ac36b858c3362efb536d0678db5c2ba993e5d7c8b55c39'
 RF28_COLLECTOR_SHA256 = '5fb5ca4316433d38b42c0e834f7b3617bd00644e113bf45dfaf3320c1b5b4bd2'
 RF19_COLLECTOR_SHA256 = '0568f68ee7ef750441b04cd55f4c0a52f9b910599975377a3a123e38d53157c6'
-RF19, RF28, RF31, RF32, RF33 = 'rf19', 'rf28', 'rf31', 'rf32', 'rf33'
-GENERATIONS = (RF19, RF28, RF31, RF32, RF33)
+RF19, RF28, RF31, RF32, RF33, RF34 = 'rf19', 'rf28', 'rf31', 'rf32', 'rf33', 'rf34'
+GENERATIONS = (RF19, RF28, RF31, RF32, RF33, RF34)
 # The generations whose collector takes --login-user and accepts only the two least-privilege roles.
-LEAST_PRIVILEGE_GENERATIONS = frozenset({RF28, RF31, RF32, RF33})
+LEAST_PRIVILEGE_GENERATIONS = frozenset({RF28, RF31, RF32, RF33, RF34})
 # The generation each collector digest is (refutation 009, G1): the pin's `generation` must name it.
-COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF33, RF32_COLLECTOR_SHA256: RF32, RF31_COLLECTOR_SHA256: RF31,
+COLLECTOR_GENERATIONS = {FROZEN_COLLECTOR_SHA256: RF34, RF33_COLLECTOR_SHA256: RF33, RF32_COLLECTOR_SHA256: RF32, RF31_COLLECTOR_SHA256: RF31,
                          RF28_COLLECTOR_SHA256: RF28, RF19_COLLECTOR_SHA256: RF19}
 COLLECTOR_DIR = Path(__file__).resolve().parent / 'collector'
 COLLECTOR = 'collect_pg.py'
@@ -154,7 +156,7 @@ DEFAULT_PRIVILEGES = 'pg_read_all_settings,pg_read_all_stats'
 READ_ONLY_ROLES = ('pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables', 'pg_monitor')   # rf19
 LEAST_PRIVILEGE_ROLES = ('pg_read_all_settings', 'pg_read_all_stats')                                     # rf28 to rf33
 ROLES_BY_GENERATION = {RF19: READ_ONLY_ROLES, RF28: LEAST_PRIVILEGE_ROLES, RF31: LEAST_PRIVILEGE_ROLES,
-                       RF32: LEAST_PRIVILEGE_ROLES, RF33: LEAST_PRIVILEGE_ROLES}
+                       RF32: LEAST_PRIVILEGE_ROLES, RF33: LEAST_PRIVILEGE_ROLES, RF34: LEAST_PRIVILEGE_ROLES}
 # A collector refusal with a fixed next step (no customer text in it).
 NEXT_STEPS = {'collection_role_not_least_privilege': 'grant the collection role only pg_read_all_settings and '
                                                      'pg_read_all_stats, and revoke the broader role'}
@@ -455,7 +457,7 @@ def pin_generation(collector_dir=None):
     try:
         return verify_collector(collector_dir, frozen_sha256=None)['generation']
     except Refusal:
-        return RF33
+        return RF34
 
 
 def verify_collector(collector_dir=None, frozen_sha256=FROZEN_COLLECTOR_SHA256):
@@ -525,7 +527,7 @@ def login_args(conn, role):
     return [] if user is None else ['--login-user', user]
 
 
-def check_privileges(text, generation=RF33):
+def check_privileges(text, generation=RF34):
     """The `collection-privileges` input for the collector `generation`; `bad_input` for a repeat or a name that
     collector does not accept."""
     roles = ROLES_BY_GENERATION.get(generation, LEAST_PRIVILEGE_ROLES)
@@ -676,12 +678,14 @@ def _refused(out, stdout_text, conn, rc, role=None):
     return Refusal('collector_refused', text, collector_exit=rc, collector_refusal=kind)
 
 
-def _gather(out, profile, limits, declare=None, observe=None):
+def _gather(out, profile, limits, declare=None, observe=None, inventory=None):
     """The collector's output as the raw/ bundle: out/raw/* plus the sidecar and timing, moved into raw/. With
     `declare` (issue #2435), `declare(out/raw)` returns the declaration's bytes (or None for none), written as
     raw/declaration.json before the bundle limits and the one withholding pass, so its `declared_predicate` literals
     are numbered with the snapshot's. With `observe` (issue #2934), `observe(out/raw)` reads the collector's own output
-    before the withholding pass and writes nothing."""
+    before the withholding pass and writes nothing. With `inventory` (issue #6339; `collect` passes it only under the
+    rf34 opt-in it gave the collector --jsonb-schema for), `inventory(out/raw, directory)` writes the schema inventory
+    for the written declaration's `jsonb_schema.schema_directory`, in the same withholding pass."""
     out = Path(out)
     try:
         st = os.lstat(out)
@@ -712,14 +716,22 @@ def _gather(out, profile, limits, declare=None, observe=None):
             fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
             with os.fdopen(fd, 'wb') as f:
                 f.write(bytes(data))
+            if inventory is not None:
+                try:
+                    schema_directory = json.loads(data).get('jsonb_schema', {}).get('schema_directory')
+                except (ValueError, AttributeError):
+                    schema_directory = None
+                if schema_directory is not None:
+                    inventory(out / 'raw', schema_directory)  # no inventory is a typed not-established reading
     return withhold.apply(from_directory(out, profile, limits), profile)   # before any check, body or upload sees the bytes
 
 
 def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_roots=(), collector_dir=None,
             frozen_sha256=FROZEN_COLLECTOR_SHA256, psql='psql', path=None, timeout=DEFAULT_TIMEOUT, python=None,
-            limits=LIMITS, declare=None, observe=None):
+            limits=LIMITS, declare=None, observe=None, inventory=None):
     """Verify and run the collector into `scratch`; return the bundle (`bundle.Collected`). Every fault is a Refusal.
-    `declare` (issue #2435) and `observe` (issue #2934) are `_gather`'s."""
+    `declare` (issue #2435), `observe` (issue #2934) and `inventory` (issue #6339) are `_gather`'s; `inventory` only
+    when the collector was given --jsonb-schema (rf34, postgresql-declared-model, `declare.jsonb_schema_requested`)."""
     d = Path(collector_dir) if collector_dir is not None else COLLECTOR_DIR
     generation = verify_collector(d, frozen_sha256)['generation']
     env = child_env(conn, path=path)
@@ -743,6 +755,10 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
     for root in extra_roots:                        # config-dirs: each one argument item, never through a shell
         argv += ['--extra-root', str(root)]
     argv += login
+    jsonb = (generation == RF34 and getattr(profile, 'id', None) == 'postgresql-declared-model'
+             and getattr(declare, 'jsonb_schema_requested', False) is True)
+    if jsonb:                                       # issue #6339: the opt-in gates the flag and the inventory alike
+        argv.append('--jsonb-schema')
     with open(stdout_p, 'wb') as so, open(stderr_p, 'wb') as se:
         proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=so, stderr=se,
                                 cwd=str(scratch), start_new_session=True, close_fds=True)
@@ -763,7 +779,7 @@ def collect(conn, *, role, privileges, profile, scratch, data_dir=None, extra_ro
                 proc.kill()
                 proc.wait()
     if rc in (0, 1):
-        return _gather(out, profile, limits, declare, observe)
+        return _gather(out, profile, limits, declare, observe, inventory if jsonb else None)
     if rc == 3:
         raise _refused(out, _read_bounded(stdout_p), conn, rc, role)
     printed = _refusal_doc(scratch / 'no-such-output', _read_bounded(stdout_p)).get('refusal')

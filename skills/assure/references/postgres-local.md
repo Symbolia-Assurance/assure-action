@@ -79,6 +79,7 @@ The refusals name the reason in their `type`: for example `collection_role_super
 | `--psql` | The `psql` command to run, when it is not `psql` on the path. |
 | `--role-created-for-run` | `yes` or `no`: whether you created the role for this run. The collector records your answer in `COLLECTION-SIDECAR.json`; left out, it records that you did not say. The collector itself creates, alters and grants nothing. |
 | `--login-user` | The login name, when a connection pooler's login name differs from the role. Left out, it is `--role`. |
+| `--jsonb-schema` | Also read the stored jsonb columns and the schema CHECK constraints on them, for the jsonb schema check. Give it only when your PostgreSQL declaration names `jsonb_schema`. Left out, that query does not run and the sidecar records it as `not_observed` (`not_requested`). Which CHECK text is sent, and which is withheld, is in DATA.md. |
 
 The collector logs in as `--login-user`, or as `--role` when that is not given. The collector never asks for a password: give it in `PGPASSWORD`, or in a password file `psql` reads.
 

@@ -118,6 +118,8 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 | `output` | `assure-verdict.json` | Where to write the verdict file. |
 | `python` | `python3` | The Python 3.14 interpreter to use. In `mode: local` the Action provisions Python 3.14 with `actions/setup-python` (your job's `PATH` is unchanged) and runs the check on it; when 3.14 cannot be provisioned, the run stops with exit 2 (`bad_input`) naming the Python it found. |
 
+An agent without an API key can post a feedback note too, on `POST /v1/feedback/keyless` with no key header.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -125,7 +127,7 @@ The [full quickstart](docs/QUICKSTART-ACTION.md) covers the collection role, col
 | 0 | Green: nothing disproven within the bounds the first line states; or red with exit 0 because your `fail-on` leaves the disproven status out (or is `never`, which still exits 1 on a prove-class obligation that is not proven), and the first line says so. |
 | 1 | Red: something is disproven and your `fail-on` stops on it, a prove-class obligation is not proven, a status you chose to stop on was read, or under strict (`fail-on: unresolved-security`) an obligation marked `security: true` is unresolved. |
 | 2 | Red: bad input, or an API key that is missing, unknown or revoked. Fix the inputs, the files or the key. With no key, the job needs `id-token: write` under `permissions:`. |
-| 3 | Yellow: nothing could be read at all, or a typed outcome stopped the check. The failure file holds the reason and what to do. |
+| 3 | Yellow: nothing could be read at all, or a typed outcome stopped the check. The failure file holds the reason and what to do. Also `mode: lint` on a pull request: no check ran there; remove `mode: lint` from that workflow. |
 
 The colour is green, red or yellow. A `fails` reading on a read machine is red whatever `fail-on` says. A status you name in `fail-on` also turns the reading red and sets the exit. `fail-on: unresolved-security` is the strict preset; it is never the default, and while a profile marks no obligation it changes nothing ("strict: no obligations marked").
 
@@ -151,7 +153,7 @@ Three lines the Action prints to the job log, with their placeholders, so a work
 | Line | Format | Placeholders |
 |---|---|---|
 | Names not read (`NOTICE_LINE`) | `::notice title=Assure::<count> name(s) not read by profile <profile>: <names>` | `<count>` is how many collected names the profile does not read; `<profile>` is your `profile` input; `<names>` is the first 20 of them, comma separated, then ` and N more` when there are more. Printed only when at least one name was not read. |
-| Lint summary (`LINT_LINE`) | `Assure: lint: <reading>; <findings> finding(s); nothing was charged; policy exit <exit>; <output>` | `<reading>` is `ready for a check` or `fix these before a check`; `<findings>` is the number of findings; `<exit>` is 0 or 2; `<output>` is the `output` path the lint record was written to. The last line of a `mode: lint` run. |
+| Lint summary (`LINT_LINE`) | `Assure: lint: <reading>; <findings> finding(s); nothing was charged; policy exit <exit>; <output>` | `<reading>` is `ready for a check` or `fix these before a check`; `<findings>` is the number of findings; `<exit>` is 0 or 2, or 3 on a pull request; `<output>` is the `output` path the lint record was written to. The last line of a `mode: lint` run. |
 | Withheld (`WITHHELD_LINE`) | `Assure: <withheld>` | `<withheld>` is the sentence of counts starting `Withheld in the runner before anything was sent:`, followed by one more sentence starting ` Also:` when expressions, unparseable lines or not-observed lines were also withheld; the same text as the job summary's "Withheld in the runner" section. Printed before anything is sent. |
 
 The order each mode prints these lines in, as `entry.ORDER` in `action/entry.py` names them (`tests/serving/test_issue_1960_accept.py` pins it against a run in each mode). Each is printed only when its condition above holds; other lines, such as the masks, the annotations and the verdict line, can come before, between and after them.

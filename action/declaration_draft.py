@@ -32,6 +32,7 @@ import subprocess
 import unicodedata
 import warnings
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote
 
 from serve import FLAGS
@@ -259,60 +260,220 @@ _BUILT = {b'fastapi': re.compile(rb'\b(?:FastAPI|APIRouter)[ \t]*\('),
           b'django': re.compile(rb'(?m)^[ \t]*urlpatterns\b|\bget_(?:wsgi|asgi)_application[ \t]*\(')}
 
 
-def _quoted_lines(data):
-    """Issue #7459: the line numbers inside a string literal that spans lines (a docstring quoting an import line,
-    say), which import nothing; None when Python cannot parse the bytes or a lone CR makes its line numbers differ
-    from the newline count (every line is then read as on main). Compile warnings are not written to stderr."""
-    if re.search(rb'\r(?!\n)', data):
-        return None
+_STACK_OF = {b'flask': STACK, **FRAMEWORK_STACKS}
+STACKS = {k.decode('ascii'): v for k, v in _STACK_OF.items()}   # framework name -> the stack drafted for it
+
+#: issue #7595 (remodel 22774 M1): the calls that build each framework's application or its routes, read from the
+#: code by the names the file's imports bind (an alias, a module alias, a subclass), never from its text
+_BUILDERS = {'fastapi.FastAPI': 'fastapi', 'fastapi.APIRouter': 'fastapi', 'fastapi.applications.FastAPI': 'fastapi',
+             'fastapi.routing.APIRouter': 'fastapi', 'flask.Flask': 'flask', 'flask.Blueprint': 'flask',
+             'flask.app.Flask': 'flask', 'flask.blueprints.Blueprint': 'flask',
+             'django.core.wsgi.get_wsgi_application': 'django', 'django.core.asgi.get_asgi_application': 'django'}
+#: issue #7595: web frameworks Assure has no declaration proposer for; a repository whose only application is one of
+#: them is refused naming it, never drafted for a framework it merely imports
+_FOREIGN = {'starlette.applications.Starlette': 'starlette', 'starlette.Starlette': 'starlette', 'quart.Quart': 'quart',
+            'sanic.Sanic': 'sanic', 'litestar.Litestar': 'litestar', 'aiohttp.web.Application': 'aiohttp',
+            'falcon.App': 'falcon', 'falcon.API': 'falcon', 'falcon.asgi.App': 'falcon',
+            'tornado.web.Application': 'tornado', 'bottle.Bottle': 'bottle'}
+#: issue #7595: directories whose files are not the repository's own application (tests, vendored copies, virtual
+#: environments); test modules by name too
+_NOT_THE_APP = frozenset({'test', 'tests', 'testing', 'venv', '.venv', 'virtualenv', '.tox', 'site-packages',
+                          'dist-packages', 'node_modules', 'vendor', 'vendored', '_vendor', 'third_party',
+                          'third-party', 'thirdparty'})
+
+
+class Reading(NamedTuple):
+    """Issue #7574: what `framework_of` read. `stack` is None when the reading decides none; `frameworks` lists the
+    web frameworks imported (flask, fastapi, django); `sites` and `foreign` map each framework, Assure's or one it has
+    no proposer for, to the files that build its application or routes, in path order."""
+    stack: object
+    frameworks: list
+    sites: dict
+    foreign: dict
+
+
+def _the_apps_file(name):
+    parts = name.split('/')
+    return not (any(p in _NOT_THE_APP for p in parts[:-1]) or parts[-1] == 'conftest.py'
+                or parts[-1].startswith('test_') or parts[-1].endswith('_test.py'))
+
+
+def _read_file(data):
+    """(frameworks imported, frameworks built, foreign frameworks built, imports http.server) for one Python file,
+    from its syntax tree; from its text, main's reading, when Python cannot parse it. A line inside a string literal is
+    never an import (issue #7459's reading, by construction). Parsing writes no compile warning (issue #7459's
+    REFUTATION-r1 LOW 2)."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             tree = ast.parse(data)
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        seen = set(_IMPORT.findall(data))
+        return ({m.decode('ascii') for m in seen}, {m.decode('ascii') for m in seen if _BUILT[m].search(data)}, set(),
+                bool(_HTTP_SERVER.search(data)))
+    names, imported, http = {}, set(), False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                top = a.name.split('.')[0]
+                names[a.asname or top] = a.name if a.asname else top
+                imported.add(top)
+                http = http or a.name == 'http.server'
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for a in node.names:
+                names[a.asname or a.name] = node.module + '.' + a.name
+            imported.add(node.module.split('.')[0])
+            http = http or node.module == 'http.server'
+
+    def qualified(node):
+        if isinstance(node, ast.Name):
+            return names.get(node.id)
+        if isinstance(node, ast.Attribute):
+            base = qualified(node.value)
+            return base + '.' + node.attr if base else None
         return None
-    return {line for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))
-            for line in range(node.lineno + 1, node.end_lineno + 1)}
+
+    built, foreign = set(), set()
+
+    def builds(q):
+        if q in _BUILDERS:
+            built.add(_BUILDERS[q])
+        elif q in _FOREIGN:
+            foreign.add(_FOREIGN[q])
+        return q in _BUILDERS or q in _FOREIGN
+
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    while True:   # a subclass builds what its base builds (`class App(FastAPI)`), through subclasses of subclasses
+        found = [(c, q) for c in classes for q in map(qualified, c.bases) if q and names.get(c.name) != q and builds(q)]
+        if not found:
+            break
+        for c, q in found:
+            names[c.name] = q
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            builds(qualified(node.func))
+    if 'django' in imported and any(isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and any(
+            isinstance(t, ast.Name) and t.id == 'urlpatterns' for t in getattr(n, 'targets', None) or [n.target])
+            for n in tree.body):
+        built.add('django')
+    return imported & set(STACKS), built, foreign, http
 
 
-def _imports(data):
-    """The web frameworks `_IMPORT` finds in `data`, leaving out the lines `_quoted_lines` places in a string."""
-    quoted = _quoted_lines(data) or ()
-    return {m.group(1) for m in _IMPORT.finditer(data) if data.count(b'\n', 0, m.start()) + 1 not in quoted}
+def framework_of(files):
+    """Issue #7574: the Reading of the repository's Python files. The stack is:
+    - the one web framework imported (flask, fastapi or django), unless the files build an application of a framework
+      Assure has no proposer for and none of it (a Starlette app beside `from fastapi import Depends`: None);
+    - STDLIB_STACK when none is imported and http.server is (issue #4590);
+    - for more than one imported, the one built in strictly the most files (issue #7460's FastAPI-only rule is its
+      one-builder case; a Django project carrying a FastAPI or Flask service builds Django in most files);
+    - None when that does not decide (a tie, or several imported and none built), or nothing is imported.
+    Issue #7595: imports, application constructors and their subclasses are read from the code, with the names its
+    imports bind; files in test, vendored and virtual-environment directories, and test modules, are not read."""
+    imported, sites, foreign, http = set(), {}, {}, False
+    for name, data in sorted((str(n), bytes(d)) for n, d in files.items()
+                             if str(n).endswith('.py') and isinstance(d, (bytes, bytearray))):
+        if not _the_apps_file(name):
+            continue
+        i, b, f, h = _read_file(data)
+        imported |= i
+        http = http or h
+        for fw in sorted(b):
+            sites.setdefault(fw, []).append(name)
+        for fw in sorted(f):
+            foreign.setdefault(fw, []).append(name)
+    frameworks = sorted(imported)
+    if not frameworks:
+        return Reading(STDLIB_STACK if http and not foreign else None, frameworks, sites, foreign)
+    if not sites:
+        return Reading(STACKS[frameworks[0]] if len(frameworks) == 1 and not foreign else None, frameworks, sites,
+                       foreign)
+    counts = sorted(((len(v), k) for k, v in sites.items()), reverse=True)
+    if len(counts) == 1 or counts[0][0] > counts[1][0]:
+        return Reading(STACKS[counts[0][1]], frameworks, sites, foreign)
+    return Reading(None, frameworks, sites, foreign)
+
+
+def _files(names):
+    return ', '.join(names[:3]) + (' and %d more' % (len(names) - 3) if len(names) > 3 else '')
+
+
+def mixed_reason(frameworks, sites):
+    """Issue #7574: why a repository importing several frameworks names no stack Assure can draft for."""
+    built = '; '.join('%s builds an app in %s' % (k, _files(v)) for k, v in sorted(sites.items()))
+    return ('the repository\'s Python files import %s and Assure cannot tell which one serves the application%s: '
+            'send the stack to draft for (python/flask, python/fastapi or python/django)'
+            % (' and '.join(frameworks), ' (%s)' % built if built else ', and none of them builds one'))
+
+
+def undecided_reason(reading):
+    """Issue #7595: why a Reading with no stack and something seen is refused: an application of a framework Assure
+    has no proposer for, else `mixed_reason`."""
+    if not reading.foreign:
+        return mixed_reason(reading.frameworks, reading.sites)
+    built = '; '.join('a %s application in %s' % (k, _files(v)) for k, v in sorted(reading.foreign.items()))
+    imports = ('; they import %s but build no application with it' % ' and '.join(reading.frameworks)
+               if reading.frameworks and not reading.sites else '')
+    return ('the repository\'s Python files build %s, and Assure drafts declarations for Flask, FastAPI and Django '
+            'only%s. When one of those serves the application, name it: send "stack" (python/flask, python/fastapi or '
+            'python/django) to POST /v1/declaration-proposal, or write the declaration (schema '
+            'assure.identity.declaration/v1) and commit it at %s' % (built, imports, CHECKOUT_PATH))
 
 
 def stack_of(files):
-    """Issue #3376: the identity stack the repository's Python files import: python/fastapi or python/django when
-    that is the one web framework they import, STACK (main's reading) when they import Flask, more than one framework
-    or none. Issue #4590: STDLIB_STACK when they import no web framework and import http.server. Issue #7460: when they
-    import more than one framework and FastAPI is the only one a file both imports and builds an app or router of
-    (`_BUILT`), python/fastapi; every other mix keeps STACK. Issue #7459: a line inside a multi-line string literal
-    imports no web framework (`_imports`), for both of those readings; the http.server read is main's."""
-    py = [(d, _imports(d)) for d in (bytes(d) for n, d in files.items()
-                                     if str(n).endswith('.py') and isinstance(d, (bytes, bytearray)))]
-    seen = {m for _, found in py for m in found}
-    if not seen and any(_HTTP_SERVER.search(d) for d, _ in py):
-        return STDLIB_STACK
-    if len(seen) > 1 and {m for d, found in py for m in found if _BUILT[m].search(d)} == {b'fastapi'}:
-        return FRAMEWORK_STACKS[b'fastapi']   # issue #7460
-    return FRAMEWORK_STACKS.get(seen.pop(), STACK) if len(seen) == 1 else STACK
+    """Issue #3376: the identity stack the repository's Python files import (`framework_of`); STACK (main's reading)
+    when that names none, so the callers that read a stack for its pins keep their reading. Issue #4590: STDLIB_STACK
+    when they import no web framework and import http.server. Issue #7459: an import line quoted inside a string
+    literal is not an import (`_read_file` reads the syntax tree)."""
+    stack = framework_of(files).stack
+    return STACK if stack is None else stack
 
 
-def draft(files, repository_id=None, *, client, library_versions=None):
-    """The engine's proposal record for the repository's stack (`stack_of`); incomplete fields retain their unread
-    sources for review. A Flask repository is sent as on main (no `stack`). `library_versions`: the derived
-    raw/LIBRARY-VERSIONS.json bytes the collector sends (issue #3128), or None."""
-    stack = stack_of(files)
-    if stack == STDLIB_STACK:
+def gin_reason(modules):
+    """Issue #7474: why the first run of a go/gin repository whose Python files import no web framework drafts no
+    declaration; `modules` are the go.mod files that require gin (action/repository_manifest.py `gin_modules`)."""
+    return ('this repository is a go/gin application (%s %s github.com/gin-gonic/gin) and its Python files import no '
+            'web framework; python-auth-declared-model does not serve go/gin, so Assure drafts no Flask declaration '
+            'for it and reads no row from one' % (_files(list(modules)), 'requires' if len(modules) == 1 else 'require'))
+
+
+def express_reason(packages):
+    """Issue #7434: why the first run of a typescript/express repository whose Python files import no web framework
+    drafts no declaration; `packages` are the package.json files that depend on express (action/repository_manifest.py
+    `express_packages`)."""
+    return ('this repository is a typescript/express application (%s %s on express) and its Python files import no '
+            'web framework; python-auth-declared-model does not serve typescript/express yet, so Assure drafts no '
+            'Flask declaration for it and reads no row from one'
+            % (_files(list(packages)), 'depends' if len(packages) == 1 else 'depend'))
+
+
+def draft(files, repository_id=None, *, client, library_versions=None, gin_modules=None,
+          express_packages=None):
+    """The engine's proposal record for the repository's stack (`framework_of`); incomplete fields retain their unread
+    sources for review. A Flask repository is sent as on main (no `stack`); one whose files import no web framework
+    and build no application is main's Flask reading, sent as stack python/flask (issue #7595: the server refuses a
+    stackless body for it), unless `gin_modules` (a callable returning the checkout's go.mod files that require gin,
+    or None) names one: issue #7474, that go/gin application is refused bad_input, not sent as python/flask. Likewise
+    `express_packages` (a callable returning the checkout's package.json files that depend on express, or None): issue
+    #7434, that typescript/express application is refused bad_input. The Action's checkout first run passes both
+    (action/entry.py `declaration`). `library_versions`: the derived raw/LIBRARY-VERSIONS.json bytes the collector
+    sends (issue #3128), or None."""
+    reading = framework_of(files)
+    if reading.stack == STDLIB_STACK:
         raise Refusal('bad_input', STDLIB_REASON)
+    if reading.stack is None and (len(reading.frameworks) > 1 or reading.foreign):
+        raise Refusal('bad_input', undecided_reason(reading))   # issue #7574: never drafted Flask silently
+    if reading.stack is None and gin_modules is not None and (modules := gin_modules()):
+        raise Refusal('bad_input', gin_reason(modules))   # issue #7474: no check runs on a guessed Flask draft
+    if reading.stack is None and express_packages is not None and (packages := express_packages()):
+        raise Refusal('bad_input', express_reason(packages))   # issue #7434: no check runs on a guessed Flask draft
     args = {}
-    if stack != STACK:
-        args['stack'] = stack
+    if reading.stack is None:
+        args['stack'] = STACK
+    elif reading.stack != STACK:
+        args['stack'] = reading.stack
     if library_versions is not None:
         args['library_versions'] = library_versions
     return client.declaration_proposal(files, **args)
-
-
 def dumps(decl):
     return (json.dumps(decl, indent=2) + '\n').encode('utf-8')
 
@@ -548,6 +709,7 @@ def pull_request_body(record, rel, source='this repository', kept=(), lead=None,
 
 
 PUSH_REFUSED = 'the push to'      # issue #2934: the observed profile reads a refused push as `contents: read`
+NO_CHECKOUT = 'not proposed: this job has no checkout; add actions/checkout before the Assure step'   # #7373
 # issue #7371: a 403 from POST /pulls once the branch is on origin; `contents: write` is never the cause named there
 _KEPT = 'the pull request could not be opened (HTTP 403); the branch %s is on origin and was kept' % PROPOSAL_BRANCH
 _SETTING = "'Allow GitHub Actions to create and approve pull requests'"

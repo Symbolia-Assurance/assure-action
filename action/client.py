@@ -550,17 +550,18 @@ class Client:
             raise Refusal('api_error', 'the usage document answered %d' % status)
         return doc
 
-    def declaration_proposal(self, files, stack='python/flask', *, library_versions=None):
+    def declaration_proposal(self, files, stack=None, *, library_versions=None):
         """Draft with the server's identity proposer; never run a second reader in the Action. `library_versions`: the
         bytes of the derived raw/LIBRARY-VERSIONS.json (issue #3128), sent beside the repository files. Issue #3376:
-        `stack` names the identity stack to draft for (sent as the body's `stack` unless it is python/flask, main's
-        body); the answer must be that stack's record."""
+        `stack` names the identity stack to draft for, sent as the body's `stack`; None sends main's body (no `stack`,
+        drafted python/flask). Issue #7595: python/flask named is sent. The answer must be that stack's record."""
         sent = {'raw/repository/' + n: d for n, d in files.items()}
         if library_versions is not None:
             sent['raw/LIBRARY-VERSIONS.json'] = library_versions
         body = bundle.request_body('python-auth-declared-model', sent)
-        if stack != 'python/flask':
+        if stack is not None:   # issue #7595: a stack the caller names is sent, python/flask included
             body = json.dumps(dict(json.loads(body), stack=stack), separators=(',', ':')).encode('ascii')
+        stack = stack or 'python/flask'
         self.precheck(body)                       # #4907: the size first; nothing of the repository on a refusal
         status, doc = self._call('POST', '/v1/declaration-proposal', body, route='declaration_proposal')
         if (status != 200 or doc.get('schema') != 'assure.identity.declaration-proposal/v1'

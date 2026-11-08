@@ -349,6 +349,10 @@
      "profile": {
       "type": "string"
      },
+     "stack": {
+      "type": "string",
+      "description": "The stack the python-auth-declared-model reading read, for example python/flask, python/fastapi, python/django or python/stdlib-http; the summary names it (\"your FastAPI app\"). Present on that profile's verdicts written after #5280; absent on other profiles and on earlier stored verdicts."
+     },
      "outcome": {
       "type": "string"
      },

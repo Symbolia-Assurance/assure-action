@@ -158,6 +158,25 @@
       "purpose": "relations with ACL, owner and RLS flags; views and materialized views with their base tables (bare names) and their base relations ({schema, relname})"
     },
     {
+      "id": "jsonb_columns",
+      "key": "jsonb_columns",
+      "views": [
+        "pg_attribute",
+        "pg_type",
+        "pg_class",
+        "pg_namespace",
+        "pg_constraint",
+        "pg_depend",
+        "pg_proc",
+        "pg_extension"
+      ],
+      "min_major": 14,
+      "max_major": 18,
+      "target": "catalog_snapshot",
+      "sql": "SELECT coalesce(json_agg(json_build_object('schema', n.nspname::text, 'table', c.relname::text, 'column', a.attname::text, 'relkind', c.relkind::text, 'is_domain', t.typtype = 'd', 'checks', (SELECT coalesce(json_agg(json_build_object('name', k.conname::text, 'definition', pg_catalog.pg_get_constraintdef(k.oid, false), 'validated', k.convalidated, 'enforced', coalesce((to_jsonb(k)->>'conenforced')::boolean, true), 'validator_functions', (SELECT coalesce(json_agg(json_build_object('schema', pn.nspname::text, 'name', p.proname::text, 'extension', e.extname::text) ORDER BY pn.nspname, p.proname), '[]'::json) FROM pg_catalog.pg_depend kd JOIN pg_catalog.pg_proc p ON kd.refobjid=p.oid AND kd.refclassid='pg_catalog.pg_proc'::regclass JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_catalog.pg_depend ed ON ed.classid='pg_catalog.pg_proc'::regclass AND ed.objid=p.oid AND ed.refclassid='pg_catalog.pg_extension'::regclass AND ed.deptype='e' LEFT JOIN pg_catalog.pg_extension e ON e.oid=ed.refobjid WHERE kd.classid='pg_catalog.pg_constraint'::regclass AND kd.objid=k.oid)) ORDER BY k.conname), '[]'::json) FROM pg_catalog.pg_constraint k WHERE k.conrelid=c.oid AND k.contype='c' AND a.attnum=ANY(k.conkey))) ORDER BY n.nspname, c.relname, a.attnum), '[]'::json) FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_type t ON t.oid=a.atttypid WHERE a.attnum>0 AND NOT a.attisdropped AND c.relkind IN ('r','p','m','f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%' AND a.atttypid IN (WITH RECURSIVE jt(oid) AS (SELECT 'pg_catalog.jsonb'::regtype::oid UNION ALL SELECT t.oid FROM pg_catalog.pg_type t JOIN jt ON t.typbasetype=jt.oid) SELECT oid FROM jt)",
+      "purpose": "only with --jsonb-schema: stored jsonb columns (including domains), relation kind, domain identity, schema-only supported CHECK definitions, validation state and validator extension membership"
+    },
+    {
       "id": "default_acl",
       "key": "default_acl",
       "views": [

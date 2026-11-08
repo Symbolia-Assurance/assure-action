@@ -29,7 +29,13 @@ Issue #3128: it also reads the tracked dependency files (requirements*.txt / *.i
 poetry.lock, uv.lock, pyproject.toml) in the runner and sends the derived `raw/LIBRARY-VERSIONS.json`,
 one entry per package the checker reads a guard of (flask-login; flask-httpauth, issue #3320; flask-jwt-extended, issue #3253) or a pass-through
 decorator of (flask-apispec, issue #3331) or the routes of (flask-restful, issue #3330),
-`{version | range | unread, source: path:line}`. Issue #5727: with a Django or FastAPI declaration (schema
+`{version | range | unread, source: path:line}`. Issue #7714: for a declaration whose stack is go/gin the runner also
+reads the tracked go.mod and go.sum files, and the record holds one more entry, golang.org/x/oauth2
+(`GO_LIBRARY_PACKAGES`): the version go.mod requires, with the file and line it was read at, and the `h1:` digest the
+go.sum beside that go.mod records for that version, with its file and line (`h1`, `sum_source`; round 2, the go/gin
+reader decides on it); or `unread`, with the reason, when a `replace` names it, go.mod requires it at a version Assure
+does not read, go.mod files require different versions, or go.sum files record different digests for it; no other
+go.mod or go.sum content is kept, and no record of any other stack changes. Issue #5727: with a Django or FastAPI declaration (schema
 assure.identity.declaration/v1) in the checkout, the requirements files its `lock_locator`s name (`pin_files`) are
 also sent, as `raw/repository/<path>`, byte for byte: those adapters read each declared library's version from the pin
 file itself. The full lock files it names (Pipfile.lock, poetry.lock, uv.lock, pdm.lock) are sent only with the
@@ -155,7 +161,8 @@ def complete(collected, profile, root, env, modes=None):
 #: The one derived fact the runner sends about the repository's dependency files (the Director's standing direction of
 #: 16 Oct, "free tier reads wide, sends minimal"): the lock and requirement files are read here and never sent.
 LIBRARY_VERSIONS = 'raw/LIBRARY-VERSIONS.json'
-#: The packages whose version the checker reads (its LIBRARY_GUARDS); no other package name is ever sent. Issue #3253:
+#: The packages whose version the Python checker reads (its LIBRARY_GUARDS); no other Python package name is ever sent
+#: (the one other name, a go/gin declaration's, is GO_LIBRARY_PACKAGES). Issue #3253:
 #: flask-jwt-extended, whose guards and identity claim the checker reads by version; #3331: flask-apispec, whose
 #: use_kwargs / marshal_with the checker reads as argument parsing and response shaping by version; #3330:
 #: flask-restful, whose Api / Resource routes the checker reads by version; #3320: flask-httpauth, whose guards the
@@ -176,6 +183,18 @@ HELPER_VERSION_PACKAGES['flask-sqlalchemy'] = ('2.2',)
 LOCK_FILE = re.compile(r'(?i)^(requirements[^/]*\.(txt|in)|constraints[^/]*\.txt|pipfile\.lock|poetry\.lock|uv\.lock|'
                        r'pyproject\.toml)$')
 LOCK_FILE_BYTES = 16 * 1024 * 1024
+#: Issue #7714: stack -> the Go modules whose release the stack's reader depends on. The go/gin reader reads
+#: golang.org/x/oauth2's OAuth client sign-in by the release go.mod requires; recorded only for a declaration whose stack
+#: is go/gin (the tracked go.mod files are read in the runner and never sent), so no Python record changes: the Python
+#: checker refuses a whole record holding a key that is not one of its packages.
+GO_LIBRARY_PACKAGES = {'go/gin': ('golang.org/x/oauth2',)}
+GO_MOD = 'go.mod'
+#: Round 2: the go.sum beside each go.mod, read in the runner for the module's `h1:` digest only, never sent.
+GO_SUM = 'go.sum'
+#: The go.sum digest form the record keeps: `h1:` and a base64 SHA-256 (the go.sum line's third word).
+_GO_SUM_H1 = re.compile(r'h1:[A-Za-z0-9+/]{43}=')
+#: The Go versions the record keeps: `vMAJOR.MINOR.PATCH` and an optional pre-release / build suffix, the leading `v` kept.
+_GO_VERSION = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]{0,48}')
 
 
 def is_dependency_file(rel):
@@ -375,6 +394,128 @@ def draft_dependency_files(top, env, cap=REQUIREMENTS_DRAFT_BYTES):
         if stat.S_ISREG(st.st_mode) and st.st_size <= cap:
             pool[rel] = full.read_bytes()
     return {rel: pool[rel] for rel in sorted(_dependency_paths(pool))}
+
+
+#: issue #7474: gin's Go module path, and the directories whose go.mod is not the repository's own module
+GIN_MODULE = 'github.com/gin-gonic/gin'
+GO_MODULE_SKIP = frozenset({'vendor', 'testdata', '.git', 'node_modules', 'venv', '.venv', 'site-packages'})
+
+
+def requires_gin(data):
+    """Issue #7474: whether go.mod bytes require GIN_MODULE: a `require <path> <version>` line or a line of a
+    `require (` block names it, other than `// indirect` (the module does not import it). A `//` comment, or a
+    replace, exclude or retract line naming it, does not."""
+    block = None
+    for line in bytes(data).decode('utf-8', 'replace').splitlines():
+        code, _sep, comment = line.partition('//')
+        words = [w.strip('"') for w in code.split()]
+        if not words:
+            continue
+        direct = comment.split()[:1] != ['indirect']
+        if block is not None:
+            if words[0] == ')':
+                block = None
+            elif block == 'require' and words[0] == GIN_MODULE and len(words) > 1 and direct:
+                return True
+        elif words[-1] == '(' or words[0].endswith('('):
+            block = words[0].rstrip('(')
+        elif words[0] == 'require' and len(words) > 2 and words[1] == GIN_MODULE and direct:
+            return True
+    return False
+
+
+def is_own_go_module(rel):
+    """Issue #7474: `rel` names a go.mod that is not under a vendored, testdata or virtual-environment directory."""
+    parts = rel.split('/')
+    return parts[-1] == 'go.mod' and not any(p in GO_MODULE_SKIP for p in parts[:-1])
+
+
+def gin_module_names(files):
+    """Issue #7474: the sorted names among `files` ({path: bytes}, as a proposal body carries them) that are the
+    repository's own go.mod (`is_own_go_module`) and require gin (`requires_gin`)."""
+    return tuple(sorted(n for n, d in files.items() if is_own_go_module(n) and requires_gin(d)))
+
+
+def gin_modules(top, env, cap=REQUIREMENTS_DRAFT_BYTES):
+    """Issue #7474: the tracked go.mod files of the checkout at `top` that require gin (`requires_gin`), sorted, each a
+    regular file read through `checkout_path` within `cap`; a go.mod under a vendored, testdata or virtual-environment
+    directory is not read. () when the checkout cannot be listed: main's reading then holds."""
+    try:
+        listing = _ls_files(top, env)
+    except Refusal:
+        return ()
+    out = []
+    for row in listing.split(b'\0'):
+        meta, _tab, path = row.partition(b'\t')
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if not is_own_go_module(rel) or meta.split(b' ', 1)[0] not in (b'100644', b'100755'):
+            continue
+        full = checkout_path(top, rel)
+        if not isinstance(full, Path):
+            continue
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size <= cap and requires_gin(full.read_bytes()):
+            out.append(rel)
+    return tuple(sorted(out))
+
+
+#: issue #7434: the npm package whose presence in a package.json's dependencies makes the repository an Express application
+EXPRESS_PACKAGE = 'express'
+
+
+def depends_on_express(data):
+    """Issue #7434: whether package.json bytes parse to a JSON object whose `dependencies` or `devDependencies` object
+    names EXPRESS_PACKAGE. Anything else, invalid JSON included, is False."""
+    try:
+        doc = json.loads(bytes(data).decode('utf-8', 'replace'))
+    except (ValueError, RecursionError):   # a nesting too deep to parse is no dependency list
+        return False
+    if not isinstance(doc, dict):
+        return False
+    return any(isinstance(doc.get(k), dict) and EXPRESS_PACKAGE in doc[k] for k in ('dependencies', 'devDependencies'))
+
+
+def is_own_package_json(rel):
+    """Issue #7434: `rel` names a package.json that is not under a vendored, testdata, node_modules or
+    virtual-environment directory (GO_MODULE_SKIP)."""
+    parts = rel.split('/')
+    return parts[-1] == 'package.json' and not any(p in GO_MODULE_SKIP for p in parts[:-1])
+
+
+def express_packages(top, env, cap=REQUIREMENTS_DRAFT_BYTES):
+    """Issue #7434: the tracked package.json files of the checkout at `top` that depend on express
+    (`depends_on_express`), sorted, each a regular file read through `checkout_path` within `cap`; a package.json under
+    a vendored, testdata, node_modules or virtual-environment directory is not read. () when the checkout cannot be
+    listed: main's reading then holds."""
+    try:
+        listing = _ls_files(top, env)
+    except Refusal:
+        return ()
+    out = []
+    for row in listing.split(b'\0'):
+        meta, _tab, path = row.partition(b'\t')
+        try:
+            rel = path.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if not is_own_package_json(rel) or meta.split(b' ', 1)[0] not in (b'100644', b'100755'):
+            continue
+        full = checkout_path(top, rel)
+        if not isinstance(full, Path):
+            continue
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size <= cap and depends_on_express(full.read_bytes()):
+            out.append(rel)
+    return tuple(sorted(out))
 
 
 def add_declared_pins(collected, top, doc, env, limits, modes, allow):
@@ -633,13 +774,15 @@ def _toml_without_comments(text):
     return ''.join(out)
 
 
-def library_versions(files):
+def library_versions(files, stack=None):
     """The derived record {package: entry} from the dependency files among `files` ({path: bytes}, read in the runner):
     for each package in LIBRARY_PACKAGES a file names, `{"version", "source"}` when every exact pin agrees (a lock
     file's resolved version, or `==X`), else `{"range", "source"}` for the one range the requirement files give, else
     `{"unread", "source"}` with the reason (pins or ranges that disagree, or a requirement with no bound). `source` is
     the `path:line` read. Nothing else of any file is kept. A HELPER_VERSION_PACKAGES package is added last, only as a
-    `{"version", "source"}` entry at one of its read versions, with a readable locator, where the record still fits."""
+    `{"version", "source"}` entry at one of its read versions, with a readable locator, where the record still fits.
+    Issue #7714: only for a `stack` in GO_LIBRARY_PACKAGES (go/gin), the go.mod files among `files` add the entries of
+    its Go packages last (`_add_go_versions`); any other `stack` (the default None) leaves the record as it was."""
     found = {}
     for rel in sorted(_dependency_paths(files)):
         text = files[rel].decode('utf-8', 'replace')
@@ -701,7 +844,101 @@ def library_versions(files):
                 and not any(ord(c) < 32 or ord(c) == 127 for c in path) \
                 and len(library_versions_bytes({**out, pkg: entry})) <= 4096:
             out[pkg] = entry
+    if stack in GO_LIBRARY_PACKAGES:
+        _add_go_versions(out, files, GO_LIBRARY_PACKAGES[stack])
     return out
+
+
+def _go_words(body):
+    """The words of one go.mod directive body, a `//` comment dropped and a quoted module path unquoted."""
+    return [w.strip('"`') for w in body.split('//', 1)[0].split()]
+
+
+def _read_go_mod(text, packages):
+    """([(package, version, line)], [(package, line)]) of the `require` and `replace` directives in go.mod `text` that
+    name one of `packages`: the single-line and the block form. A replace names the package by its left side, with or
+    without a version. Nothing else of the file is kept."""
+    requires, replaces, block = [], [], None
+    for number, raw in enumerate(text.splitlines(), 1):
+        words = _go_words(raw)
+        if not words:
+            continue
+        if block is None:
+            if len(words) == 2 and words[0] in ('require', 'replace') and words[1] == '(':
+                block = words[0]
+                continue
+            if words[0] not in ('require', 'replace'):
+                continue
+            kind, words = words[0], words[1:]
+        elif words == [')']:
+            block = None
+            continue
+        else:
+            kind = block
+        if kind == 'require' and len(words) >= 2 and words[0] in packages:
+            requires.append((words[0], words[1], number))
+        elif kind == 'replace' and words and '=>' in words and words[0] in packages:
+            replaces.append((words[0], number))
+    return requires, replaces
+
+
+def _go_sum_h1(files, rel, pkg, version):
+    """(h1, 'path:line') of the `<pkg> <version> h1:...` line of the go.sum beside the go.mod `rel` (same directory),
+    the digest in the go.sum form; else (None, None). Nothing else of the file is kept."""
+    beside = posixpath.join(posixpath.dirname(rel), GO_SUM)
+    data = files.get(beside)
+    if data is None or len(data) > LOCK_FILE_BYTES:
+        return None, None
+    for number, raw in enumerate(data.decode('utf-8', 'replace').splitlines(), 1):
+        words = raw.split()
+        if len(words) == 3 and words[:2] == [pkg, version] and _GO_SUM_H1.fullmatch(words[2]):
+            return words[2], '%s:%d' % (beside, number)
+    return None, None
+
+
+def _add_go_versions(out, files, packages):
+    """Issue #7714: add each of `packages` that a go.mod among `files` requires to the record `out`, after the Python
+    entries and only while the record stays within its 4096 bytes. `{"version", "source"}` when every go.mod requires
+    one version (a Go version keeps its leading `v`), with `{"h1", "sum_source"}` too when the go.sum beside each of
+    those go.mod files records one `h1:` for that version (round 2: the go/gin reader decides on that digest), else
+    `{"unread", "source"}` with the reason: a `replace` of the package (it wins over a require), a version Assure does
+    not read, requires that disagree, or go.sum digests that disagree."""
+    required, replaced = {}, {}
+    for rel in sorted(files):
+        if posixpath.basename(rel) != GO_MOD or len(files[rel]) > LOCK_FILE_BYTES:
+            continue
+        requires, replaces = _read_go_mod(files[rel].decode('utf-8', 'replace'), packages)
+        for pkg, version, line in requires:
+            required.setdefault(pkg, []).append((version, '%s:%d' % (rel, line), rel))
+        for pkg, line in replaces:
+            replaced.setdefault(pkg, []).append('%s:%d' % (rel, line))
+    for pkg in packages:
+        if pkg in replaced:
+            entry = {'unread': 'go.mod replaces %s' % pkg, 'source': replaced[pkg][0]}
+        elif pkg in required:
+            pins = required[pkg]
+            invalid = next((src for v, src, _rel in pins if not _GO_VERSION.fullmatch(v)), None)
+            versions = sorted({v for v, _src, _rel in pins})
+            sums = [_go_sum_h1(files, rel, pkg, v) for v, _src, rel in pins]
+            digests = sorted({h1 for h1, _src in sums if h1})
+            if invalid:
+                entry = {'unread': '%s is required at a version Assure does not read' % pkg, 'source': invalid}
+            elif len(versions) == 1 and len(digests) > 1:
+                entry = {'unread': 'go.sum files record %s %s at %d different digests' % (pkg, versions[0], len(digests)),
+                         'source': next(src for h1, src in sums if h1)}
+            elif len(versions) == 1:
+                entry = {'version': versions[0], 'source': pins[0][1]}
+                if all(h1 for h1, _src in sums) and not any(ord(c) < 32 or ord(c) == 127 for c in sums[0][1]):
+                    entry.update(h1=digests[0], sum_source=sums[0][1])
+            else:
+                entry = {'unread': 'dependency files pin %s at %d different versions (%d pins)'
+                         % (pkg, len(versions), len(pins)), 'source': pins[0][1]}
+        else:
+            continue
+        path, _sep, line = entry['source'].rpartition(':')
+        if path and re.fullmatch(r'[1-9][0-9]*', line) and not any(ord(c) < 32 or ord(c) == 127 for c in path) \
+                and len(library_versions_bytes({**out, pkg: entry})) <= 4096:
+            out[pkg] = entry
 
 
 def library_versions_bytes(record):
@@ -1098,7 +1335,10 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
         while bound.follow_imports and bound.imports(top, tracked, limits.file_bytes):
             bound.config_loads(top, tracked, limits.file_bytes)
     out, modes, chosen, encoded, locks = bundle.Collected(), {}, [], REQUEST_OVERHEAD, []
-    pins = lock_choice(top, _declaration(top, limits.file_bytes), send_lock_files(env), limits.file_bytes)[0]   # #5727
+    doc = _declaration(top, limits.file_bytes)
+    pins = lock_choice(top, doc, send_lock_files(env), limits.file_bytes)[0]   # #5727
+    stack = doc.get('stack') if doc is not None and doc.get('schema') == IDENTITY_SCHEMA else None
+    stack = stack if isinstance(stack, str) and stack in GO_LIBRARY_PACKAGES else None   # issue #7714
     for row in listing.split(b'\0'):
         if not row:
             continue
@@ -1110,6 +1350,8 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
             continue
         if mode in ('100644', '100755') and is_dependency_file(rel):
             locks.append(rel)                    # issue #3128: read here for the derived record
+        elif stack and mode in ('100644', '100755') and posixpath.basename(rel) in (GO_MOD, GO_SUM):
+            locks.append(rel)                    # issue #7714: a go/gin declaration's go.mod / go.sum, read here, never sent
         pin = mode in ('100644', '100755') and rel in pins
         if not pin and (mode not in ('100644', '100755') or not (rel.endswith('.py') or rel == 'requirements.md')):
             continue
@@ -1171,7 +1413,7 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
             continue
         if stat.S_ISREG(st.st_mode) and st.st_size <= LOCK_FILE_BYTES:
             read[rel] = full.read_bytes()
-    record = library_versions(read)
+    record = library_versions(read, stack=stack)
     if record:
         out.files[LIBRARY_VERSIONS] = library_versions_bytes(record)
     out.ignored.sort()

@@ -202,6 +202,34 @@ QUERIES = [
             "WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND " + _NSP_FILTER, 'n.nspname, c.relname'),
        'relations with ACL, owner and RLS flags; views and materialized views with their base tables (bare '
        'names) and their base relations ({schema, relname})'),
+    # RF-34: complete stored jsonb-column inventory, including columns with no CHECK.
+    _q('jsonb_columns', 'jsonb_columns', ['pg_attribute', 'pg_type', 'pg_class', 'pg_namespace', 'pg_constraint', 'pg_depend', 'pg_proc', 'pg_extension'],
+       14, 18, 'catalog_snapshot',
+       _agg([('schema', 'n.nspname::text'), ('table', 'c.relname::text'), ('column', 'a.attname::text'),
+             ('relkind', 'c.relkind::text'), ('is_domain', "t.typtype = 'd'"),
+             ('checks', "(SELECT coalesce(json_agg(json_build_object('name', k.conname::text, "
+                        "'definition', pg_catalog.pg_get_constraintdef(k.oid, false), 'validated', k.convalidated, "
+                        "'enforced', coalesce((to_jsonb(k)->>'conenforced')::boolean, true), "
+                        "'validator_functions', (SELECT coalesce(json_agg(json_build_object('schema', pn.nspname::text, "
+                        "'name', p.proname::text, 'extension', e.extname::text) ORDER BY pn.nspname, p.proname), '[]'::json) "
+                        "FROM pg_catalog.pg_depend kd JOIN pg_catalog.pg_proc p ON kd.refobjid=p.oid "
+                        "AND kd.refclassid='pg_catalog.pg_proc'::regclass "
+                        "JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace "
+                        "LEFT JOIN pg_catalog.pg_depend ed ON ed.classid='pg_catalog.pg_proc'::regclass "
+                        "AND ed.objid=p.oid AND ed.refclassid='pg_catalog.pg_extension'::regclass AND ed.deptype='e' "
+                        "LEFT JOIN pg_catalog.pg_extension e ON e.oid=ed.refobjid "
+                        "WHERE kd.classid='pg_catalog.pg_constraint'::regclass AND kd.objid=k.oid)) "
+                        "ORDER BY k.conname), '[]'::json) FROM pg_catalog.pg_constraint k "
+                        "WHERE k.conrelid=c.oid AND k.contype='c' AND a.attnum=ANY(k.conkey))")],
+            'pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid '
+            'JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace '
+            'JOIN pg_catalog.pg_type t ON t.oid=a.atttypid '
+            "WHERE a.attnum>0 AND NOT a.attisdropped AND c.relkind IN ('r','p','m','f') AND " + _NSP_FILTER +
+            " AND a.atttypid IN (WITH RECURSIVE jt(oid) AS (SELECT 'pg_catalog.jsonb'::regtype::oid "
+            "UNION ALL SELECT t.oid FROM pg_catalog.pg_type t JOIN jt ON t.typbasetype=jt.oid) SELECT oid FROM jt)",
+            'n.nspname, c.relname, a.attnum'),
+       'only with --jsonb-schema: stored jsonb columns (including domains), relation kind, domain identity, '
+       'schema-only supported CHECK definitions, validation state and validator extension membership'),
     _q('default_acl', 'default_acl', ['pg_default_acl', 'pg_namespace'], 14, 18, 'catalog_snapshot',
        _agg([('defaclrole', 'pg_catalog.pg_get_userbyid(d.defaclrole)'), ('defaclnamespace', 'n.nspname::text'),
              ('defaclobjtype', 'd.defaclobjtype::text'), ('defaclacl', 'd.defaclacl::text[]')],
@@ -2603,6 +2631,8 @@ def parse_args(argv):
     parser.add_argument('--psql', default='psql')
     parser.add_argument('--role-created-for-run', choices=('yes', 'no'), default=None)   # RF-24 (e)
     parser.add_argument('--login-user', default=None)                                    # RF-28 (d)
+    parser.add_argument('--jsonb-schema', action='store_true', default=False,
+                        help='collect schema-only CHECK evidence when declaration.json names jsonb_schema')
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -2791,6 +2821,88 @@ def withheld_row_list(manifest, line_records):
     return sorted(rows, key=lambda row: (row['file'], row['line'] or 0, row['field'], row['reason']))
 
 
+JSONB_IDENT = r'(?:"(?:[^"]|"")+"|[a-z_][a-z0-9_$]*)'
+JSONB_CALL = re.compile(r"(?:(" + JSONB_IDENT + r")\.)?jsonb_matches_schema\s*\(\s*'((?:[^']|'')*)'\s*::\s*(?:pg_catalog\.)?json\s*,\s*(" + JSONB_IDENT + r")\s*\)", re.I)
+
+
+def schema_only_definition(check, column):
+    """Release one JSON Schema literal from an exact extension-owned direct call, or no definition.
+
+    Never pass arbitrary deparsed SQL to the upload/withholding path. In particular E/dollar strings,
+    numeric literals, compound expressions and user functions are outside this release grammar.
+    """
+    definition = check.get('definition')
+    functions = check.get('validator_functions')
+    if (not isinstance(definition, str) or not definition.startswith('CHECK ')
+            or not isinstance(functions, list) or len(functions) != 1
+            or not isinstance(functions[0], dict)
+            or functions[0].get('extension') != 'pg_jsonschema'
+            or functions[0].get('name') != 'jsonb_matches_schema'
+            or not isinstance(functions[0].get('schema'), str)):
+        return None
+    text = definition[6:].strip()
+    while text.startswith('(') and text.endswith(')'):
+        text = text[1:-1].strip()
+    match = JSONB_CALL.fullmatch(text)
+    if not match:
+        return None
+    def identifier(value):
+        return value[1:-1].replace('""', '"') if value.startswith('"') else value.lower()
+    namespace = functions[0]['schema']
+    if identifier(match[3]) != column or (match[1] is not None and identifier(match[1]) != namespace):
+        return None
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate JSON key')
+            result[key] = value
+        return result
+    try:
+        schema = json.loads(match[2].replace("''", "'"), object_pairs_hook=pairs,
+                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        if not isinstance(schema, (dict, bool)):
+            return None
+        literal = json.dumps(schema, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    except (ValueError, RecursionError):
+        return None
+    def quoted(value):
+        return '"' + value.replace('"', '""') + '"'
+    return "CHECK (%s.jsonb_matches_schema('%s'::json, %s))" % (
+        quoted(namespace), literal.replace("'", "''"), quoted(column))
+
+
+def schema_only_columns(value):
+    """Sanitize before raw_results, sidecars or files can retain query values."""
+    if not isinstance(value, list):
+        return None
+    columns = []
+    for col in value:
+        if not isinstance(col, dict):
+            columns.append(None)  # retain an inventory gap, never manufacture an empty success
+            continue
+        kept = {key: col.get(key) for key in ('schema', 'table', 'column', 'relkind', 'is_domain')}
+        kept['checks'] = None
+        if isinstance(col.get('checks'), list):
+            kept['checks'] = []
+            for check in col['checks']:
+                if not isinstance(check, dict):
+                    kept['checks'].append(None)
+                    continue
+                item = {key: check.get(key) for key in ('name', 'validated', 'enforced')}
+                functions = check.get('validator_functions')
+                item['validator_functions'] = ([{key: f.get(key) for key in ('schema', 'name', 'extension')}
+                                                if isinstance(f, dict) else None for f in functions]
+                                               if isinstance(functions, list) else None)
+                item['definition'] = schema_only_definition(check, col.get('column'))
+                if item['definition'] is None:
+                    item['definition_status'] = 'withheld'
+                    item['definition_reason'] = 'outside the exact schema-only pg_jsonschema CHECK grammar'
+                kept['checks'].append(item)
+        columns.append(kept)
+    return columns
+
+
 def _collect(args, out, started, state):
     """The collection itself. `out` is the STAGING directory; a Refusal (or any exception) raised here makes
     run_staged remove it and refuse. Returns (exit code, the status message printed after publishing)."""
@@ -2827,7 +2939,17 @@ def _collect(args, out, started, state):
             continue
         if not query['min_major'] <= major <= query['max_major']:
             continue
+        if query['id'] == 'jsonb_columns' and not getattr(args, 'jsonb_schema', False):
+            raw_results['jsonb_columns'] = ('not_observed', None)
+            collector.record_query(query, 'not_observed', None,
+                                   'not requested: declaration must name jsonb_schema before CHECK collection',
+                                   'not_requested')
+            continue
         status, value, error, error_class = collector.run(query)
+        if query['id'] == 'jsonb_columns':
+            value = schema_only_columns(value)
+            if error:
+                error = 'jsonb_schema catalog query did not succeed; CHECK text is not retained'
         raw_results[query['key'] or query['id']] = (status, value)
         if query['target'] == 'timing':
             collector.entries.append({'kind': 'query', 'target': 'query:' + query['id'], 'id': query['id'],
@@ -3083,11 +3205,12 @@ def _collect(args, out, started, state):
     observed_grants = sorted(memberships[1]) if memberships[0] in ('observed', 'observed_empty') and \
         isinstance(memberships[1], list) else None
     entries = sorted(collector.entries, key=lambda e: (e['kind'], e['target']))
-    gaps = [e for e in entries if e['status'] not in OK_STATUSES]
+    gaps = [e for e in entries if e['status'] not in OK_STATUSES and not (
+        e.get('key') == 'jsonb_columns' and e.get('error_class') == 'not_requested')]
     withheld_rows = withheld_row_list(manifest, line_records)                     # RF-28 (b)
     sidecar = flagged({
         'schema': 'symbolia.rf06.collection-sidecar.v1',
-        'status_vocabulary': ['observed', 'observed_empty', 'declared_absent', 'unreadable', 'missing', 'unsupported'],
+        'status_vocabulary': ['observed', 'observed_empty', 'declared_absent', 'unreadable', 'missing', 'unsupported', 'not_observed'],
         'collector': {'tool': 'collect_pg.py', 'tool_sha256': sha256(Path(__file__).read_bytes()),
                       'queries_sha256': sha256(render_queries().encode('utf-8'))},
         'role': args.role, 'privileges_declared': args.privilege_list,

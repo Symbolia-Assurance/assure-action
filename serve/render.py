@@ -428,6 +428,9 @@ def report_cost_line(record):
 # the first check's charge and this run charges nothing. A time of any other form is never printed.
 FIRST_CHECKED_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 REPLAY_LINE = 'Stored verdict for the same request, first checked %s; nothing was charged this run.'
+# issue #8272: the engine the stored verdict came from, its commit's first 12 hex digits, when it names one
+REPLAY_ENGINE = ' by engine %s'
+COMMIT_RE = re.compile(r'[0-9a-f]{40}')
 EARLIER_RUN = 'in an earlier run'
 
 
@@ -439,10 +442,16 @@ def first_checked(doc):
 
 def replay_line(envelope):
     """serve-035: "Stored verdict for the same request, first checked <time>; nothing was charged this run." for an
-    envelope the API marked `replay: true`, else None."""
+    envelope the API marked `replay: true`, else None. Issue #8272: when the stored verdict names its engine, "by engine
+    <first 12 hex digits>" follows the time."""
     if not isinstance(envelope, dict) or envelope.get('replay') is not True:
         return None
-    return REPLAY_LINE % (first_checked(envelope) or EARLIER_RUN)
+    when = first_checked(envelope) or EARLIER_RUN
+    eng = envelope.get('engine')
+    commit = eng.get('commit') if isinstance(eng, dict) else None
+    if isinstance(commit, str) and COMMIT_RE.fullmatch(commit):          # issue #8272: name the engine it came from
+        when += REPLAY_ENGINE % commit[:12]
+    return REPLAY_LINE % when
 
 
 def report_replay_line(record, first_checked_at=None):
@@ -2553,11 +2562,34 @@ def _requirement_findings(env, found):
 PROFILE_WORDS = {'postgresql': ('database configuration', 'PostgreSQL'), 'http': ('HTTP responses', 'HTTP')}
 DEFAULT_PROFILE_WORDS = ('system', 'software')
 # issue #1292: the green head that says what the auth profile read, in the place of the generic "safe <family> setups"
-# (subject, head when AUTH-1 and AUTH-2 both hold, head otherwise)
-GREEN_HEADS = {'python-auth-declared-model': ('Flask app', 'Every route in your Flask app is guarded as your '
-                                              'declaration says.',
-                                              'Nothing read in the routes of your Flask app contradicts your '
-                                              'declaration.')}
+# (head when AUTH-1 and AUTH-2 both hold, head otherwise), each naming the subject `auth_subject` gives (issue #5280)
+GREEN_HEADS = {'python-auth-declared-model': ('Every route in your %s is guarded as your declaration says.',
+                                              'Nothing read in the routes of your %s contradicts your declaration.')}
+# issue #5280: what the auth profile's sentences call the customer's code, by the `stack` the reading carries; any other
+# or absent stack is "app", never a framework the reading did not read
+AUTH_SUBJECTS = {'python/flask': 'Flask app', 'python/fastapi': 'FastAPI app', 'python/django': 'Django app',
+                 'python/stdlib-http': 'HTTP service'}
+AUTH_SUBJECT_DEFAULT = 'app'
+
+
+def reading_stack(readings):
+    """The `stack` a verdict's readings carry ({machine: reading}, the first reading naming a string one), or None."""
+    for r in (readings or {}).values() if isinstance(readings, dict) else ():
+        if isinstance(r, dict) and isinstance(r.get('stack'), str):
+            return r['stack']
+    return None
+
+
+def verdict_stack(env):
+    """Issue #5280: the stack a verdict was read as: its envelope's `stack` (serve/envelope.py `build`, beside the
+    readings), else the `stack` its readings carry (a verdict stored before the field), else None."""
+    stack = env.get('stack') if isinstance(env, dict) else None
+    return stack if isinstance(stack, str) else reading_stack(env.get('readings') if isinstance(env, dict) else None)
+
+
+def auth_subject(stack):
+    """Issue #5280: "Flask app", "FastAPI app", "Django app" or "HTTP service" for a served stack, else "app"."""
+    return AUTH_SUBJECTS.get(stack, AUTH_SUBJECT_DEFAULT) if isinstance(stack, str) else AUTH_SUBJECT_DEFAULT
 # Why a check could not be completed, for "mostly because ...", one per closed reason class.
 CLASS_BECAUSE = {'needs_intent': 'they depend on what the system is for, which has not been stated',
                  'not_observed': 'some facts were not collected',
@@ -2624,9 +2656,10 @@ def _meaning_line(envelope):
         n_all = len(obligations) + len([e for e in entries if e.get('id') not in with_rows])
         head = 'Nothing in your %s contradicts what is known about safe %s setups.' % (subject, family)
         if env.get('profile') in GREEN_HEADS:
-            subject, guarded, other = GREEN_HEADS[env['profile']]
+            guarded, other = GREEN_HEADS[env['profile']]
+            subject = auth_subject(verdict_stack(env))                       # issue #5280: the stack read
             held = {r.get('id') for r in _rows(env) if r.get('status') == 'holds'}
-            head = guarded if {'AUTH-1', 'AUTH-2'} <= held else other
+            head = (guarded if {'AUTH-1', 'AUTH-2'} <= held else other) % subject
         top = top_entry(entries, env)
         if not entries or top is None:
             return '%s All %d checks could be completed.' % (head, n_all)

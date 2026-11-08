@@ -81,7 +81,8 @@ connection or a runner token.
   random key instead, for a deliberate re-check. In `mode: local` it changes nothing.
   serve-035 (DD-094 §7 (2)): the API marks a verdict it served from its store `replay: true` with `first_checked_at`;
   the job summary's first lines and the log then say "Stored verdict for the same request, first checked <time>;
-  nothing was charged this run." (`serve.render.replay_line`), and a stored report (`replay: true` on the report
+  nothing was charged this run." (`serve.render.replay_line`; issue #8272: " by engine <first 12 hex>" follows <time>
+  when the stored verdict names its engine), and a stored report (`replay: true` on the report
   answer) sets `report-charge-usd` to 0 with the line "Report: cost USD x.xxx, charged USD y.yyy on the first check
   <time>; nothing was charged this run" (`serve.render.report_replay_line`).
 `mode: lint` (serve-043) runs the same local steps as `mode: api` up to and including the local file check, then sends the
@@ -245,6 +246,11 @@ MAX_LINT_LINES = 50
 # the one Assure comment (`post_pr_comment` with `body`).
 LINT_PREFLIGHT = ('This was a pre-flight: no check ran. '
                   'Remove `mode: lint` from your workflow to check every pull request.')
+# The Director, 25 Oct 2026 (chief 5971, lint part c): `mode: lint` on a pull request checks nothing, so it never exits
+# green there: exit LINT_ON_PR_EXIT (3, the exit table's "no check ran" yellow; 2 stays a lint finding or a bad input)
+# with one error line saying so. By hand (`workflow_dispatch`) or on any other event the exit stays 0 clean, 2 findings.
+LINT_ON_PR_EXIT = 3
+LINT_ON_PR = 'mode: lint ran on a pull request, so no check ran. Remove `mode: lint` from your pull request workflow.'
 # Issue #1186 part 2: on the observed PostgreSQL profile the Action drafts a declaration beside the verdict file,
 # from the catalog snapshot it already collected and withheld (`draft_proposal`). serve/envelope.py PROPOSAL_FILE
 # names the same file.
@@ -1490,6 +1496,26 @@ def _lint_markdown(found):
     return '\n'.join(lines) + '\n'
 
 
+# v0.1.4 lint-comment-001 (the Director, 23 Oct 2026): a `mode: lint` pull request comment lists what the lint found,
+# under LINT_PREFLIGHT: the job summary's own finding lines and fault pointers, at most MAX_LINT_COMMENT findings, then
+# one line pointing at the job summary for the rest; a clean lint says LINT_CLEAN_COMMENT.
+MAX_LINT_COMMENT = 10
+LINT_CLEAN_COMMENT = 'No problems found.'
+
+
+def _lint_comment(found):
+    """The body of a `mode: lint` pull request comment: LINT_PREFLIGHT, then the findings as the summary lists them."""
+    if not found:
+        return '%s\n\n%s' % (LINT_PREFLIGHT, LINT_CLEAN_COMMENT)
+    lines = [LINT_PREFLIGHT, '']
+    for f in found[:MAX_LINT_COMMENT]:
+        lines.append('- %s' % render.esc(_lint_line(f)))
+        lines += ['  - %s' % render.esc(t) for t in _lint_fault_texts(f)]
+    if len(found) > MAX_LINT_COMMENT:
+        lines.append('- and %d more in the job summary' % (len(found) - MAX_LINT_COMMENT))
+    return '\n'.join(lines)
+
+
 def _proposal_module():
     """assure/declare_proposal.py: shipped byte for byte as action/declare_proposal.py in the public tree (build_dist
     PUBLIC_DECLARATION_ASSETS); in this checkout it is the private package's own module (build_dist LOCAL_ONLY_MODULES:
@@ -1647,6 +1673,19 @@ def checkout_declaration_at(top, cap, skip_links=False, passed=None):
             if passed is not None:
                 passed.append((rel, schema))
     return None
+
+
+def jsonb_opt_in(top, cap):
+    """Issue #6339 (trial-lead 23162): does the checkout's PostgreSQL declaration name `jsonb_schema` as an object?
+    Read before the collector, it decides only the rf34 collector's --jsonb-schema (and so the schema inventory). It
+    refuses nothing, names no passed-over file and keeps no bytes: the declaration sent is read after the collection,
+    as on main, and a present one that cannot be read is refused there (`pg_declare`)."""
+    try:
+        got = checkout_declaration_at(top, cap)
+        config = json.loads(got[1]) if got is not None else None
+    except (Refusal, OSError, ValueError, TypeError):
+        return False
+    return isinstance(config, dict) and isinstance(config.get('jsonb_schema'), dict)
 
 
 def _checkout_file(top, rel, cap):
@@ -1822,6 +1861,10 @@ def _scratch(env):
     return Path(tempfile.mkdtemp(prefix='assure-', dir=temp_root))
 
 
+# issue #6339 (trial-lead 23493 (ii)): the job summary line when the checkout lacks the pull request head the schema
+# inventory is read at. Customer text: the Director's word at the PR head.
+INVENTORY_MISSING_COMMIT = ('JSON Schema inventory: not sent. The checkout does not hold the pull request head commit %s '
+                            'and Assure fetches nothing, so JSONB-SCHEMA-1 reads not established.')
 _FEEDBACK_INPUT_MESSAGES = {
     'check_id': 'Feedback needs the server check id; run with mode: api and let the check finish before sending feedback.',
     'input_bytes': 'The feedback input exceeds %d bytes; shorten the inline JSON or file contents and send feedback again.'
@@ -1992,7 +2035,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
              'proposed': False, 'proposal_number': None, 'files': None,
              'goals': [], 'pg_proposal': None, 'observed_raw': None, 'pg_checkout': None, 'pg_checkout_rel': None,
              'requirements_text': [], 'tree': None, 'declared': None, 'kept_md': '', 'declared_accepted': False,
-             'foreign_passed': None, 'foreign_named': False, 'declaration_context': None}
+             'foreign_passed': None, 'foreign_named': False, 'declaration_context': None, 'pg_inventory': None,
+             'no_checkout': False, 'no_checkout_named': False}      # issue #7373
 
     def finish_feedback():
         """After the primary file, summary and outputs: a feedback fault can change none of them."""
@@ -2154,6 +2198,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         say('::error title=%s::%s' % (_cmd_prop('Assure %s' % e.outcome), _cmd_data(
             '%s: %s' % (e.outcome, step or e.reason), cap=None if step else 300)))
         name_passed()
+        name_no_checkout()
         outputs(e.outcome, code, decl_out)
         finish_feedback()
         return code
@@ -2268,6 +2313,13 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             rel, schema = state['foreign_passed']
             say(FOREIGN_DECLARATION_LINE % {'rel': rel, 'schema': _cmd_data(schema, cap=120),
                                             'pg': POSTGRESQL_DECLARATION_SCHEMAS[0]})
+
+    def name_no_checkout():
+        """Issue #7373: one `::notice` per run, after the verdict's notices (or a refusal's error annotation), when
+        `observed_draft` found a workflow token but no checkout to propose in."""
+        if state['no_checkout'] and not state['no_checkout_named']:
+            state['no_checkout_named'] = True
+            say('::notice title=Assure declaration::%s' % _cmd_data(declaration_draft.NO_CHECKOUT, cap=None))
 
     def declared_reading(profile, collected, check, lim, unexpected):
         """Issue #2928: on an observed profile with intent committed in the checkout, `check(declared profile, the same
@@ -2403,7 +2455,12 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 repo.update({rel: data for rel, data in repository_manifest.draft_dependency_files(top, env).items()
                              if rel not in repo})
             record = drafted if drafted is not None else declaration_draft.draft(
-                repo, client=state['draft_client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS))
+                repo, client=state['draft_client'], library_versions=collected.files.get(repository_manifest.LIBRARY_VERSIONS),
+                # issue #7474: a go/gin checkout whose Python files import no web framework is refused, not drafted Flask
+                gin_modules=(lambda: repository_manifest.gin_modules(top, env)) if checkout and top is not None else None,
+                # issue #7434: a typescript/express checkout whose Python files import no web framework is refused likewise
+                express_packages=(lambda: repository_manifest.express_packages(top, env)) if checkout and top is not None
+                else None)
             data = declaration_draft.dumps(record['declaration'])
             collected.files[declaration_draft.NAME] = data
             state['draft'] = {'record': record, 'data': data, 'top': top, 'rel': rel}
@@ -2435,6 +2492,10 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         verdict, so the section of a python/flask draft names each field it left out with what its default read (issue
         #3969)."""
         d = state['draft']
+        if d is None and state.get('no_checkout'):      # issue #7373: a token but no checkout; said once here
+            return ('Assure: declaration proposal: ' + declaration_draft.NO_CHECKOUT,
+                    '\n### Declaration pull request\n\nNot proposed: this job has no checkout; add actions/checkout '
+                    'before the Assure step.\n', '')
         if d is None:
             return '', '', ''
         base = _plain(env, 'GITHUB_BASE_REF') or 'the base branch'
@@ -2445,6 +2506,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         else:
             tmp = _scratch(env)
             github = None
+            compare = None
             try:
                 if d['top'] is None:
                     raise Refusal('bad_input', 'the artefacts directory is not inside a git checkout')
@@ -2466,6 +2528,9 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     # asked to propose; main's files and section beside the verdict stay, with no warning
                     return 'Assure: declaration proposal: not proposed (%s)' % _cmd_data(scrub(e.reason)), '', ''
                 told = 'not proposed (%s)' % scrub(e.reason)
+                compare = e.detail.get('compare')     # issue #7371: the kept branch's compare link
+                if compare:
+                    say('Assure: declaration proposal: open the pull request yourself: %s' % compare)
                 if d.get('added'):                    # issue #4631: the additions path shows no draft; it names them
                     told += '; it adds the %d field(s) listed below' % len(d['added'])
                 elif not d.get('observed') or d.get('shown') is not None:
@@ -2481,6 +2546,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     md += '\n```json\n%s```\n' % d['shown'].decode('utf-8')
                     if d['shown'] == d['data']:   # issue #3153: a link commits the proposal's own bytes, never placeholders
                         md += commit_line(github, d)
+                if compare:
+                    md += '\n%s\n' % declaration_draft.compare_markdown(compare)
                 return 'Assure: declaration proposal: %s' % _cmd_data(told), md, ''
             md = declaration_draft.summary_markdown(d['record'], d['rel'], render.esc(told[:1].upper() + told[1:] + '.'),
                                                     *(['the collected catalog snapshot'] if d.get('words') else []),
@@ -2489,6 +2556,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                                                     if verdict and d['record'].get('stack') == declaration_draft.STACK
                                                     else ())      # REFUTATION-r5 HIGH-1: a Flask draft's defaults only
             if told.startswith('not proposed'):
+                if compare:
+                    md += '\n%s\n' % declaration_draft.compare_markdown(compare)
                 md += commit_line(github, d)
                 md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
                 if d.get('starter'):                # issue #4395: the starter, and its own one-click commit
@@ -2526,6 +2595,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         top = declaration_draft.toplevel(Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd()), env)
         try:
             if top is None:
+                state['no_checkout'] = True                 # issue #7373: named once, after the verdict's notices
                 return
             at = pg_checkout_at(top, bundle.LIMITS.file_bytes, skip_links=True)   # #3153: links pass
             if at is not None and at[0] != DECLARED_CHECKOUT_PATH:
@@ -2565,7 +2635,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     def pg_declare(top, cap):
         """Issue #2435: `declare` for `action.collect._gather` on postgresql-declared-model: the checkout's
         declaration, else a draft from the collector's own (not yet withheld) snapshot and sidecar in `raw`, recorded
-        to be proposed; None when nothing can be drafted (the missing file is then refused as before)."""
+        to be proposed; None when nothing can be drafted (the missing file is then refused as before). Issue #6339
+        (trial-lead 23162): only the opt-in is read before the collector (`jsonb_opt_in`)."""
         def declare(raw):
             got = pg_checkout_at(top, cap)
             if got is not None:
@@ -2584,7 +2655,42 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             say('Assure: %s drafted in the runner from %s; %d field(s) to confirm' % (
                 declaration_draft.NAME, DECLARED_SOURCE, len(record['confirm'])))
             return data
+        declare.jsonb_schema_requested = jsonb_opt_in(top, cap)
         return declare
+
+    def pg_inventory(top):
+        """Issue #6339 (trial-lead 23162): `inventory` for `action.collect._gather`, which calls it only under the rf34
+        opt-in: the committed JSON Schema files under `directory` as raw/jsonb_schema_repository.json, read at the
+        commit the check is about (`_head_commit`: on a pull request the event's `pull_request.head.sha`, never the
+        merge commit) and kept for `inventory_on_base`. A fault sends no inventory; the row reads not established."""
+        from action import jsonb_schemas
+
+        def inventory(raw, directory):
+            sha = _head_commit(env) if declaration_draft.is_pull_request(env) else ''
+            try:
+                state['pg_inventory'] = jsonb_schemas.collect(top, raw, directory, env=env,
+                                                              commit=sha if bundle.commit_ok(sha) else 'HEAD')
+            except jsonb_schemas.MissingCommit as e:      # trial-lead 23493 (ii): the summary names the commit
+                state['pg_inventory'] = None
+                try:
+                    _append(env.get('GITHUB_STEP_SUMMARY'), '\n' + INVENTORY_MISSING_COMMIT % e.commit + '\n')
+                except Exception:
+                    pass
+            except (OSError, ValueError):
+                state['pg_inventory'] = None
+        return inventory
+
+    def inventory_on_base(top):
+        """Issue #6339 F6: on a pull request the inventory sent is compared with the base as the declaration is
+        (`declaration`): schema files not on the base yet bound the run as an unaccepted declaration does, and nothing
+        is proposed. A run the declaration already bounds stays as it is."""
+        if state['pg_inventory'] is None or state['draft'] is not None or not declaration_draft.is_pull_request(env):
+            return
+        from action import jsonb_schemas
+        on_base = jsonb_schemas.on_base(top, state['pg_inventory'], env)
+        if on_base is not True:
+            state['draft'] = {'record': None, 'data': None, 'top': top, 'rel': state['pg_inventory']['directory'],
+                              'unread': on_base is None}
 
     def observed_raw(files):
         """Issue #2934: the snapshot and sidecar of `files` (not yet withheld) kept for `observed_draft`."""
@@ -2727,13 +2833,14 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             work.mkdir(mode=0o700)
             pg = inputs['profile'] == DECLARED_PROFILE        # issue #2435: the checkout's declaration, else a draft
             top = Path(env.get('GITHUB_WORKSPACE') or cwd or os.getcwd())
-            kw = {'declare': pg_declare(top, lim.file_bytes)} if pg else \
+            kw = {'declare': pg_declare(top, lim.file_bytes), 'inventory': pg_inventory(top)} if pg else \
                 {'observe': observed_collect(lim.file_bytes)} if inputs['profile'] == PROPOSAL_PROFILE else {}
             collected = collect.collect(conn, profile=allow, scratch=work, limits=lim, **collect_kw(collect, inputs),
                                         **kw)
             if pg and state['pg_checkout'] is not None:
                 declaration(collected, top, top / state['pg_checkout_rel'], checkout=True,
                             data=state['pg_checkout'])
+                inventory_on_base(top)
         state['withheld'] = collected.withheld
         say(WITHHELD_LINE % {'withheld': withhold.describe(collected.withheld)})
         session(collected.files)
@@ -2787,11 +2894,14 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
 
     def finish_lint(doc, ignored):
         """serve-043: write the lint record to the output path, the findings to the job summary and as warnings, and the
-        outputs outcome `lint`, exit-code (0 when ok, else 2) and lint-findings. Never a charge, never a check."""
+        outputs outcome `lint`, exit-code (0 when ok, else 2; LINT_ON_PR_EXIT on a pull request) and lint-findings.
+        Never a charge, never a check."""
         if doc.get('schema') != LINT_SCHEMA:
             return failed(Refusal('api_error', 'no lint record'))
         found = [f for f in doc['findings'] if isinstance(f, dict)]
-        code = 0 if doc.get('ok') is True and not found else 2
+        clean = doc.get('ok') is True and not found
+        on_pr = env.get('GITHUB_EVENT_NAME') in PR_EVENTS
+        code = LINT_ON_PR_EXIT if on_pr else (0 if clean else 2)       # lint part c: never green on a pull request
         try:
             summary = LINT_PREFLIGHT + '\n\n' + _lint_markdown(found)     # issue #3168: the first line
         except Exception as e:  # the class name only, never a value
@@ -2811,16 +2921,19 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         except OSError as w:
             say('::warning title=Assure::%s' % _cmd_data('the job summary could not be written (%s)' % type(w).__name__))
         say('::notice title=Assure::%s' % _cmd_data(LINT_PREFLIGHT, cap=None))     # issue #3168
-        pr_comment(doc, body=LINT_PREFLIGHT)
+        if on_pr:
+            say('::error title=Assure::%s' % _cmd_data(LINT_ON_PR, cap=None))       # lint part c
+        pr_comment(doc, body=_lint_comment(found))                 # lint-comment-001: the findings, under the line
         for f in found:
             say('::warning title=%s::%s' % (_cmd_prop('Assure lint'), _cmd_data(_lint_line(f))))
         if ignored:
             say(_notice_line(ignored, _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE))
         if decl_line:
             say(decl_line)
-        say(LINT_LINE % {'reading': 'ready for a check' if code == 0 else 'fix these before a check',
+        say(LINT_LINE % {'reading': 'ready for a check' if clean else 'fix these before a check',
                          'findings': len(found), 'exit': code, 'output': _cmd_data(out_text)})
-        outputs('lint', code, 'lint-findings=%d\n%s' % (len(found), decl_out), lint_colour='green' if code == 0 else 'red')
+        outputs('lint', code, 'lint-findings=%d\n%s' % (len(found), decl_out),
+                lint_colour='yellow' if on_pr else 'green' if code == 0 else 'red')
         return code
 
     try:
@@ -2999,6 +3112,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     for line in notes:
         say(line)
     name_passed()                                      # issue #3861: after the verdict's notices
+    name_no_checkout()                                 # issue #7373: after the verdict's notices too
     if ignored:
         say(_notice_line(ignored, inputs_profile))
     if state['report_on'] is True:
