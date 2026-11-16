@@ -192,7 +192,7 @@
               },
               "key": {
                 "type": "string",
-                "description": "The successor key, asr_<key_id>_<secret>; shown here and never stored"
+                "description": "The successor key, asr_<key_id>_<secret>; shown here and never stored in plaintext; a copy sealed under the predecessor key is kept during the overlap"
               },
               "expires_at": {
                 "type": "string",

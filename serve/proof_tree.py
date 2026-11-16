@@ -52,6 +52,7 @@ physical_validation false; simulation true; self_approved false."""
 from __future__ import annotations
 
 import html
+import json
 import math
 import re
 
@@ -62,6 +63,8 @@ STATES = ('holds', 'not_established', 'disproven')
 STATE_WORDS = {'holds': 'holds', 'not_established': 'not established', 'disproven': 'disproven'}
 MAX_FACTS = 6
 MAX_NAMED = 5
+PREMISE_LABEL = 'Premise'
+PREMISES_NOT_SHOWN = 'not shown'
 GOALS_FROM_ROWS = ('Each requirement row stands as its own goal: the goal sentences of requirements.md were not '
                    'stored with this check, only the typed checks they were sent as.')
 # a typed goal row as the Action sends it (declare_proposal.typed_text): '- G1.1 [postgres]: <statement>'
@@ -141,6 +144,22 @@ def _evidence_facts(req, row):
     return facts[:MAX_FACTS]
 
 
+def _shown(value):
+    return value if isinstance(value, str) else json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+
+def _premises(row):
+    out, left = [], 0
+    for p in row.get('premises') if isinstance(row.get('premises'), list) else ():
+        key = 'premise_id' if isinstance(p, dict) and p.get('premise_id') else 'id'
+        pid = p.get(key) if isinstance(p, dict) else None
+        if isinstance(pid, str) and _text(pid):
+            out.append({'id': _text(pid), 'members': [[_text(k), _text(_shown(p[k]))] for k in sorted(p) if k != key]})
+        else:
+            left += 1
+    return out, left
+
+
 def _bound(req):
     ev = [e for e in (req.get('evidence') if isinstance(req, dict) else None) or () if isinstance(e, dict)]
     scopes = [(e.get('native_machine_bounds') or {}).get('scope') for e in ev
@@ -191,6 +210,11 @@ def _check(env, cid, req, row, state, waypoint, *, repository, commit, source_li
         ev['cause'] = entry.get('reason_class') or cls      # the class the verdict's undecided_by_cause groups by
         ev['reason'] = render._pr_unchecked_words(env, cls)
         ev['action'] = _text(req.get('establishing_action') if req is not None else entry.get('action'))
+    shown, left = _premises(row)
+    if shown:
+        ev['premises'] = shown
+    if left:
+        ev['premises_not_shown'] = left
     node['evidence'] = ev
     return node
 
@@ -560,6 +584,14 @@ def drift(model, repository_files=None):
     return None if found is None else found[0]
 
 
+def drift_of(model, repository_files=None):
+    """Issue #6240: (state, changed paths) of a saved model against this run's files, the one comparison the page
+    (`formal_model`) and the PR comment (`api.formal_model_of`) both read: `_drift`'s, with 'unknown' and [] where it
+    finds no model or no pinned digests (the comment makes no claim either way)."""
+    found = _drift(model, repository_files) if isinstance(model, dict) else None
+    return ('unknown', []) if found is None else found
+
+
 def formal_model(tier, model, repository_files=None, *, budget=None, remodel_quote_usd=None, remodel_parts=None,
                  checks=(), obligation_words=None, upgrade_url=None, model_retention_over=False, profile=None):
     """Layer 2 of the tree (module docstring), or None when no tier is named. A tier without the formal model:
@@ -804,6 +836,11 @@ def _evidence_html(c):
         items.append('at %s' % ', '.join(_loc(x) for x in ev['locators']))
     for f in ev.get('facts') or ():
         items.append(_e(f))
+    for p in ev.get('premises') or ():
+        items.append('<b>%s:</b> <code>%s</code>%s' % (_e(PREMISE_LABEL), _e(p['id']),
+                                                       ''.join('; %s: %s' % (_e(k), _e(v)) for k, v in p['members'])))
+    if ev.get('premises_not_shown'):
+        items.append('<b>%s:</b> %d %s' % (_e(PREMISE_LABEL), ev['premises_not_shown'], _e(PREMISES_NOT_SHOWN)))
     if ev.get('bound'):
         items.append('holds within: %s' % _e(ev['bound']))
     if c['state'] == 'not_established':

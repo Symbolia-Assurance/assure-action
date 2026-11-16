@@ -205,7 +205,7 @@ FEEDBACK_LIST_NOTES = 10                         # issue #5569: the most notes o
 DEFAULT_PROFILE = 'postgresql-observed-baseline'
 DEFAULT_OUTPUT = 'assure-verdict.json'
 FAILURE_SCHEMA = 'assure.serve.failure/v1'
-MODES = ('api', 'lint', 'local')
+MODES = ('api', 'lint', 'local', 'feedback')       # issue #6269: feedback sends notes and runs no check
 # Issue #6818: `mode: local` runs the engine on CPython 3.14, the Python the adapters' parser pins name (they take the
 # version from the running interpreter), whatever the runner's python3 is: run as a script on another Python, the
 # entry re-runs itself on the interpreter action.yml's setup-python step provisioned (ASSURE_ENGINE_PYTHON), else on the
@@ -229,6 +229,8 @@ MAX_NOTICE_NAMES = 20
 # show each with its placeholders and the docs test can render them; each `%(name)s` is the README's `<name>`.
 NOTICE_LINE = '::notice title=Assure::%(count)d name(s) not read by profile %(profile)s: %(names)s'
 LINT_LINE = 'Assure: lint: %(reading)s; %(findings)d finding(s); nothing was charged; policy exit %(exit)d; %(output)s'
+FEEDBACK_LINE = 'Assure: feedback: %(confirmed)d of %(notes)d notes confirmed; exit %(exit)d'     # issue #6269
+FEEDBACK_MODE_NO_INPUT = 'feedback mode needs the feedback input'                                # issue #6269
 WITHHELD_LINE = 'Assure: %(withheld)s'
 # Issue #1960: the order each mode prints the lines above in, each only when its condition holds; README-ACTION.md
 # lists the same order under its table and tests/serving/test_issue_1960_accept.py pins it against a run in each mode.
@@ -264,6 +266,8 @@ FOREIGN_DECLARATION_LINE = ('::notice title=Assure::%(rel)s is not read as Postg
 DECLARED_SOURCE = 'the collected catalog snapshot'
 PROPOSAL_FILE = 'assure-declaration-proposal.json'
 REQUIREMENTS_DRAFT_FILE = 'assure-requirements-draft.md'
+FEEDBACK_RECEIPTS_SUFFIX = '.feedback.json'           # issue #6268: <output>.feedback.json
+FEEDBACK_RECEIPTS_SCHEMA = 'assure.action.feedback-receipts/v1'
 # Issue #1186 (coordination 7588): the draft's typed companion, written beside it; read beside the requirements file
 # that is sent (`typed_requirements`)
 REQUIREMENTS_TYPED_FILE = 'assure-requirements-typed.json'
@@ -554,11 +558,24 @@ class _Scrub:
             s = s.replace(v, '***')
         return s
 
+    def deep(self, value):
+        """`value` (JSON) with every string in it scrubbed, keys too."""
+        if isinstance(value, str):
+            return self(value)
+        if isinstance(value, list):
+            return [self.deep(v) for v in value]
+        if isinstance(value, dict):
+            return {self(k): self.deep(v) for k, v in value.items()}
+        return value
+
     def refusal(self, e):
         detail = {k: (self(v) if isinstance(v, str) and k != 'answered' else v) for k, v in e.detail.items()}
         if isinstance(detail.get('faults'), list):    # a declaration refusal's rows: each string scrubbed too
             detail['faults'] = [{k: (self(v) if isinstance(v, str) else v) for k, v in f.items()}
                                 if isinstance(f, dict) else f for f in detail['faults']]
+        for k in ('received', 'suggested_app_roots'):    # issue #3925 round 2: app_roots as declared, and suggested
+            if k in detail:
+                detail[k] = self.deep(detail[k])
         out = Refusal(e.outcome, self(e.reason), **detail)
         upgrade = getattr(e, 'upgrade', None)          # issue #4577: the server's upgrade line (client `_typed`)
         if isinstance(upgrade, dict):
@@ -575,7 +592,7 @@ def load_collect():
 def _mode(env):
     m = _plain(env, 'INPUT_MODE').lower() or 'api'
     if m not in MODES:
-        raise Refusal('bad_input', 'mode must be api, lint or local')
+        raise Refusal('bad_input', 'mode must be api, lint, local or feedback')
     return m
 
 
@@ -806,7 +823,7 @@ def _superseded_pr_comment(body):
 
 
 def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, lead=None, setup=False, report=None,
-                    verdict_file=None, plan=()):
+                    verdict_file=None, plan=(), pg_starter=False):
     """Issue #2189: on a pull_request event, post `render.pr_comment_markdown(verdict)` as one comment on the pull
     request, or update in place the Assure comment that carries this profile/job's `_pr_comment_marker` owner line
     (#2566; the first 1000 comments are looked through). The first line stays `render.PR_COMMENT_MARKER`. An unowned
@@ -834,7 +851,7 @@ def post_pr_comment(env, verdict, github, tree=None, tree_bases=(), body=None, l
         body = render.pr_comment_markdown(verdict, commit=_head_commit(env), repository=repo, tree=tree,
                                           tree_bases=tree_bases, requirements_file=render.pr_requirements_file(
                                               requirements_named(env), env.get('GITHUB_WORKSPACE')), setup=setup,
-                                          plan=plan)
+                                          plan=plan, pg_starter=pg_starter)
         body = render.pr_with_report(body, report, verdict, verdict_file)
         body = with_lead(body, lead)      # the plan's app subset: what was checked leads the comment
     owner = _pr_comment_marker(env, verdict)
@@ -1842,6 +1859,9 @@ def write_proposal(verdict, files, directory, say, artifacts_url=None, proposed=
         counts = proposal_counts(record, verdict)
         _write_file(directory / PROPOSAL_FILE,
                     (json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
+        # Ready-to-edit starter: the proposal record's withheld declaration, never invented intent (STARTER_LINE: restore literals)
+        _write_file(directory / render.pg_nextsteps.STARTER_FILE,
+                    (json.dumps(record['declaration'], indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
         _write_file(directory / REQUIREMENTS_DRAFT_FILE, text.encode('utf-8'))
         snap = hashlib.sha256(bytes(files[PROPOSAL_SNAPSHOT])).hexdigest()
         companion = _proposal_module().typed_companion(record, text, PROPOSAL_SNAPSHOT + ' sha256:' + snap, notes)
@@ -1851,7 +1871,7 @@ def write_proposal(verdict, files, directory, say, artifacts_url=None, proposed=
         say('::warning title=Assure::%s' % _cmd_data('the declaration proposal could not be written (%s)'
                                                      % type(w).__name__))
         return ''
-    return proposal_markdown(counts, artifacts_url, proposed)
+    return proposal_markdown(counts, artifacts_url, proposed) + '\n' + render.pg_nextsteps.STARTER_LINE + '\n'
 
 
 def _scratch(env):
@@ -1944,7 +1964,10 @@ def _feedback_note(text, cwd, check_id, secrets_to_refuse=()):
         for note in notes:                        # every note is checked before any is posted
             if contains_secret(note):
                 raise _feedback_input_refusal('bad_input', 'secret')
-            note['check_id'] = check_id
+            if check_id is None:                  # issue #6269: mode feedback sends no server check id
+                note.pop('check_id', None)
+            else:
+                note['check_id'] = check_id
             encoded = json.dumps(note, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
             if len(encoded) > FEEDBACK_BODY_BYTES:
                 raise _feedback_input_refusal('oversize_input', 'body_bytes')
@@ -2070,34 +2093,61 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         except Exception:
             read, lines = None, ['Feedback: api_error; note not confirmed.']
             annotate('error', _FEEDBACK_INPUT_MESSAGES['invalid'])
+        notes, receipts = [], []
         if read is not None:
-            # issue #5569: notes go in order, one exchange each, and the first delivery failure stops the rest
-            notes, lines, confirmed = (read if isinstance(read, list) else [read]), [], 0
-            for note in notes:
-                try:
-                    receipt = state['client'].feedback(note)
-                    lines.append('Feedback: accepted; id %s; duplicate %s'
-                                 % (receipt['id'], str(receipt['duplicate']).lower()))
-                    confirmed += 1
-                except Refusal as e:
-                    outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
-                    lines.append('Feedback: %s; note not confirmed.' % outcome)
-                    annotate('warning', lines[-1])
-                    break
-                except Exception:
-                    lines.append('Feedback: api_error; note not confirmed.')
-                    annotate('warning', lines[-1])
-                    break
-            if isinstance(read, list):
-                lines.append('Feedback: %d of %d notes confirmed.' % (confirmed, len(notes)))
+            notes = read if isinstance(read, list) else [read]
+            lines, receipts, _ = send_feedback(notes, isinstance(read, list), annotate)
         try:
             _append(env.get('GITHUB_STEP_SUMMARY'), ''.join('\n' + line + '\n' for line in lines))
+        except Exception:
+            pass                                  # no secondary warning, value, path or exception text
+        feedback_outputs(notes, receipts)
+
+    def send_feedback(notes, listed, annotate):
+        """Issue #5569: notes go in order, one exchange each, and the first delivery failure stops the rest. Issue #6269:
+        shared by api mode and feedback mode; (summary lines, receipts, the Refusal that stopped them or None)."""
+        lines, receipts, stopped = [], [], None
+        for note in notes:
+            try:
+                receipt = state['client'].feedback(note)
+                lines.append('Feedback: accepted; id %s; duplicate %s'
+                             % (receipt['id'], str(receipt['duplicate']).lower()))
+                receipts.append({'id': receipt['id'], 'duplicate': receipt['duplicate'], 'kind': receipt['kind']})
+            except Refusal as e:
+                outcome = e.outcome if e.outcome in OUTCOMES else 'api_error'
+                lines.append('Feedback: %s; note not confirmed.' % outcome)
+                annotate('warning', lines[-1])
+                stopped = e if outcome == e.outcome else Refusal(outcome, 'the feedback note was not confirmed')
+                break
+            except Exception as e:
+                lines.append('Feedback: api_error; note not confirmed.')
+                annotate('warning', lines[-1])
+                stopped = Refusal('api_error', 'the feedback note was not confirmed (%s)' % type(e).__name__)
+                break
+        if listed:
+            lines.append('Feedback: %d of %d notes confirmed.' % (len(receipts), len(notes)))
+        return lines, receipts, stopped
+
+    def feedback_outputs(notes, receipts):
+        # issue #6268: the validated receipts (never the note text) as step outputs and a file beside the verdict file
+        try:
+            _write_file(out_path.with_name(out_path.name + FEEDBACK_RECEIPTS_SUFFIX), bundle.dumps(
+                {'schema': FEEDBACK_RECEIPTS_SCHEMA, 'receipts': receipts, 'confirmed': len(receipts),
+                 'notes': len(notes)}))
+            receipts_text = str(Path(out_text).parent / (Path(out_text).name + FEEDBACK_RECEIPTS_SUFFIX))
+        except Exception:
+            receipts_text = ''
+        try:
+            _append(env.get('GITHUB_OUTPUT'), 'feedback-ids=%s\nfeedback-confirmed=%d\nfeedback-receipts=%s\n'
+                    % (','.join(r['id'] for r in receipts), len(receipts), receipts_text))
         except Exception:
             pass                                  # no secondary warning, value, path or exception text
 
     def outputs(outcome, code, extra='', verdict=None, lint_colour=None):
         if lint_colour is not None:               # serve-043: a lint answer is green with no findings, else red
             colour, n = lint_colour, ''
+        elif state['mode'] == 'feedback' and code == 0:      # issue #6269: every note confirmed, no check was run
+            colour, n = 'green', ''
         elif verdict is None:                     # serve-016: a failure is red for bad input, yellow otherwise
             colour, n = ('red' if code == 2 else 'yellow'), ''
         else:
@@ -2186,7 +2236,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             pass
         if decl_line:
             say(decl_line)
-        if state['mode'] != 'lint':      # assure-on-itself-001 (requirements.md A2): the refusal on the pull request too
+        if state['mode'] not in ('lint', 'feedback'):      # issue #6269: feedback mode posts no comment; assure-on-itself-001 (requirements.md A2): the refusal on the pull request too
             try:                         # never changes the failure file or the exit; pr_comment types its own faults
                 named = requirements_named(env) not in ('', NONE_SENTINEL)   # issue #2174: the default too
                 body = render.pr_refusal_markdown(display_doc, (state['requirements_text'] or [None])[0], step or None,
@@ -2619,7 +2669,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                               'rel': DECLARED_CHECKOUT_PATH, 'observed': True, 'shown': None, 'added': sorted(added),
                               'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE, 'lead': ADDITIONS_LEAD % {
                                   'rel': DECLARED_CHECKOUT_PATH, 'source': DECLARED_SOURCE,
-                                  'rows': proposal_counts(record, verdict)['rows']}}}
+                                  'rows': proposal_counts(record, verdict)['rows']} + render.pg_nextsteps.proposal_steps(verdict)}}
             return
         try:            # REFUTATION-r6 MEDIUM-2: the summary shows only the withheld draft (write_proposal's), never `data`
             withheld = draft_proposal(state['files']) if isinstance(state['files'], dict) else None
@@ -2630,7 +2680,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                           'shown': None if withheld is None else declaration_draft.dumps(withheld[0]['declaration']),
                           'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE, 'lead': OBSERVED_LEAD % {
                               'rel': DECLARED_CHECKOUT_PATH, 'source': DECLARED_SOURCE,
-                              'rows': proposal_counts(record, verdict)['rows']}}}
+                              'rows': proposal_counts(record, verdict)['rows']} + render.pg_nextsteps.proposal_steps(verdict)}}
 
     def pg_declare(top, cap):
         """Issue #2435: `declare` for `action.collect._gather` on postgresql-declared-model: the checkout's
@@ -2717,7 +2767,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         top = Path(env.get('GITHUB_WORKSPACE') or cwd)
         drafted = {}
 
-        def plan_draft(repo, library_versions):         # the plan's app subset: drafted from the whole read
+        def plan_draft(repo, library_versions):         # the plan's app subset: the server's drafter drafts from it
             drafted['record'] = declaration_draft.draft(repo, client=state['draft_client'],
                                                         library_versions=library_versions)
             return drafted['record']
@@ -2747,6 +2797,35 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             repository_manifest.add_declared_pins(collected, top, drafted_doc, env, lim, modes, allow)
         manifest_written(repository_manifest.complete(collected, inputs['profile'], top, env, modes))
         return collected
+
+    def run_feedback():
+        """Issue #6269: `mode: feedback` runs no check and reads no artefacts or connection. It signs in with api-key,
+        else the GitHub OIDC identity, sends each note with no server check id, and answers outcome `feedback`; a note
+        not confirmed fails the run with that note's typed outcome."""
+        if out_error is not None:
+            raise out_error
+        text = env.get('INPUT_FEEDBACK')
+        if text is None or not str(text).strip():
+            raise Refusal('bad_input', FEEDBACK_MODE_NO_INPUT)
+        url = _plain(env, 'INPUT_API_URL') or DEFAULT_URL
+        client_mod.check_base_url(url)            # the api-url rule, before GitHub is asked for a token
+        key = raw_key.strip() or oidc_sign_in(url)            # issue #1263: no api-key, the GitHub OIDC sign-in
+        client = (client_factory or Client)(url, key)
+        state['client'] = client
+        read = _feedback_note(text, cwd, None, feedback_known_secrets)
+        notes = read if isinstance(read, list) else [read]
+        lines, receipts, stopped = send_feedback(notes, isinstance(read, list), lambda level, message: None)
+        try:
+            _append(env.get('GITHUB_STEP_SUMMARY'), ''.join('\n' + line + '\n' for line in lines))
+        except Exception:
+            pass                                  # no secondary warning, value, path or exception text
+        if stopped is not None:                   # the ids accepted before it are still outputs
+            feedback_outputs(notes, receipts)
+            raise stopped
+        say(FEEDBACK_LINE % {'confirmed': len(receipts), 'notes': len(notes), 'exit': 0})
+        outputs('feedback', 0)
+        feedback_outputs(notes, receipts)
+        return 0
 
     def run_api():
         if out_error is not None:
@@ -2941,6 +3020,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if argv_error is not None:                 # issue #1953: before any input is read
                 raise argv_error
             state['mode'] = _mode(env)
+            if state['mode'] == 'feedback':          # every feedback-mode run sets the three feedback outputs:
+                feedback_outputs([], [])             # a run refused before the first send leaves them at none confirmed
             state['report_on'] = parse_report(_plain(env, 'INPUT_REPORT'), state['mode'])   # serve-014: before anything is read
             state['allow_overage'] = parse_allow_overage(_plain(env, 'INPUT_ALLOW_OVERAGE'))     # serve-015
             state['fresh_check'] = parse_fresh_check(_plain(env, 'INPUT_FRESH_CHECK'))           # serve-023
@@ -2948,12 +3029,14 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 _plain(env, 'INPUT_COMPILE_REQUIREMENTS'))                                        # issue #2252
             if state['report_on'] and state['mode'] != 'api':
                 raise Refusal('bad_input', 'report is available in api mode only; set mode: api or leave report off')
+            if state['mode'] == 'feedback':          # issue #6269: no check; a Refusal still goes through failed()
+                return run_feedback()
             verdict, ignored = run_local() if state['mode'] == 'local' else run_api()
             inputs_profile = _plain(env, 'INPUT_PROFILE') or DEFAULT_PROFILE
         except Refusal as e:
             return failed(with_plan_line(e, state.get('plan')))
         except Exception as e:  # typed, never a traceback; the class name only, never a value
-            outcome = 'api_error' if state['mode'] == 'api' else 'checker_error'
+            outcome = 'api_error' if state['mode'] in ('api', 'feedback') else 'checker_error'
             return failed(Refusal(outcome, 'the Action failed unexpectedly (%s)' % type(e).__name__))
     finally:
         if state['scratch'] is not None:
@@ -2997,7 +3080,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         plan_log = render.plan_log_lines(usage_doc)
         footer_plan = render.footer_plan_lines(usage_doc)  # the comment footer: on free, the credit line too
         key_line = render.key_expiry_line(getattr(state.get('client'), 'key_expires', None))    # issue #1262
-        if key_line is not None:
+        if key_line is not None and state.get('oidc') is None:   # #6051: a sign-in key (set in oidc_sign_in) renews
             summary += '\n' + render.esc(key_line) + '\n'
         notes = render.annotations(verdict)
         summary = render.upgrade_markdown(verdict) + summary   # launch 2026-10-12: the server's upgrade line, first
@@ -3050,6 +3133,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         summary, notes = drafted_top_action(summary), [drafted_top_action(n) for n in notes]
     draft_out = ('requirements-draft=%s\n' % (Path(out_text).parent / REQUIREMENTS_DRAFT_FILE)  # issue #2892
                  if proposal_md else '')
+    if proposal_md:
+        draft_out += 'declaration-starter=%s\n' % (out_path.parent / render.pg_nextsteps.STARTER_FILE)
     client = state.get('client')
     tree_url = verdict.get('tree_url')
     tree_bases = (DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ())
@@ -3108,7 +3193,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     pr_comment(verdict, tree=pr_tree(verdict, state['tree']),
                tree_bases=(DEFAULT_URL,) + ((client.base,) if getattr(client, 'base', None) else ()), lead=subset_lead,
                report=state['report'] if state['report_on'] is True else None, verdict_file=out_path.name,
-               plan=footer_plan)
+               plan=footer_plan, pg_starter=bool(proposal_md))
     for line in notes:
         say(line)
     name_passed()                                      # issue #3861: after the verdict's notices

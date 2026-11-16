@@ -1012,7 +1012,8 @@ def app_roots(top, cap):
     """Issue #3841: the `app_roots` of the checkout's `.assure/declaration.json` under `top`, as normalised relative
     directory names (`./serve/` reads `serve`); None when there is no such file (a link is not read), it is over `cap`
     bytes or not a JSON object, `app_roots` is not a non-empty list of names, or a root names the whole checkout (`.`).
-    None reads the checkout as before: the free tier reads wide."""
+    None reads the checkout as before: the free tier reads wide. Issue #3925: a present `app_roots` key that is None
+    here never reaches that wide read; `from_checkout` refuses it first (`unusable_roots`)."""
     doc = _declaration(top, cap)
     return _roots(doc.get('app_roots')) if doc is not None else None
 
@@ -1228,6 +1229,78 @@ def _import_candidates(path, rel, search, cap):
     return out
 
 
+APP_ROOTS_SHAPE = 'a list of relative folder paths inside the checkout, such as ["app"]'
+_SHOWN = 200                  # characters of a refused app_roots value the reason quotes
+# Issue #3925 round 2 (the Director: "what is needed to get a reading so a customer side agent can configure"): the
+# refusal's `detail.accepted_shape`, one fixed string, beside `received`, `entries` and `suggested_app_roots`.
+APP_ROOTS_ACCEPTED = ("a non-empty list of repository-relative directory paths that exist in the checkout, with no "
+                      "'..' and not '.'")
+FLASK_STACK = 'python/flask'          # action.declaration_draft.STACK: the stack app_subset_roots finds app objects of
+
+
+def _root_entries(value, dirs):
+    """`detail.entries` of a refused `app_roots` value: one `{reason}` for a value that is not a list (`not_a_list`)
+    or is empty (`empty`), else one `{index, reason}` per entry `_roots` cannot use: `not_a_string`, `whole_checkout`
+    (`.` or `/`), `escapes_repository` (through `..`), or `not_found` (no tracked file under it, when `dirs`, the
+    checkout's tracked directories, is known). A usable entry has no item."""
+    if not isinstance(value, list):
+        return [{'reason': 'not_a_list'}]
+    if not value:
+        return [{'reason': 'empty'}]
+    out = []
+    for i, raw in enumerate(value):
+        parts = [p for p in raw.strip().replace('\\', '/').split('/') if p not in ('', '.')] \
+            if isinstance(raw, str) else None
+        reason = ('not_a_string' if parts is None else 'whole_checkout' if not parts
+                  else 'escapes_repository' if '..' in parts
+                  else 'not_found' if dirs is not None and '/'.join(parts) not in dirs else None)
+        if reason is not None:
+            out.append({'index': i, 'reason': reason})
+    return out
+
+
+def _suggested_roots(top, doc, env, cap):
+    """`detail.suggested_app_roots`: the tracked directories holding the declared framework's app object, as
+    `app_subset_roots` finds them (its one root, else the directory of each module creating an app object), read only
+    from the tracked Python files `from_checkout` lists; with the checkout's tracked directories. [] when the
+    declaration names another stack than Flask's, or none is found; never sent."""
+    try:
+        listing = _ls_files(top, env)
+    except Refusal:
+        return [], set()
+    rels = []
+    for row in listing.split(b'\0'):
+        try:
+            rels.append(row.partition(b'\t')[2].decode('utf-8'))
+        except UnicodeDecodeError:
+            continue
+    dirs = {d for rel in rels if rel for d in _ancestors(rel)} - {''}
+    if doc.get('schema') == IDENTITY_SCHEMA and doc.get('stack') != FLASK_STACK:
+        return [], dirs
+    roots, candidates = app_subset_roots(top, _tracked_python(listing), cap)
+    found = roots if roots is not None else sorted({posixpath.dirname(c) for c in candidates})
+    return [r for r in found if r in dirs], dirs
+
+
+def unusable_roots(doc, top=None, env=None, cap=None):
+    """Issue #3925 (remodel 36131 MEDIUM-1; the Director's option A): Refusal('bad_input') when a declaration object
+    has an `app_roots` key that yields no usable root (`_roots` None: not a non-empty list of strings, a `.` root, or
+    only roots outside the checkout), naming the value and the accepted shape; None otherwise. Such a key never widens
+    the read to the whole checkout: the run stops before any file is sent. No `app_roots` key reads as before.
+    Round 2 (the Director's word): the detail says what to declare, for an agent: `received` (the value as declared),
+    `accepted_shape`, `entries` (`_root_entries`) and `suggested_app_roots` (`_suggested_roots`, from the checkout at
+    `top`; [] without it)."""
+    if doc is None or 'app_roots' not in doc or _roots(doc['app_roots']) is not None:
+        return None
+    suggested, dirs = _suggested_roots(top, doc, env or {}, cap) if top is not None else ([], None)
+    shown = json.dumps(doc['app_roots'])
+    shown = shown if len(shown) <= _SHOWN else shown[:_SHOWN] + '...'
+    return Refusal('bad_input', '%s names app_roots %s, which names no usable folder; app_roots must be %s. Nothing '
+                   'was sent' % (CHECKOUT_DECLARATION, shown, APP_ROOTS_SHAPE), field='app_roots',
+                   received=doc['app_roots'], accepted_shape=APP_ROOTS_ACCEPTED,
+                   entries=_root_entries(doc['app_roots'], dirs), suggested_app_roots=suggested)
+
+
 def send_bound(top, cap):
     """The `Bound` of the checkout's declaration, or None to read the checkout as before."""
     return bound_of(_declaration(top, cap))
@@ -1315,12 +1388,18 @@ def from_checkout(top, allow, limits, env, bound=_UNSET):
     given neither artefacts nor a connection. Every tracked regular file at HEAD's index (`git ls-files -s -z`, read
     only) that is Python source or requirements.md becomes `raw/repository/<path>`; other tracked files are not read.
     Issue #3841: with `app_roots` in the checkout's `.assure/declaration.json`, only the Python files under those roots
-    are sent, with what the checker loads by name outside them (`Bound`). When the files to send would encode past
-    `limits.body_bytes`, `oversize_input` names the encoded size, the limit and `app_roots` before any file is sent
-    (issue #4748: for a declared factory, that `app_roots` does not narrow the read);
+    are sent, with what the checker loads by name outside them (`Bound`); issue #3925: an `app_roots` key that yields
+    no usable root is refused `bad_input` before any file is read for sending (`unusable_roots`; round 2: its detail's
+    `suggested_app_roots` parses the listed Python files in the runner, never sent). When the files to send would
+    encode past `limits.body_bytes`, `oversize_input` names the encoded size, the limit and `app_roots` before any file
+    is sent (issue #4748: for a declared factory, that `app_roots` does not narrow the read);
     with `app_roots`, the kept modules are parsed first for config loaded by name (`Bound.config_loads`).
     Returns (bundle.Collected, {path: git mode}). A name the profile does not admit is listed in `ignored`."""
     from serve import bundle
+    if bound is _UNSET:
+        refused = unusable_roots(_declaration(top, limits.file_bytes), top, env, limits.file_bytes)   # #3925: first
+        if refused is not None:
+            raise refused
     listing = _ls_files(top, env)
     bound = send_bound(top, limits.file_bytes) if bound is _UNSET else bound
     roots = bound.roots if bound is not None else None
@@ -1498,7 +1577,8 @@ def app_subset_roots(top, tracked, cap):
     else the root-level module holding one (a single-file app; `Bound.imports` follows what it imports). Returns
     (roots, candidates): `roots` is the one app's roots, or None when the subset cannot be computed soundly, and
     `candidates` the modules that create an app object (none: no app object found; the rule that applies yielding
-    more than one root: several candidates). A module over `cap` bytes or not Python 3 is not parsed."""
+    more than one root, or a module creating an app object outside that rule's one root (#5291): several
+    candidates). A module over `cap` bytes or not Python 3 is not parsed."""
     trees = {}
     for rel in sorted(tracked):
         if not rel.endswith('.py') or _skipped(rel):
@@ -1534,6 +1614,8 @@ def app_subset_roots(top, tracked, cap):
     if not roots:
         roots = sorted(p for p in building if '/' not in p)
     if len(roots) != 1:
+        return None, candidates
+    if any(not _under(c, roots) for c in candidates):     # issue #5291: an app object outside the one root
         return None, candidates
     return roots, candidates
 

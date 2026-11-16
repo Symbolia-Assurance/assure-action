@@ -10,7 +10,7 @@ Produces <out>/raw/submission.json, the `symbolia.mysql-declared-input.v0` docum
 (grant tables, mysql.user lock facts, the five global variables the checker reads, replication applier channels, stored
 program definitions, the server version); the DECLARED sections (declared_policy, m3, collection claims) are carried
 verbatim from the customer's declaration file. The collector never invents policy and never reads a password hash: it
-never selects authentication_string, and the whole merged document passes the frozen sensitive-field filter (revision 20,
+never selects authentication_string, and the whole merged document passes the frozen sensitive-field filter (revision 21,
 shipped beside this file, digest checked) before a byte is written; any finding refuses the run naming the path and kind,
 never the value.
 
@@ -39,12 +39,12 @@ FLAGS = {'execution_authorized': False, 'hardware_authorized': False, 'industria
          'release_allowed': False, 'physical_validation': False, 'simulation': True, 'self_approved': False}
 SCHEMA = 'symbolia.mysql-declared-input.v0'
 DECLARATION_SCHEMA = 'symbolia.mysql-declaration.v0'
-# The frozen data-protection filter the registry pins for mysql-declared-model (rev 20). Its bytes ship beside this
+# The frozen data-protection filter the registry pins for mysql-declared-model (rev 21). Its bytes ship beside this
 # collector as sensitive_field_filter_rev20.py (byte-equal to the registry copy under assure/checkers/) and are imported
 # as an ordinary module only after their digest is checked against the pin; a mismatch is a typed refusal. The
 # collector keeps no secret shape list of its own and loads no code dynamically.
 FILTER_MODULE = 'sensitive_field_filter_rev20'
-FILTER_SHA256 = '575549c5e02a11e986c3ba1ac1d06eb6623812e201f61d51e086f12359916104'
+FILTER_SHA256 = '2158790e2341c5ebf87d0758e227c8860f34010da11d2eee6092d4b0ec71688e'
 SERIES = {'8.0.': 800, '8.4.': 840, '9.7.': 970}
 MAX_DECLARATION = 64 * 1024
 ROW_CAP = 4096                       # rows read per source; beyond it the source is recorded unreadable (bounded)

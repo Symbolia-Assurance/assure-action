@@ -72,7 +72,7 @@ the subject of its log line:
 - DD-073 Addendum 2: `meaning_line` gives one plain sentence per colour from a closed template, and `why_lines` one line
   per disproven or deviating obligation from its statement and the profile's consequence ("Consequence not yet stated
   for <id>." where none is given); nothing is written by a model. One line per not-established obligation follows,
-  "<id>: <reason> — <action>[ — quote USD a–b]" (`not_established_line`).
+  "<id> <short name>: <reason sentence>. <Action>.[ — quote USD a–b]" (`not_established_line`, issue #7160).
 - yellow: "yellow: could not look: <reason>; <action>".
 The coverage is "[E of F <units> <verb>; ]N of M machines read[, K refused]" (with "(inferred)" for an inferred machine
 set, refutation-007 G3); the bounds "declared premises: n; version pins: <pins or none>", where an observed profile that
@@ -123,6 +123,7 @@ import unicodedata
 from types import MappingProxyType
 
 from .outcomes import BRIDGE_DOC_RE, OUTCOMES, REPO_PATH_RE, identity_required_step
+from . import pg_nextsteps
 
 CAP = 300
 MAX_ANNOTATIONS = 50
@@ -186,6 +187,26 @@ def esc(value, cap=CAP):
 
 def label(status):
     return str(status).replace('_', ' ')
+
+
+BASIS_CLAUSE = 'on %s; %d unproved item%s, listed on the proof tree page'
+BASIS_JOIN = ', '
+BASIS_COUNT = '%d on %s'
+
+
+def basis_clause(row):
+    if not isinstance(row, dict) or not isinstance(row.get('basis'), str):
+        return ''
+    unproved = row.get('unproved', [])
+    if not isinstance(unproved, list) or (row['basis'] == 'theorem' and not unproved):
+        return ''
+    return BASIS_CLAUSE % (_clip(row['basis'], 40), len(unproved), '' if len(unproved) == 1 else 's')
+
+
+def _basis_row(env, requirement):
+    if not isinstance(requirement, dict) or not isinstance(requirement.get('matched_obligations'), list):
+        return None
+    return next((m for m in _pr_matched_rows(env, requirement) or () if basis_clause(m)), None)
 
 
 def _extra_reason(row):
@@ -1002,13 +1023,18 @@ def representation_action(profile_id=None, reason=None, files=()):
             return '%s: %s' % (_PYTHON_INPUT_ACTION, words)
         # issue #4731: the line in plain words, never the class code, with or without the input's file list (u2:
         # without it the module stays 'module <name>', as `refusal_words` says)
-        first = entries[0]['cls']
-        pointer = (_PYTHON_PIN_ACTION if entries[0]['library']
-                   else _STAGE1_ACTIONS[first] if first in _STAGE1_ACTIONS
-                   else _PYTHON_REGISTRATION_LINE_ACTION if first == 'dynamic_registration'
-                   else _PYTHON_LINE_ACTION if len(_shown_refusals(entries)) == 1 else _PYTHON_LINES_ACTION)
-        return '%s; %s' % (refusal_words(original, files), pointer)
+        return '%s; %s' % (refusal_words(original, files), _refusal_pointer(entries))
     return '%s: %s' % (pointer, words) if words else pointer
+
+
+def _refusal_pointer(entries):
+    """The python-auth step for a structural refusal's entries (`_refusals`, non-empty): the pin, the stage-1 token's
+    step, the registration rewrite, or review that line / those lines."""
+    first = entries[0]['cls']
+    return (_PYTHON_PIN_ACTION if entries[0]['library']
+            else _STAGE1_ACTIONS[first] if first in _STAGE1_ACTIONS
+            else _PYTHON_REGISTRATION_LINE_ACTION if first == 'dynamic_registration'
+            else _PYTHON_LINE_ACTION if len(_shown_refusals(entries)) == 1 else _PYTHON_LINES_ACTION)
 
 
 # Issue #4731: the checker's structural refusal classes (assure/checkers/python-auth-declared-model REFUSAL_CLASSES and
@@ -1054,6 +1080,9 @@ _STAGE1_REFUSAL = re.compile(r'(declared_app_object_unbound) \(([^,()\r\n]{1,200
 _STAGE1_ACTIONS = {'declared_app_object_unbound': "fix the declaration's `app_objects` module or name and resubmit",
                    'no_routes_extracted': ("check that the declaration's `app_roots` and `app_objects` point at the "
                                            'served app and resubmit')}
+# issue #7160: the python-auth steps a row's own action may end on ('<refusal words>; <step>')
+_PYTHON_STEPS = (_PYTHON_INPUT_ACTION, _PYTHON_LINE_ACTION, _PYTHON_LINES_ACTION, _PYTHON_PIN_ACTION,
+                 _PYTHON_REGISTRATION_LINE_ACTION, _PYTHON_BOUND_ACTION) + tuple(_STAGE1_ACTIONS.values())
 _SPAN = re.compile(r'`([A-Za-z0-9_./:()\-\' ,=\[\]{}"]{1,250})`')
 # r1 HIGH-1: a call the customer wrote, whatever its arguments ('Api(app, prefix=\'/v1\')'), named before the
 # checker's own explanation
@@ -1263,13 +1292,28 @@ def _read_set(env):
     return set(m['read']) if m is not None else {r.get('machine') for r in _rows(env)}
 
 
-def could_not_look(envelope):
-    """True when nothing could be read at all: the input-integrity gate stopped the check (`a0`), no machine was read,
-    or a row with a selected scope observed none of its units (DESIGN-004 section 1 row 3 as corrected by the
-    remodel lane for serve-016: "no machine read, OR a scoped row with no unit observed"). An envelope without
-    `machines` looked unless `a0` is set or its scope observed nothing."""
+def gate_stopped(envelope):
+    """True when the input-integrity gate stopped the whole run (issue #7951): `a0` is set and no machine in
+    `machines.read` carries a row of a verdict status (`_verdicts`). An envelope with `a0` and no `machines` block
+    counts as stopped. Main's assembler refuses every machine whenever `a0` is set, so on every envelope it produces
+    this is exactly `a0 is not None`."""
     env = envelope if isinstance(envelope, dict) else {}
-    if env.get('a0') is not None:
+    if env.get('a0') is None:
+        return False
+    m = _machines(env)
+    if m is None:
+        return True
+    read, verdicts = set(m['read']), _verdicts(env)
+    return not any(r.get('machine') in read and r.get('status') in verdicts for r in _rows(env))
+
+
+def could_not_look(envelope):
+    """True when nothing could be read at all: the input-integrity gate stopped the check (`gate_stopped`: `a0` and no
+    machine read), no machine was read, or a row with a selected scope observed none of its units (DESIGN-004 section
+    1 row 3 as corrected by the remodel lane for serve-016: "no machine read, OR a scoped row with no unit observed").
+    An envelope without `machines` looked unless `a0` is set or its scope observed nothing."""
+    env = envelope if isinstance(envelope, dict) else {}
+    if gate_stopped(env):
         return True
     sc = _scope(env)
     if sc is not None and not sc['observed']:
@@ -1657,28 +1701,111 @@ def _empty_domain(entry, envelope):
     return _vacuous_row(envelope, entry.get('machine'), entry.get('id')) is not None
 
 
+def obligation_name(env, entry):
+    """'<id> <short name>' for a not-established entry (issue #7160): the short name from the profile's words
+    (`_pr_words` short_name), else the profile's catalogue phrase (`_pr_phrase`), else the id alone."""
+    e, env = (entry if isinstance(entry, dict) else {}), (env if isinstance(env, dict) else {})
+    ob_id = e.get('id')
+    name = _pr_words(env, ob_id, 'short_name') or _pr_phrase(env, ob_id) if isinstance(ob_id, str) else None
+    return ('%s %s' % (_clip(ob_id), _clip(name.strip().rstrip('.'))) if isinstance(name, str) and name.strip()
+            else _clip(ob_id))
+
+
+def summary_reason(env, entry):
+    """The plain reason sentence of a not-established entry (issue #7160; `_pr_unchecked_words`, `paid` for a quoted
+    row so 'nothing for you to do' never sits beside its quote). On HTTP_PROFILE a `needs_intent` row reads
+    'this depends on what the system is for': no HTTP requirement can hold in requirements.md. A
+    `not_observable_at_pin` or `missing_baseline` row keeps the value `reason_words` names after it, '(<the collector
+    pin>)' or '(<the major>)' (MEDIUM-1 on #7180)."""
+    e, env = (entry if isinstance(entry, dict) else {}), (env if isinstance(env, dict) else {})
+    cls = e.get('reason_class')
+    if cls == 'needs_intent' and env.get('profile') == HTTP_PROFILE:
+        return 'this depends on what the system is for'
+    words = _pr_unchecked_words(env, cls, paid=bool(_quote_words(e.get('quote'))))
+    if cls in ('not_observable_at_pin', 'missing_baseline'):
+        return '%s (%s)' % (words, reason_words(e, env))
+    return words
+
+
+def _sentence(text):
+    """`text` as one sentence: its first letter upper case and one full stop at its end."""
+    t = str(text or '').strip().rstrip('.')
+    return (t[:1].upper() + t[1:] + '.') if t else ''
+
+
+def _row_action(entry, envelope):
+    """The step of a not-established row (issue #7160): CLASS_ACTIONS for a listed class, else the row's own action. A
+    `not_observed`, `missing_premise` or python-auth `representation` row keeps its own; a `representation` row on
+    another profile adds its `needs` after 'a faithful input: ' unless the step names it; a `needs_intent` row whose
+    `needs` is not the default shows that `needs`."""
+    e, env = (entry if isinstance(entry, dict) else {}), (envelope if isinstance(envelope, dict) else {})
+    cls, needs = e.get('reason_class'), str(e.get('needs') or '')
+    own = _clip(e.get('action')) if e.get('action') else ''
+    profile = env.get('profile')
+    if cls == 'needs_intent':
+        if needs and needs != CLASS_NEEDS['needs_intent']:
+            return _clip(needs)
+        return own if profile == HTTP_PROFILE else CLASS_ACTIONS['needs_intent']
+    if cls == 'representation':
+        if profile == 'python-auth-declared-model':
+            return own or representation_action(profile)
+        action, head = representation_action(profile), CLASS_NEEDS['representation'] % ''
+        rest = needs[len(head):].strip() if needs.startswith(head) else ''
+        return '%s: %s' % (action, _clip(rest)) if rest and rest not in action else action
+    if cls in CLASS_ACTIONS:
+        return CLASS_ACTIONS[cls]
+    return own
+
+
 def not_established_words(entry, envelope=None):
-    """The words of a not-established line after its id: '<reason> — <owner>: <needs>[ — quote USD a–b]'; an empty
-    domain (`_empty_domain`) reads '<EMPTY_DOMAIN_WORDS> — <the row's reason>', with no owner and no action."""
+    """The words of a not-established line after its name (issue #7160): '<reason sentence>. <Action>.[ — quote USD
+    a–b]' (`summary_reason`, `_row_action`); a locator-fallback `not_observed` row names LOCATOR_FALLBACK_WORDS after
+    its reason (issue #652). An empty domain (`_empty_domain`) reads '<EMPTY_DOMAIN_WORDS> — <the row's reason>', with no
+    owner and no action."""
     e = entry if isinstance(entry, dict) else {}
     if _empty_domain(e, envelope):
         reason = _vacuous_row(envelope, e.get('machine'), e.get('id')).get('reason')
         return '%s%s' % (EMPTY_DOMAIN_WORDS, ' — %s' % _clip(reason) if reason else '')
-    tail = '%s: %s' % (_clip(e['owner']), _clip(e.get('needs'))) if e.get('owner') else _clip(e.get('action'))
-    return '%s — %s%s' % (_clip(reason_words(e, envelope)), tail, _quote_words(e.get('quote')))
+    reason = summary_reason(envelope, e)
+    if e.get('reason_class') == 'not_observed' and action_source(e) == 'locator_fallback':
+        reason = '%s (%s)' % (reason, LOCATOR_FALLBACK_WORDS)
+    action = _sentence(_row_action(e, envelope))
+    return '%s.%s%s' % (_clip(reason).rstrip('.'), ' ' + action if action else '', _quote_words(e.get('quote')))
 
 
 def not_established_line(entry, envelope=None):
-    """'<id>: <reason> — <owner>: <needs>[ — quote USD a–b]' for one not-established entry (coordination 2102 A22;
-    plain text, parts bounded); an entry without `owner` (an earlier serve-016 envelope) shows its action."""
+    """'<id> <short name>: <reason sentence>. <Action>.[ — quote USD a–b]' for one not-established entry (issue #7160;
+    plain text, parts bounded; `obligation_name`, `not_established_words`)."""
     e = entry if isinstance(entry, dict) else {}
-    return '%s: %s' % (_clip(e.get('id')), not_established_words(e, envelope))
+    return '%s: %s' % (obligation_name(envelope, e), not_established_words(e, envelope))
+
+
+def not_established_annotation(entry, envelope=None):
+    """'<id>: <reason> — <owner>: <needs>[ — quote USD a–b]' for one not-established entry (coordination 2102 A22): the
+    strict `::notice` annotation's words, which keep main's form (issue #7160); an entry without `owner` (an earlier
+    serve-016 envelope) shows its action."""
+    e = entry if isinstance(entry, dict) else {}
+    tail = '%s: %s' % (_clip(e['owner']), _clip(e.get('needs'))) if e.get('owner') else _clip(e.get('action'))
+    return '%s: %s — %s%s' % (_clip(e.get('id')), _clip(reason_words(e, envelope)), tail, _quote_words(e.get('quote')))
+
+
+def _refusal_step(entry, envelope):
+    """The step of a structural-refusal row (issue #7160, r1 HIGH-1): the last '; '-part of the row's own action when
+    it is one of the python-auth steps, else the pointer `_refusal_pointer` picks from its `needs`."""
+    e = entry if isinstance(entry, dict) else {}
+    head = CLASS_NEEDS['representation'] % ''
+    last = str(e.get('action') or '').rsplit('; ', 1)[-1]
+    if last in _PYTHON_STEPS:
+        return last
+    entries = _refusals(str(e.get('needs') or '')[len(head):])
+    return _refusal_pointer(entries) if entries else _PYTHON_INPUT_ACTION
 
 
 def _needs_md(entry, envelope):
-    """The Markdown of a representation entry's words after its id when its `needs` carries a structural refusal
-    (issue #4731): the owner chain as `not_established_words` gives it, then the refusal in plain words
-    (`_refusal_md`); None for any other entry, which keeps `not_established_words`. The JSON `needs` is unchanged."""
+    """The Markdown of a representation entry's words after its name when its `needs` carries a structural refusal
+    (issue #4731): '<reason sentence>: ', the refusal in plain words (`_refusal_md`), then its step as one sentence
+    (`_refusal_step`, issue #7160); None for any other entry, which keeps `not_established_words`. The JSON `needs` is
+    unchanged."""
     e = entry if isinstance(entry, dict) else {}
     head, needs = CLASS_NEEDS['representation'] % '', str(e.get('needs') or '')
     if (e.get('reason_class') != 'representation' or not e.get('owner') or not needs.startswith(head)
@@ -1687,14 +1814,17 @@ def _needs_md(entry, envelope):
     md = _refusal_md(envelope if isinstance(envelope, dict) else {}, needs[len(head):])
     if md is None:
         return None
-    lead = '%s — %s: %s' % (_clip(reason_words(e, envelope)), _clip(e['owner']), head)
-    return _esc_line(lead) + md + _esc_line(_quote_words(e.get('quote')))
+    lead = '%s: ' % _clip(summary_reason(envelope, e))
+    step = ' ' + _sentence(_refusal_step(e, envelope))
+    return (_esc_line(lead) + md.rstrip('.') + '.' + _esc_line(step)
+            + _esc_line(_quote_words(e.get('quote'))))
 
 
 def not_established_lines(entries, envelope=None):
     """The summary's bullet lines for a not-established list. Issue #458: when more than COLLAPSE_SHARED_ACTIONS
-    entries share the words after their id, those words print once, '- Next step for <n> obligations: <words>', with
-    the ids on one sub-bullet under it, in the place of the first such entry; every other entry keeps its own line.
+    entries share the words after their id, those words print once, '- These <n> rules could not be checked: <words>',
+    with each entry's `obligation_name` on one sub-bullet under it (issue #7161), in the place of the first such entry;
+    every other entry keeps its own line.
     The Action's annotation lines and the API's per-row `next_step` are not read from here and stay per row."""
     pairs = [(e, not_established_words(e, envelope)) for e in entries]
     groups = {}
@@ -1705,13 +1835,14 @@ def not_established_lines(entries, envelope=None):
         group = groups[words]
         md = _needs_md(e, envelope)
         if len(group) <= COLLAPSE_SHARED_ACTIONS:
-            out.append('- %s' % (_esc_line('%s: ' % _clip(e.get('id'))) + md if md
+            out.append('- %s' % (_esc_line('%s: ' % obligation_name(envelope, e)) + md if md
                                  else _esc_line(not_established_line(e, envelope))))
         elif words not in shown:
             shown.add(words)
-            out.append('- %s' % (_esc_line('Next step for %d obligations: ' % len(group)) + md if md
-                                 else _esc_line('Next step for %d obligations: %s' % (len(group), words))))
-            out.append('  - %s' % _esc_line(', '.join(_clip(x.get('id') if isinstance(x, dict) else x) for x in group)))
+            out.append('- %s' % (_esc_line('These %d rules could not be checked: ' % len(group)) + md if md
+                                 else _esc_line('These %d rules could not be checked: %s' % (len(group), words))))
+            out.append('  - %s' % _esc_line(', '.join(obligation_name(envelope, x) if isinstance(x, dict) else _clip(x)
+                                                      for x in group)))
     return out
 
 
@@ -1949,9 +2080,10 @@ def _red_words(env, finding):
     kind, ob_id, row = finding
     if kind == 'disproven' and row is not None:
         k = len(disproven_rows(env))                 # issue #1038: the count, then the first in reading order
-        return 'disproven: %s%s — %s' % ('%d, first ' % k if k > 1 else '',
-                                         _clip(ob_id if ob_id is not None else row.get('machine')),
-                                         _witness_parts(env, row))
+        clause = basis_clause(row)
+        return 'disproven: %s%s%s — %s' % ('%d, first ' % k if k > 1 else '',
+                                           _clip(ob_id if ob_id is not None else row.get('machine')),
+                                           BASIS_JOIN + clause if clause else '', _witness_parts(env, row))
     if kind == 'chosen':                             # REFUTATION-028 F2: never "disproven"
         return 'stopped by your choice: %s — %s' % (_clip(label((row or {}).get('status'))),
                                                      _clip(ob_id if ob_id is not None else (row or {}).get('machine')))
@@ -2195,7 +2327,13 @@ def verdict_line(envelope):
     c = env.get('colour')
     if c not in COLOURS:
         return None
-    req = requirements_words(env)                     # serve-019: after the not-established count
+    bases = {}
+    for q in requirement_rows(env) or ():
+        row = _basis_row(env, q) if q.get('state') == 'holds' else None
+        if basis_clause(row):
+            bases[_clip(row['basis'], 40)] = bases.get(_clip(row['basis'], 40), 0) + 1
+    basis_counts = ' (%s)' % BASIS_JOIN.join(BASIS_COUNT % (n, b) for b, n in sorted(bases.items())) if bases else ''
+    req = requirements_words(env, basis_counts)       # serve-019: after the not-established count
     if c == 'yellow':
         line = 'yellow: could not look: %s%s' % (_could_not_look_words(env), '; %s' % req if req else '')
         return _provisional_line(line, env)
@@ -2383,12 +2521,12 @@ def requirement_counts(envelope):
     return out
 
 
-def requirements_words(envelope):
+def requirements_words(envelope, held=''):
     """'requirements: h hold, n not established[, d disproven]' for the first line, or None (`requirement_rows`)."""
     c = requirement_counts(envelope)
     if c is None:
         return None
-    words = 'requirements: %d hold, %d not established' % (c['holds'], c['not_established'])
+    words = 'requirements: %d hold%s, %d not established' % (c['holds'], held, c['not_established'])
     return words + (', %d disproven' % c['disproven'] if c['disproven'] else '')
 
 
@@ -2765,7 +2903,7 @@ def _strict_words(env):
 
 
 def _outcome_words(env):
-    if env.get('a0') is not None:
+    if gate_stopped(env):
         return 'No reading: input integrity'
     if env.get('outcome') != 'verdict':
         return 'No verdicts'
@@ -3152,13 +3290,17 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
     machines = _machines(env)
     # serve-016: with the verdict line as the headline, the contract's words (section 5) lead the body instead
     lead_a0, lead_nv = ('No reading: input integrity. ', 'No verdicts: ') if line is not None else ('', '')
-    if env.get('a0') is not None:
+    if gate_stopped(env):
         out.append('')
         out.append('%sThe input integrity gate stopped the check, so no obligation was read: %s'
                    % (lead_a0, esc(env.get('a0'))))
         named_file = re.search(r'raw/[A-Za-z0-9_./-]{1,200}', str(env.get('a0')))   # R2-7: what the yellow line means
         if named_file:
             out.append('The file it names: %s.' % esc(named_file.group(0).rstrip('.')))
+    elif env.get('a0') is not None:               # issue #7951: the gate left a machine read (PR #7375's sentence)
+        out.append('')
+        out.append('The input integrity gate refused every machine but %s: %s'
+                   % (esc(', '.join(machines['read'])), esc(env.get('a0'))))
     elif env.get('outcome') != 'verdict':
         out.append('')
         out.append('%sNone of the readings is a verdict that checked something; a vacuous reading only says a domain '
@@ -3247,6 +3389,8 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
         for r in group:
             where = esc(r.get('machine')) + (' ' + esc(r.get('id')) if r.get('id') is not None else '')
             line = '- %s: %s' % (where, esc(r.get('status_text')))
+            if basis_clause(r):
+                line += BASIS_JOIN + esc(basis_clause(r))
             extra = _row_extra(env, r)
             if extra:
                 line += ' (%s)' % extra
@@ -3381,6 +3525,8 @@ def annotations(envelope):
         where = '%s %s' % (r.get('machine'), r.get('id')) if r.get('id') is not None else str(r.get('machine'))
         title = 'Assure %s %s' % (label(r.get('status')), where)
         msg = str(r.get('status_text') or '')
+        if basis_clause(r):
+            msg += BASIS_JOIN + basis_clause(r)
         # issue #492: as in _row_extra, a reason taken from the witness defers to the fuller witness line
         witness = witness_text(envelope, r) if r.get('status') == 'fails' and (
             not _extra_reason(r) or r.get('reason') == witness_words(envelope, r)) else None
@@ -3402,7 +3548,7 @@ def annotations(envelope):
     if first is not None and STRICT in ((envelope.get('policy') or {}).get('fail_on') or ()):
         for e in [e for e in envelope.get('not_established') or () if isinstance(e, dict)][:MAX_ANNOTATIONS]:
             lines.append('::notice title=%s::%s' % (_cmd_prop('Assure not established %s' % e.get('id')),
-                                                    _cmd_data(not_established_line(e, envelope))))
+                                                    _cmd_data(not_established_annotation(e, envelope))))
     return lines
 
 
@@ -3634,6 +3780,9 @@ OUTCOME_WORDS = MappingProxyType({
     'tier_required': 'Assure did not run this check: paid formalisation needs a Premium account.',
     'billing_unavailable': "Assure did not change this account's tier: billing is not available on this server just "
                            'now.',
+    # ACC-1: the account routes of a GitHub sign-in session (serve/accounts.py), which the Action never calls
+    'forbidden': 'Assure did not change this account: the GitHub user signed in may not do what was asked.',
+    'not_configured': 'Assure did not sign in with GitHub: GitHub sign-in is not configured on this server.',
     'api_unreachable': 'Assure did not run this check: the runner could not reach the API.',
     'api_error': 'Assure did not run this check: the API answered in a way the Action does not accept.',
 })
@@ -3877,7 +4026,7 @@ def _pr_obligation_text(env, r):
 
 def _pr_phrase(env, ob_id):
     table = PR_CATALOGUE_PHRASES.get(env.get('profile')) if isinstance(env.get('profile'), str) else None
-    return (table or {}).get(ob_id)
+    return (table or {}).get(ob_id) if isinstance(ob_id, str) else None      # b1 LOW-1: an unhashable id
 
 
 def _pr_words(env, ob_id, key):
@@ -4256,6 +4405,14 @@ def _pr_formalisable(env, r):
             and r.get('reason_class') == 'missing_method' and r.get('needs_formalisation_quote') is True
             and isinstance(r.get('formalisation_quote'), dict)
             and _free_upgrade_url(env.get('upgrade')) is not None)      # a free account (#4611), never a gifted plan
+
+
+def _pr_pg_intent_words(env, rows):
+    """The fields that settle these PostgreSQL intent rows; the checker remains authoritative."""
+    if env.get('profile') != pg_nextsteps.PROFILE:
+        return None
+    return '; '.join(dict.fromkeys(text for r in rows if r.get('status') == 'needs_intent'
+                                   for text in [pg_nextsteps.step(r.get('id'))] if text)) or None
 
 
 def _pr_unchecked_words(env, cls, coverage=False, paid=False):
@@ -5034,7 +5191,7 @@ def pr_reading(envelope):
     """The comment's reading (issue #2189), decided from the sets the job summary decides from: `red_findings` (the
     obligation readings on machines that were read, then the requirement rows), the read set, `could_not_look`, `a0`
     and `outcome`. Returns {no_reading, red, broken, deviations, others, holds, unchecked}:
-    - no_reading: None, or the summary's words for why there is no reading (`a0`: "No reading: input integrity";
+    - no_reading: None, or the summary's words for why there is no reading (`gate_stopped`: "No reading: input integrity";
       an outcome that is not `verdict`: the lines a refusal names as unread when it names any (issue #3146,
       `_pr_unread`), else "No verdicts"; nothing could be read: "Could not look");
     - unread: those lines, [(what, 'path:line')], for the comment to link; empty otherwise;
@@ -5066,6 +5223,7 @@ def pr_reading(envelope):
         if kind == 'disproven' and isinstance(row, dict) and row.get('status') == 'deviates':
             red_dev.add((row.get('machine'), row.get('id')))
         elif kind == 'disproven':
+            item['basis_clause'] = basis_clause(row)
             broken.append(item)
         else:
             others.append((kind, item))
@@ -5096,12 +5254,15 @@ def pr_reading(envelope):
         lab, name = _pr_label(env, r, None)
         if r.get('state') == 'holds':
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None), 'requirement': r.get('id'),
+                          'basis_clause': basis_clause(_basis_row(env, r)),
                           **({'mapped': True} if name and _checked_as(r) else {})})
         else:
             # issue #4626: an empty domain (issue #1292) says there is nothing to check, never its coverage class
             cls = 'vacuous' if empty_domain_requirement(r, env) is not None else r.get('reason_class')
             words = None if unread else _pr_unchecked_words(env, cls, r.get('id') in counted_reqs,
                                                             paid=_pr_paid_row(env, r))
+            if cls == 'needs_intent' and not unread:
+                words = _pr_pg_intent_words(env, _pr_matched_rows(env, r)) or words
             scope = _pr_scope_words(env, r)         # note 3: written for another check, apart from no method yet
             if scope is not None:
                 words = scope
@@ -5128,17 +5289,22 @@ def pr_reading(envelope):
                                       _clip(r.get('machine'))),
                                   coverage=True))      # issue #3150: a machine left unread is always said
         elif r.get('machine') not in read:
-            continue                                   # a refused machine's rows: the closing line names the machine
+            intent = _pr_pg_intent_words(env, [r])
+            if intent:
+                unchecked.append(dict(ids, label=lab, name=name, requirement=None, cls='needs_intent',
+                                      words='machine not read; ' + intent, coverage=True))
+            continue                                   # the intent step never asserts a machine was read
         elif r.get('status') == 'holds':
-            holds.append(dict(ids, label=lab, name=name, checked=_pr_checked(env, None, r), requirement=None))
+            holds.append(dict(ids, label=lab, name=name, checked=_pr_checked(env, None, r), requirement=None,
+                              basis_clause=basis_clause(r)))
         else:
             cls = _pr_reason_class(env, r)
             said = 'vacuous' if _empty_domain(r, env) else cls      # issue #4626: an empty domain, nothing to check
             unchecked.append(dict(ids, label=lab, name=name, requirement=None, cls=cls,
-                                  words=None if unread else _with_premise(_pr_unchecked_words(env, said, key in counted_obs),
-                                                                          [r]),     # codex-conflicts 4363
+                                  words=None if unread else _with_premise(_pr_pg_intent_words(env, [r]) or
+                                              _pr_unchecked_words(env, said, key in counted_obs), [r]),     # codex-conflicts 4363
                                   quiet=cls == 'vacuous' or CLASS_OWNERS.get(cls) == 'symbolia'))
-    if env.get('a0') is not None:
+    if gate_stopped(env):
         no_reading = ('No reading: input integrity. The input integrity gate stopped the check, so no rule was read: '
                       '%s' % _clip(env.get('a0')))
     elif env.get('outcome') != 'verdict' and unread:
@@ -5789,6 +5955,31 @@ def pr_model_refresh_line(env):
     return PR_MODEL_REFRESH_LINE % (_PR_REFRESH_ROUTE, '%.2f' % q, PR_MODEL_REFRESH_METERED[r['metered']])
 
 
+# Issue #6240: the saved model's own status (the verdict's `formal_model.state`, `proof_tree.drift_of` against this
+# run's files), kept apart from this run's results. It states what changed and nothing about a refresh.
+PR_MODEL_DRIFTED = ('This check is from this run. Your saved formal model is older than this code: %s%s it read %s '
+                    'changed since.')
+PR_MODEL_CURRENT = 'Your saved formal model is current with this code.'
+_PR_MODEL_BUILT = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def pr_model_status_line(tree):
+    """PR_MODEL_DRIFTED (the built date, the count of changed files) for a `formal_model` whose `state` is 'drifted';
+    PR_MODEL_CURRENT for 'current'; None for 'unknown', for a block without `state` (older stored verdicts) or a
+    malformed count, and when `tree` carries no well-formed `formal_model`."""
+    fm = tree.get('formal_model') if isinstance(tree, dict) else None
+    if formal_model_counts(fm) is None:
+        return None
+    if fm.get('state') == 'current':
+        return PR_MODEL_CURRENT
+    n = fm.get('changed_count')
+    if fm.get('state') != 'drifted' or type(n) is not int or n < 1:
+        return None
+    built = fm.get('built_at')
+    built = ('built %s, and ' % built[:10]) if isinstance(built, str) and _PR_MODEL_BUILT.match(built) else ''
+    return PR_MODEL_DRIFTED % (built, '%d file' % n if n == 1 else '%d files' % n, 'has' if n == 1 else 'have')
+
+
 class _PrMachines:
     """Issue #3221: each machine in the profile's own words (the envelope's `machine_words`, the profile row's machine
     table) the first time the comment names it, 'M6 (security-definer functions)'; plain 'M6' after that, and always
@@ -5936,9 +6127,12 @@ def _pr_unchecked_lines(env, unchecked, names):
     # #4281: a group whose every rule has the profile's words is labelled by their short names, as a single line is,
     # with the count and the ids (each machine in words) on the line under it; a group with a rule that has no words
     # keeps the form below
-    groups = _pr_groups(unchecked, lambda u: None if static or u['requirement'] is not None or u['words'] is None
+    groups = _pr_groups(unchecked, lambda u: None if static or (env.get('profile') == pg_nextsteps.PROFILE and u.get('cls') == 'needs_intent')
+                        or u['requirement'] is not None or u['words'] is None
                         or not u.get('id') else u['words'])
-    for group in groups[:MAX_ANNOTATIONS]:
+    selected = [g for i, g in enumerate(groups) if i < MAX_ANNOTATIONS or
+                (env.get('profile') == pg_nextsteps.PROFILE and g[0].get('cls') == 'needs_intent')]
+    for group in selected:
         u = group[0]
         if len(group) > 1:
             group = _pr_machine_order(group)
@@ -6039,6 +6233,7 @@ def _pr_listed_unchecked(env, rd):
     """The "Not checked yet" rows the comment lists (issue #3150)."""
     written = bool(requirement_rows(env))
     return [u for u in rd['unchecked'] if u['requirement'] is not None or u.get('coverage')
+            or (env.get('profile') == pg_nextsteps.PROFILE and u.get('cls') == 'needs_intent')
             or not (written or u.get('quiet'))]
 
 
@@ -6087,12 +6282,16 @@ def _pr_sections(env, rd, repository=None, commit=None, requirements_file=None, 
     # issue #3221: a run that sent no requirements.md (`requirements: none`, or none named) chose to skip the checks
     # that depend on what the system is for; the comment says so once instead of asking on every row
     skipped = [u for u in unchecked if u['requirement'] is None and u.get('cls') == 'needs_intent'] \
-        if requirement_rows(env) is None and not _pr_static(env) else []
+        if requirement_rows(env) is None and not _pr_static(env) and env.get('profile') != pg_nextsteps.PROFILE else []
     unchecked = [u for u in unchecked if not any(u is x for x in skipped)]
     if unchecked or skipped:
         out += ['### Not checked yet', '']
         if unchecked:
             out += _pr_unchecked_lines(env, unchecked, names) + ['']
+            if env.get('profile') == pg_nextsteps.PROFILE and any(
+                    u.get('cls') == 'needs_intent' and pg_nextsteps.DECLARATION_PATH in (u.get('words') or '')
+                    for u in unchecked):          # remodel 37423 R1: where a committed declaration is read, once
+                out += [pg_nextsteps.COMMITTED_LINE, '']
         if skipped:
             out += _pr_skipped_lines(env, skipped, names) + ['']
     vacuous = vacuous_footer(env)                 # issue #6423: the vacuous rows, never listed above, said once
@@ -6113,7 +6312,7 @@ def pr_comment_markdown(*args, **kwargs):
 
 
 def _pr_comment_markdown_body(envelope, commit=None, repository=None, tree=None, tree_bases=(), requirements_file=None,
-                        setup=False, plan=()):
+                        setup=False, plan=(), pg_starter=False):
     """The one pull request comment for a verdict envelope (issue #2189), from `pr_reading`: the marker the Action
     finds it by; the heading (`pr_heading`); for no reading, the summary's words for why; then the sections that have
     entries, each headed in words: one "Broken: <rule>" per broken rule (what the reading says the change does, each
@@ -6182,6 +6381,8 @@ def _pr_comment_markdown_body(envelope, commit=None, repository=None, tree=None,
         out += [esc(rd['no_reading']), '']
 
     out += _pr_sections(env, rd, repository, commit, requirements_file, names, setup)
+    if pg_starter and env.get('profile') == pg_nextsteps.PROFILE:
+        out += [pg_nextsteps.STARTER_LINE, '']
     covered = coverage_line(env) if rd['no_reading'] is None and not rd['unread'] else None
     if covered is not None:                      # issue #4230: the rows a coverage proposal could decide, read runs only
         out += [esc(covered, COVERAGE_CAP), '']
@@ -6231,6 +6432,9 @@ def _pr_footer(env, commit, tree, tree_bases, read=True, names=None, decided=Tru
         fm_line = pr_formal_model_line(tree, tree_bases, env)  # issue #3881: only with the verdict's formal_model
         if fm_line is not None:
             out += [fm_line, '']
+            status = pr_model_status_line(tree)   # issue #6240: the saved model's status, its own paragraph
+            if status is not None:
+                out += [status, '']
         refresh = pr_model_refresh_line(env)      # issue #6055: the saved model predates this code (Premium only)
         if refresh is not None:
             out += [refresh, '']
@@ -6383,10 +6587,14 @@ def report_status_lines(envelope):
     env = envelope if isinstance(envelope, dict) else {}
     rd = pr_reading(env)
     kinds = {k: w for k, w, _ in PR_OTHER_KINDS}
-    out = ['- **%s** %s.' % (esc(i['label']), PR_STATUS_WORDS['broken']) for i in rd['broken'][:MAX_ANNOTATIONS]]
+    out = ['- **%s** %s%s.' % (esc(i['label']), PR_STATUS_WORDS['broken'],
+                               BASIS_JOIN + esc(i['basis_clause']) if i.get('basis_clause') else '')
+           for i in rd['broken'][:MAX_ANNOTATIONS]]
     out += ['- **%s** %s.' % (esc(i['label']), PR_STATUS_WORDS['deviates']) for i, _ in rd['deviations'][:MAX_ANNOTATIONS]]
     out += ['- **%s** is %s.' % (esc(i.get('label') or i.get('text')), kinds[k]) for k, i in rd['others'][:MAX_ANNOTATIONS]]
-    out += ['- **%s** %s.' % (esc(h['label']), PR_STATUS_WORDS['holds']) for h in rd['holds'][:MAX_ANNOTATIONS]]
+    out += ['- **%s** %s%s.' % (esc(h['label']), PR_STATUS_WORDS['holds'],
+                                BASIS_JOIN + esc(h['basis_clause']) if h.get('basis_clause') else '')
+            for h in rd['holds'][:MAX_ANNOTATIONS]]
     out += ['- **%s** %s.' % (esc(u['label'] or u['name']), PR_STATUS_WORDS['unchecked'])
             for u in _pr_listed_unchecked(env, rd)[:MAX_ANNOTATIONS]]
     return out

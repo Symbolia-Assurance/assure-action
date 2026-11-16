@@ -8,7 +8,7 @@ author: Symbolia
 
 inputs:
   mode:
-    description: "api (the check runs on the Assure API), lint (a free pre-flight: the same local steps, then POST /v1/lint instead of a check; nothing is charged and no check runs), or local (in-runner, private distribution only)."
+    description: "api (the check runs on the Assure API), lint (a free pre-flight: the same local steps, then POST /v1/lint instead of a check; nothing is charged and no check runs), local (in-runner, private distribution only), or feedback (no check runs: the Action sends only the notes in the feedback input and charges nothing)."
     required: false
     default: api
   api-key:
@@ -84,7 +84,7 @@ inputs:
     required: false
     default: 'false'
   feedback:
-    description: Deliberate feedback as one JSON object, or a JSON list of up to 10 objects, or a plain path to a UTF-8 JSON file written by the workflow, at most 16384 bytes. Empty is off. In api mode, after the check the Action sends each note in order, one request each, with its server check id attached; the first note not confirmed stops the rest. A feedback error adds only a typed outcome to the job summary and never changes the verdict, outputs or exit. Local and lint modes do not read or send it.
+    description: Deliberate feedback as one JSON object, or a JSON list of up to 10 objects, or a plain path to a UTF-8 JSON file written by the workflow, at most 16384 bytes. Empty is off. In api mode, after the check the Action sends each note in order, one request each, with its server check id attached; the first note not confirmed stops the rest. The accepted receipt ids are set as feedback-ids and feedback-confirmed, and the receipts file beside the verdict file as feedback-receipts. A feedback error adds only a typed outcome to the job summary; feedback-ids and feedback-confirmed then hold only what was accepted before it, and it never changes the verdict, the check's outputs or exit. Local and lint modes do not read or send it. In feedback mode no check runs; the Action sends each note in order with no check id attached, signs in with the api-key or else the workflow's GitHub identity (the job needs id-token write permission), and needs no artefacts, connection or api-key; there a note not confirmed fails the run with its typed outcome.
     required: false
     default: ''
   requirements:
@@ -113,14 +113,17 @@ inputs:
     default: python3
 
 outputs:
+  declaration-starter:
+    description: "PostgreSQL observed catalog starter declaration; review the row-specific intent fields before committing. Empty when no starter was written."
+    value: ${{ steps.assure.outputs.declaration-starter }}
   verdict-path:
     description: The path of the verdict file (or of the failure file).
     value: ${{ steps.assure.outputs.verdict-path }}
   outcome:
-    description: verdict, no_verdict, or the typed failure outcome.
+    description: verdict, no_verdict, feedback (mode feedback, every note confirmed), or the typed failure outcome.
     value: ${{ steps.assure.outputs.outcome }}
   exit-code:
-    description: The verdict's policy exit (0 nothing disproven or never, 1 something disproven or a status you chose to stop on, 3 could not look), 2 bad input or a missing, unknown or revoked key, 3 another typed refusal or an API failure.
+    description: The verdict's policy exit (0 nothing disproven or never, 1 something disproven or a status you chose to stop on, 3 could not look), 0 in mode feedback when every note is confirmed, 2 bad input or a missing, unknown or revoked key, 3 another typed refusal or an API failure.
     value: ${{ steps.assure.outputs.exit-code }}
   colour:
     description: "green (nothing disproven within the bounds the first line states); red (something disproven, a prove-class obligation not proven, a status you chose to stop on, an unresolved obligation under strict, bad input, or a missing, unknown or revoked key); yellow (could not look: nothing readable, the credit is spent, a rate limit, or another typed refusal)."
@@ -158,6 +161,15 @@ outputs:
   requirements-draft:
     description: "postgresql-observed-baseline: the path of assure-requirements-draft.md, the requirements draft written beside the verdict file, which the next step uploads as the assure-requirements-draft run artifact. Empty when nothing was drafted."
     value: ${{ steps.assure.outputs.requirements-draft }}
+  feedback-ids:
+    description: "With mode api and feedback set, and in mode feedback, the accepted feedback receipt ids, comma-separated in send order (empty when none was accepted). Empty otherwise."
+    value: ${{ steps.assure.outputs.feedback-ids }}
+  feedback-confirmed:
+    description: "With mode api and feedback set, and in mode feedback, how many notes the API confirmed with a receipt (0 when none was). Empty otherwise."
+    value: ${{ steps.assure.outputs.feedback-confirmed }}
+  feedback-receipts:
+    description: "With mode api and feedback set, and in mode feedback, the path of the receipts file written beside the verdict file (<output>.feedback.json: each accepted receipt's id, duplicate and kind, never the note text), for an upload-artifact step. Empty otherwise."
+    value: ${{ steps.assure.outputs.feedback-receipts }}
 
 runs:
   using: composite
@@ -212,5 +224,14 @@ runs:
       with:
         name: assure-requirements-draft
         path: ${{ steps.assure.outputs.requirements-draft }}
+        overwrite: true
+        if-no-files-found: warn
+    - name: Upload the PostgreSQL starter declaration
+      if: ${{ always() && steps.assure.outputs.declaration-starter != '' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: assure-postgresql-declaration
+        path: ${{ steps.assure.outputs.declaration-starter }}
         overwrite: true
         if-no-files-found: warn

@@ -88,6 +88,14 @@ _TABLE = {
     # the billing routes, never a 500. Nothing was written and no tier changed.
     'billing_unavailable': (503, None, 'Ask Symbolia to move this account by hand, or try the checkout link again later, '
                                        'because billing is not available on this server just now; no tier changed.'),
+    # ACC-1 (ACCOUNT-001 d4): a signed-in GitHub user asked an account route for what their role does not allow (not an
+    # admin of the organisation, not the account's owner, not a member); `detail.rule` names which. Nothing changed.
+    'forbidden': (403, 2, 'Sign in with GitHub as the user the reason names (an admin of the organisation, or the '
+                          'account\'s owner), then try again; nothing was changed.'),
+    # ACC-1: GitHub sign-in is not configured on this server (no OAuth client id, or no GitHub worker); nothing was
+    # written, and API keys and the GitHub Actions sign-in work as before.
+    'not_configured': (503, None, 'Use an API key meanwhile, or ask Symbolia to turn on GitHub sign-in on this server; '
+                                  'nothing was changed.'),
     # The Action's own outcomes when it reaches the hosted API: never sent by the server, so they carry no HTTP status.
     'api_unreachable': (None, 3, 'Check that the runner can reach the API over HTTPS, then run the job again.'),
     'api_error': (None, 3, 'Run the job again later, and report the check id to Symbolia if it happens again.'),
@@ -104,6 +112,10 @@ TIER_LINK_ACTIONS = {
 
 OUTCOMES = MappingProxyType({name: MappingProxyType({'http': http, 'exit': code, 'action': action})
                              for name, (http, code, action) in _TABLE.items()})
+# The account seam's group (serve/seam.py OUTCOME_GROUP, ACC-SEAM-001 section 3) of each outcome not yet active,
+# kept here because no other served module may name one (tests/serving/test_customer_docs.py NotYetActive); the seam
+# merges this into its closed map, so every outcome of _TABLE is still grouped exactly once.
+NOT_YET_ACTIVE_GROUPS = MappingProxyType({'secret_in_input': 'admission_refusal', 'store_unavailable': 'own_fault'})
 
 # Issue #1103: the one table of the failures a paid check is charged for, read by the API's charge decision
 # (serve/api.py), the lint's findings (serve/lint.py) and the envelopes' `charged` (serve/envelope.py): the outcomes
@@ -122,6 +134,9 @@ def charged(outcome, detail=None, started=None):
     if isinstance(detail, dict) and detail.get('charge') is False:
         return False
     return (outcome in CHARGED_OUTCOMES) if started is None else bool(started)
+
+
+LAUNCHED_STARTED = {'none': False, 'declaration': True, 'snapshot': True, 'kernel': True}
 
 # ---------- what was malformed (DIRECTOR-DECISIONS-SERVE-002 Addendum 1, decision 10) ----------
 # A typed failure whose cause is in the customer's input carries `detail.malformation`: {kind, file, line, field,
@@ -453,6 +468,18 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 'Request a fresh GitHub Actions OIDC token with audience "assure" (the job needs the line '
                 '`id-token: write` under `permissions:`) and sign in again, or send an API key in the Authorization '
                 'header.',
+                # ACC-1: the account routes take a GitHub sign-in session (serve/sessions.py), never an API key
+                ('unauthenticated', 'session'):
+                'Sign in with GitHub at GET /v1/auth/github/start, then open the account page again.',
+                # ACC-1: a GitHub sign-in whose state, pre-session cookie or code did not hold
+                ('unauthenticated', 'github_signin'):
+                'Start the sign-in again at GET /v1/auth/github/start in the same browser and approve it on GitHub; '
+                'each sign-in link works once, for ten minutes.',
+                # ACC-1: a GitHub sign-in whose login (or an admin organisation's) has a form outside serve/keys.py
+                # ACCOUNT_RE, such as a managed user's underscore (serve/accounts.py `login_form`)
+                ('forbidden', 'login_form'):
+                'Use an API key meanwhile, or sign in with a GitHub user whose login, and whose organisations\' logins, '
+                'are letters, digits and hyphens only; nothing was changed.',
                 ('profile_not_servable', 'checker_metadata'):
                 'Nothing to change on your side; try again after Symbolia repairs the profile, or use another profile '
                 'meanwhile.',
@@ -489,6 +516,11 @@ RULE_ACTIONS = {# issue #1263: a refused GitHub OIDC sign-in proof (`detail.iden
                 ('profile_not_servable', 'tier_not_bound'):
                 'Nothing to change on your side; paid formalisation runs on Premium and Pro today, nothing was held '
                 'or charged, and the free quote beside each requirement row stands.',
+                # issue #4215: a check sent without requirements text has no quoted row for the paid route to read
+                ('bad_input', 'requirements_not_sent'):
+                'Send the requirements text with the check, then run it again. With the Action: set `requirements: requirements.md` '
+                'where the workflow has `requirements: none`, or follow that run\'s notice that requirements.md was not sent. With '
+                'the API: send `requirements` in the POST /v1/checks body. Nothing was held or charged.',
                 ('profile_not_servable', 'profile_not_bound'):
                 'Nothing to change on your side; paid formalisation runs on the python-auth-declared-model profile '
                 'today, nothing was held or charged, and the free quote beside each requirement row stands.',

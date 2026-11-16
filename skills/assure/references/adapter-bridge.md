@@ -174,6 +174,7 @@ Each fault names its rule, the file and line or the field, what Assure expected 
 Some facts cannot be read from the bytes. The bridge states them, and the verdict prints each one as a premise with source `declared`:
 
 - The routes your adapter lists are the routes you mean. Every request the unmodified standard-library server dispatches to the handler that is not on the public list reaches the guard first, read from the code.
+- No file outside `app_roots` rebinds the handler class or its guard. The bridge reads only the files under `app_roots`, so it cannot see a rebinding made elsewhere.
 - The value the guard compares the header against is a secret set at start and never empty.
 - The reply your `except` handlers send on a denial carries only the error.
 - Each sentence in `stated`.

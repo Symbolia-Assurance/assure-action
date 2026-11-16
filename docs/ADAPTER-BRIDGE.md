@@ -112,6 +112,7 @@ Each fault names its rule, the file and line or the field, what Assure expected 
 Some facts cannot be read from the bytes. The bridge states them, and the verdict prints each one as a premise with source `declared`:
 
 - The routes your adapter lists are the routes you mean. Every request the unmodified standard-library server dispatches to the handler that is not on the public list reaches the guard first, read from the code.
+- No file outside `app_roots` rebinds the handler class or its guard. The bridge reads only the files under `app_roots`, so it cannot see a rebinding made elsewhere.
 - The value the guard compares the header against is a secret set at start and never empty.
 - The reply your `except` handlers send on a denial carries only the error.
 - When server construction is outside the files read, the server that runs the handler is `http.server`'s, unmodified.
@@ -239,6 +240,7 @@ adapter bridge: matches the code. Assure will read 5 route(s) onto python/stdlib
 guard check reads header X-Device-Token and raises on a mismatch at src/devicectl/service.py:26 (compare_digest)
 the verdict will state these premises as yours:
 - assuming the 3 routes your adapter lists are the routes you mean (stated by you; every request dispatched by the unmodified standard-library server to Handler that is not on the public list reaches Handler.check first, read from the code)
+- assuming no file outside app_roots rebinds Handler or its guard Handler.check (stated by you)
 - assuming the value check compares the X-Device-Token header against (src/devicectl/service.py:26) is a secret set at start and never empty (stated by you)
 - assuming the reply your except handlers send on a denial carries only the error (stated by you)
 - assuming the server that runs Handler is http.server's, unmodified (stated by you); its construction is outside the files read

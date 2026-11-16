@@ -452,6 +452,8 @@ def _verify(files: dict, declaration: dict) -> dict:
          'the %d routes your adapter lists are the routes you mean (stated by you; every request dispatched by the '
          'unmodified standard-library server to %s that is not '
          'on the public list reaches %s.%s first, read from the code)' % (len(bridge['routes']), hcls, hcls, gname)},
+        {'id': 'bridge:app-roots-scope', 'source': 'declared', 'text':
+         'no file outside app_roots rebinds %s or its guard %s.%s (stated by you)' % (hcls, hcls, gname)},
         {'id': 'bridge:expected-secret', 'source': 'declared', 'text':
          'the value %s compares the %s header against (%s) is a secret set at start and never empty (stated by you)'
          % (gname, header, gl)},

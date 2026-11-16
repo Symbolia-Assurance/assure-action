@@ -1,10 +1,13 @@
 #!/opt/homebrew/bin/python3.14 -B
-"""sensitive_field_filter: the one shared data-protection filter for the MySQL corpus tools and the MySQL collector. Revision 20
+"""sensitive_field_filter: the one shared data-protection filter for the MySQL corpus tools and the MySQL collector. Revision 21
 (round 1: ten findings → Round1Findings; round 2: eleven blocking + three non-blocking → Round2Findings; round 3: six blocking + three
 non-blocking → Round3Findings; round 4: six blocking + two non-blocking → Round4Findings; round 5: four blocking + two non-blocking → Round5Findings; round 6: one blocking + four non-blocking → Round6Findings; round 7: one blocking + six non-blocking → Round7Findings; round 8: one blocking + five non-blocking → Round8Findings; round 9: two blocking + five non-blocking → Round9Findings; round 10 accepted, then OPERATOR-RULING-001 (derive and corpus follow-ups hit
 false refusals on the input form's own constants) → Round10Findings; round 11: two blocking + two non-blocking → Round11Findings; round 12: one blocking + four non-blocking → Round12Findings; round 13: one blocking + three non-blocking → Round13Findings; round 14: one blocking + two non-blocking → Round14Findings; round 15 accepted; corpus-check round 6 found a leading-separator
 miss → Round15Findings; round 16: one blocking + three non-blocking → Round16Findings; round 17: one blocking + four non-blocking → Round17Findings; round 18: one blocking + four non-blocking → Round18Findings;
 revision 20 (trial-013, REG-003): a $ between two letters also separates word-like segments, so MySQL's own sys schema names (x$…) read as names → tests/serving/test_collector_sys_names.py;
+revision 21 (#8669 round 3): the name test keeps every finding of main's one-pass form and every exemption it makes on purpose,
+and also reads the zero-width form of a camel name → tests/serving/test_issue_8669_accept.py (the Action's copy of these bytes keeps
+its pinned file name sensitive_field_filter_rev20.py; the name is pinned elsewhere, the bytes are revision 21);
 every finding became a test before the fix). Line ends are LF, CRLF, or the
 serialized-newline marker plus LF; serialized text is read de-escaped only. Bytes are decoded before scanning.
 
@@ -94,6 +97,7 @@ _EMPTYV = re.compile(r"(?:\\*\"\\*\"|\\*'\\*'|null|false|true|None|False|True|~)
 _ESCAPES = (("\\n", "\x0c\n"), ("\\t", "\t"), ("\\r", "\r"))  # JSON-escaped line structure; the newline carries a reversible whitespace marker (form feed, which serialized text never holds raw)
 _NAME_TAIL = re.compile(r"(?i)(?:(?:^|[_.-])" + _NAMES + r"|^[a-z0-9]{1,12}(?:password|passwd|pwd|secret|token)|^(?:db|root|admin|user|mysql|sql|rds|master|repl|replica|app|api)pass)(?:[_.\-]?[0-9]{1,2})?[_.\-]*$")  # trailing separators and a numbered form allowed; a short prefix with no separator counts for the strong words (dbpassword), never for bare pass
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])|([A-Z]+)([A-Z][a-z])")  # dbPassword → db_Password; DBPassword → DB_Password
+_CAMEL_ZW = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")  # #8669: the zero-width form, both kinds put wherever each applies; dbPassword → db_Password; DBPassword → DB_Password
 _GTID = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?::[A-Za-z_][A-Za-z0-9_]{0,31})?:\d+(?:-\d+)?(?::\d+(?:-\d+)?)*,?)+$")  # 8.4 tagged sets allowed
 _HEX = re.compile(r"^[0-9a-fA-F]+$")
 _HOST = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.){1,}[A-Za-z]{2,24}\.?$")
@@ -108,12 +112,35 @@ def _entropy(s: str) -> float:
     for ch in s: counts[ch] = counts.get(ch, 0) + 1
     n = len(s); return -sum(c / n * math.log2(c / n) for c in counts.values())
 
-def _is_pw_name(name: str) -> bool:
-    n = _CAMEL.sub(lambda m: (m.group(1) + "_" + m.group(2)) if m.group(1) else (m.group(3) + "_" + m.group(4)), str(name).strip()).lower().replace("-", "_").replace("/", "_").replace(" ", "_").strip("_.")  # dbPassword → db_password; DBPassword → db_password; leading and trailing . _ - dropped
+def _pw_name_test(n: str) -> bool:
+    """today's whole name test, its two early exits among it, on one form of the name"""
+    n = n.lower().replace("-", "_").replace("/", "_").replace(" ", "_").strip("_.")  # dbPassword → db_password; DBPassword → db_password; leading and trailing . _ - dropped
     if n.startswith("loose_"): n = n[6:]  # mysqld's loose- prefix
     if _OPTION_FALSE.match(n): return False
     if n.startswith("d") and _OPTION_FALSE.match(n[1:].lstrip("_.")): return False  # -Dvalidate_password=ON read through a leading separator: the D is the Java flag, not part of the name
     return bool(_NAME_TAIL.search(n))
+
+_OPTION_UNCARVED = re.compile(re.sub(r"\(\?![^()]*\([^()]*\)\$\)", "", _OPTION_FALSE.pattern, count=1))  # rev 21 (#8669): the exemption read without its one look-ahead (derived from its text, not retyped)
+
+def _meets_exit(n: str, option=_OPTION_FALSE) -> bool:
+    """rev 21 (#8669): whether one form of the name meets an early exit of today's test (the same two exits, the same reading)"""
+    n = n.lower().replace("-", "_").replace("/", "_").replace(" ", "_").strip("_.")
+    if n.startswith("loose_"): n = n[6:]
+    return bool(option.match(n)) or (n.startswith("d") and bool(option.match(n[1:].lstrip("_."))))
+
+def _is_pw_name(name: str) -> bool:
+    """rev 21 (#8669 round 3): main's test on the one-pass form first (every name it finds is found); a one-pass form that meets an
+    early exit stays exempt, except where the carved alternative's own look-ahead refuses the exemption once the zero-width form's
+    last boundary is shown; a one-pass form that meets no exit is also judged on the zero-width form"""
+    s = str(name).strip()
+    one = _CAMEL.sub(lambda m: (m.group(1) + "_" + m.group(2)) if m.group(1) else (m.group(3) + "_" + m.group(4)), s)
+    if _pw_name_test(one): return True  # P1: main's test, verbatim, on the one-pass form
+    if not _meets_exit(one): return _pw_name_test(_CAMEL_ZW.sub("_", s))  # P3, P4: no exit in the one-pass form; the zero-width form decides
+    cuts = {m.start(2) if m.group(1) else m.start(4) for m in _CAMEL.finditer(s)}
+    last = [m.start() for m in _CAMEL_ZW.finditer(s)][-1:]
+    if not last or last[0] in cuts: return False  # P2: exempt in the one-pass form, no boundary to add
+    cuts.add(last[0]); shown = "".join(("_" + ch) if i in cuts else ch for i, ch in enumerate(s))
+    return _pw_name_test(shown) and _meets_exit(shown, _OPTION_UNCARVED)  # P2's one exception: the look-ahead alone refuses the exemption
 
 def _is_host(t: str) -> bool:
     t = t.strip("\"'`")
