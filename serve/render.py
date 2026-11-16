@@ -192,21 +192,62 @@ def label(status):
 BASIS_CLAUSE = 'on %s; %d unproved item%s, listed on the proof tree page'
 BASIS_JOIN = ', '
 BASIS_COUNT = '%d on %s'
+BASIS_UNSTATED = 'a basis not stated'
+BASIS_CLAUSE_UNCOUNTED = 'on %s; unproved items not counted, listed on the proof tree page'
+BASIS_UNREAD = '%d with rows not read'
+
+
+def _basis_labelled(row):
+    if not isinstance(row, dict) or ('basis' not in row and 'unproved' not in row):
+        return False
+    unproved = row.get('unproved', [])
+    return not (row.get('basis') == 'theorem' and isinstance(unproved, list) and not unproved)
+
+
+def _basis_shown(row):
+    return _clip(row['basis'], 40) if isinstance(row.get('basis'), str) else BASIS_UNSTATED
+
+
+def _basis_count(row):
+    unproved = row.get('unproved', [])
+    return len(unproved) if isinstance(unproved, list) else None
+
+
+def _basis_words(shown, count):
+    if count is None:
+        return BASIS_CLAUSE_UNCOUNTED % shown
+    return BASIS_CLAUSE % (shown, count, '' if count == 1 else 's')
 
 
 def basis_clause(row):
-    if not isinstance(row, dict) or not isinstance(row.get('basis'), str):
-        return ''
-    unproved = row.get('unproved', [])
-    if not isinstance(unproved, list) or (row['basis'] == 'theorem' and not unproved):
-        return ''
-    return BASIS_CLAUSE % (_clip(row['basis'], 40), len(unproved), '' if len(unproved) == 1 else 's')
+    return _basis_words(_basis_shown(row), _basis_count(row)) if _basis_labelled(row) else ''
 
 
-def _basis_row(env, requirement):
+def basis_clause_of(rows):
+    labelled = [r for r in rows if _basis_labelled(r)] if isinstance(rows, list) else []
+    if not labelled:
+        return ''
+    labelled = labelled[:1] if any(_basis_shown(r) != _basis_shown(labelled[0]) for r in labelled) else labelled
+    counts = [_basis_count(r) for r in labelled]
+    return _basis_words(_basis_shown(labelled[0]), None if None in counts else sum(counts))
+
+
+def _basis_rows(env, requirement):
     if not isinstance(requirement, dict) or not isinstance(requirement.get('matched_obligations'), list):
-        return None
-    return next((m for m in _pr_matched_rows(env, requirement) or () if basis_clause(m)), None)
+        return []
+    return _pr_matched_rows(env, requirement)
+
+
+def _basis_accounting_rows(env, requirement):
+    state = requirement.get('state') if isinstance(requirement, dict) else None
+    if state == 'holds':
+        return [r for r in _basis_rows(env, requirement) if r.get('status') == 'holds']
+    return []
+
+
+def _basis_unread(requirement):
+    return isinstance(requirement, dict) and requirement.get('matched_obligations') is not None and not isinstance(
+        requirement.get('matched_obligations'), list)
 
 
 def _extra_reason(row):
@@ -2327,13 +2368,24 @@ def verdict_line(envelope):
     c = env.get('colour')
     if c not in COLOURS:
         return None
-    bases = {}
+    bases = {'holds': {}}
+    unread = {'holds': 0}
     for q in requirement_rows(env) or ():
-        row = _basis_row(env, q) if q.get('state') == 'holds' else None
-        if basis_clause(row):
-            bases[_clip(row['basis'], 40)] = bases.get(_clip(row['basis'], 40), 0) + 1
-    basis_counts = ' (%s)' % BASIS_JOIN.join(BASIS_COUNT % (n, b) for b, n in sorted(bases.items())) if bases else ''
-    req = requirements_words(env, basis_counts)       # serve-019: after the not-established count
+        state = q.get('state')
+        if not (isinstance(state, str) and state in bases):
+            continue
+        if _basis_unread(q):
+            unread[state] += 1
+            continue
+        row = next((m for m in _basis_accounting_rows(env, q) if _basis_labelled(m)), None)
+        if row is not None:
+            bases[state][_basis_shown(row)] = bases[state].get(_basis_shown(row), 0) + 1
+    basis_counts = {}
+    for state, by in bases.items():
+        said = [BASIS_COUNT % (n, b) for b, n in sorted(by.items())] + (
+            [BASIS_UNREAD % unread[state]] if unread[state] else [])
+        basis_counts[state] = ' (%s)' % BASIS_JOIN.join(said) if said else ''
+    req = requirements_words(env, basis_counts['holds'])       # serve-019: after the not-established count
     if c == 'yellow':
         line = 'yellow: could not look: %s%s' % (_could_not_look_words(env), '; %s' % req if req else '')
         return _provisional_line(line, env)
@@ -3524,20 +3576,32 @@ def annotations(envelope):
     for level, r in picked[:MAX_ANNOTATIONS]:
         where = '%s %s' % (r.get('machine'), r.get('id')) if r.get('id') is not None else str(r.get('machine'))
         title = 'Assure %s %s' % (label(r.get('status')), where)
-        msg = str(r.get('status_text') or '')
-        if basis_clause(r):
-            msg += BASIS_JOIN + basis_clause(r)
+        text = str(r.get('status_text') or '')
+        clause = basis_clause(r)
+        msg = BASIS_JOIN + clause if clause else ''
         # issue #492: as in _row_extra, a reason taken from the witness defers to the fuller witness line
         witness = witness_text(envelope, r) if r.get('status') == 'fails' and (
             not _extra_reason(r) or r.get('reason') == witness_words(envelope, r)) else None
+        part = None
         if witness:
-            msg += ' (%s)' % witness
+            part = str(witness)
         elif _extra_reason(r):
             gloss = bound_gloss(r.get('reason'))
-            msg += ' (%s%s)' % (r.get('reason'), '; %s' % gloss if gloss else '')
+            part = '%s%s' % (r.get('reason'), '; %s' % gloss if gloss else '')
         named = objects_text(envelope, r) if r.get('status') == 'deviates' else None
-        if named:                                     # issue #2176: the annotation names the objects too
-            msg += ' — %s' % named
+        tail = ' — %s' % named if named else ''     # issue #2176: the annotation names the objects too
+        if part is not None:
+            room = CAP - len(text) - len(msg) - len(' ()') - len(tail)
+            if clause and len(part) > room:
+                part = '…' + part[len(part) - room + 1:] if room > 1 else '…'
+            msg += ' (%s)' % part
+        if clause and len(text) + len(msg) + len(tail) > CAP:
+            cut = CAP - len(text) - len(msg)
+            tail = tail[:cut - 1] + '…' if cut > 1 else '…' if tail else ''
+        keep = CAP - len(msg) - len(tail)
+        if clause and len(text) > keep > 1:
+            text = text[:keep - 1] + '…'
+        msg = text + msg + tail
         lines.append('::%s title=%s::%s' % (level, _cmd_prop(title), _cmd_data(msg)))
     if first is not None:                         # serve-019: each requirement that does not hold, in the same words
         # issue #5032: `requirement_line` bounds each part, so the line is never clipped whole (as in the summary)
@@ -5254,7 +5318,7 @@ def pr_reading(envelope):
         lab, name = _pr_label(env, r, None)
         if r.get('state') == 'holds':
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None), 'requirement': r.get('id'),
-                          'basis_clause': basis_clause(_basis_row(env, r)),
+                          'basis_clause': basis_clause_of(_basis_accounting_rows(env, r)),
                           **({'mapped': True} if name and _checked_as(r) else {})})
         else:
             # issue #4626: an empty domain (issue #1292) says there is nothing to check, never its coverage class
@@ -5409,16 +5473,17 @@ def _pr_broken(item, repository, commit, requirements_file=None, setup=False):
     is what Assure found in your code, not what the change does."""
     name = _esc_line(item['name']) if item.get('mapped') else esc(item['name'])
     head = ('%s (%s)' % (name, esc(item['label'])) if item['name'] else esc(item['label']))
-    out = ['### Broken: %s' % head, '']
+    clause = BASIS_JOIN + esc(item['basis_clause']) if item.get('basis_clause') else ''
+    out = ['### Broken: %s%s' % (head, '' if item.get('signout') or item['what'] else clause), '']
     where = ', '.join(_pr_where(x, repository, commit) for x in item['locators'])
     parts, lead = [], 'Found in your code' if setup else 'What this change does'
     if item.get('signout'):
         # codex-conflicts 4452: the regenerated sign-out finding keeps the served premise clause of the rows it rests on
         signout = _pr_signout_text(item['signout'], 0, code=True)
         extra = [esc(x) for x in item.get('premise') or () if x not in signout]
-        parts.append('%s: %s.' % (lead, '; '.join([signout] + extra)))
+        parts.append('%s: %s%s.' % (lead, '; '.join([signout] + extra), clause))
     elif item['what']:
-        parts.append('%s: %s.' % (lead, esc(str(item['what']).rstrip('.'))))
+        parts.append('%s: %s%s.' % (lead, esc(str(item['what']).rstrip('.')), clause))
     if where:
         parts.append('Where: %s.' % where)
     if item.get('escaped'):
@@ -6098,8 +6163,9 @@ def _pr_holds_rows(env, holds, names):
                             else h['checked']):
         h = group[0]
         if len(group) == 1:
-            out.append('| %s | %s |' % (_pr_rule(_pr_plain_label(names, h), h['name'], h.get('mapped', False)),
-                                        esc(h['checked'])))
+            out.append('| %s | %s%s |' % (_pr_rule(_pr_plain_label(names, h), h['name'], h.get('mapped', False)),
+                                          esc(h['checked']),
+                                          BASIS_JOIN + esc(h['basis_clause']) if h.get('basis_clause') else ''))
             continue
         group = _pr_machine_order(group)
         words = all(x.get('name') for x in group)
@@ -6759,8 +6825,11 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
         for item in rd['broken'][:MAX_ANNOTATIONS]:
             line = '- %s' % _pr_rule(item['label'], item['name'])
             where = ', '.join(_pr_where(x, repository, commit) for x in item['locators'])
+            clause = item.get('basis_clause')
             if item['what']:
-                line += ': %s.' % esc(str(item['what']).rstrip('.'))
+                line += ': %s%s.' % (esc(str(item['what']).rstrip('.')), BASIS_JOIN + esc(clause) if clause else '')
+            elif clause:
+                line += '%s.' % (BASIS_JOIN + esc(clause))
             if where:
                 line += ' Where: %s.' % where
             if item['fix']:
@@ -6769,7 +6838,9 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
         out.append('')
     holds = [r for r in rows if r.get('state') == 'holds']
     if holds:
-        out += ['### Holds', ''] + ['- %s' % rule(r.get('id')) for r in holds[:MAX_ANNOTATIONS]] + ['']
+        out += ['### Holds', ''] + ['- %s%s' % (rule(r.get('id')), BASIS_JOIN + esc(basis_clause_of(
+            _basis_accounting_rows(env, r))) if basis_clause_of(_basis_accounting_rows(env, r)) else '')
+            for r in holds[:MAX_ANNOTATIONS]] + ['']
     unsettled = [r for r in rows if r.get('state') not in ('holds', 'disproven')]
     if unsettled:
         out += ['### Not established', '']
