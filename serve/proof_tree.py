@@ -65,6 +65,10 @@ MAX_FACTS = 6
 MAX_NAMED = 5
 PREMISE_LABEL = 'Premise'
 PREMISES_NOT_SHOWN = 'not shown'
+BASIS_LABEL = 'Basis'
+UNPROVED_LABEL = 'Unproved'
+THEOREM_LABEL = 'Theorem'
+LIMIT_LABEL = 'Limit'
 GOALS_FROM_ROWS = ('Each requirement row stands as its own goal: the goal sentences of requirements.md were not '
                    'stored with this check, only the typed checks they were sent as.')
 # a typed goal row as the Action sends it (declare_proposal.typed_text): '- G1.1 [postgres]: <statement>'
@@ -100,6 +104,13 @@ def _text(value):
     if value is None:
         return None
     t = render.format_space(render._clip(value)).strip()
+    return t or None
+
+
+def _whole(value, bound=1024):
+    if not isinstance(value, str) or len(value.encode('utf-8', 'surrogatepass')) > bound:
+        return None
+    t = render.format_space(render._clip(value, len(value))).strip()
     return t or None
 
 
@@ -203,6 +214,25 @@ def _check(env, cid, req, row, state, waypoint, *, repository, commit, source_li
                           for loc in item.get('locators') or ()] or ev['locators']
     elif state == 'holds':
         ev['bound'] = _bound(req)
+        if isinstance(row.get('basis'), str) and _text(row['basis']):
+            ev['basis'] = _text(row['basis'])
+        if isinstance(row.get('unproved'), list):
+            whats = [_whole(u.get('what')) if isinstance(u, dict) else None for u in row['unproved']]
+            if any(whats):
+                ev['unproved'] = [w for w in whats if w]
+            if not all(whats):
+                ev['unproved_not_shown'] = whats.count(None)
+        th = row.get('theorem')
+        if isinstance(th, dict) and _whole(th.get('name')) and _whole(th.get('file')):
+            ev['theorem'] = {'name': _whole(th['name']), 'file': _whole(th['file'])}
+        if isinstance(row.get('limits'), list):
+            limits = [_whole(x.get('what')) if isinstance(x, dict) else None for x in row['limits']]
+            if any(limits):
+                ev['limits'] = [x for x in limits if x]
+            if not all(limits):
+                ev['limits_not_shown'] = limits.count(None)
+        elif row.get('limits') is not None:
+            ev['limits_not_shown'] = 1
     else:
         cls = (req.get('reason_class') if req is not None else None) or render._pr_reason_class(env, row)
         entry = _entry(env, row) if req is None else {}
@@ -841,6 +871,20 @@ def _evidence_html(c):
                                                        ''.join('; %s: %s' % (_e(k), _e(v)) for k, v in p['members'])))
     if ev.get('premises_not_shown'):
         items.append('<b>%s:</b> %d %s' % (_e(PREMISE_LABEL), ev['premises_not_shown'], _e(PREMISES_NOT_SHOWN)))
+    if c['state'] == 'holds':
+        if ev.get('basis'):
+            items.append('<b>%s:</b> %s' % (_e(BASIS_LABEL), _e(ev['basis'])))
+        for w in ev.get('unproved') or ():
+            items.append('<b>%s:</b> %s' % (_e(UNPROVED_LABEL), _e(w)))
+        if ev.get('unproved_not_shown'):
+            items.append('<b>%s:</b> %d %s' % (_e(UNPROVED_LABEL), ev['unproved_not_shown'], _e(PREMISES_NOT_SHOWN)))
+        if ev.get('theorem'):
+            items.append('<b>%s:</b> <code>%s</code> in <code>%s</code>' % (
+                _e(THEOREM_LABEL), _e(ev['theorem']['name']), _e(ev['theorem']['file'])))
+        for x in ev.get('limits') or ():
+            items.append('<b>%s:</b> %s' % (_e(LIMIT_LABEL), _e(x)))
+        if ev.get('limits_not_shown'):
+            items.append('<b>%s:</b> %d %s' % (_e(LIMIT_LABEL), ev['limits_not_shown'], _e(PREMISES_NOT_SHOWN)))
     if ev.get('bound'):
         items.append('holds within: %s' % _e(ev['bound']))
     if c['state'] == 'not_established':

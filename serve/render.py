@@ -195,6 +195,12 @@ BASIS_COUNT = '%d on %s'
 BASIS_UNSTATED = 'a basis not stated'
 BASIS_CLAUSE_UNCOUNTED = 'on %s; unproved items not counted, listed on the proof tree page'
 BASIS_UNREAD = '%d with rows not read'
+LIMIT_LABEL = 'Limit'
+LIMIT_BOUND = 1024
+LIMIT_ITEM = '  - %s: %s'
+LIMIT_NOT_SHOWN = '%d not shown'
+LIMITS_HEAD = 'Limits'
+LIMITS_ITEM = '- %s: %s'
 
 
 def _basis_labelled(row):
@@ -243,6 +249,54 @@ def _basis_accounting_rows(env, requirement):
     if state == 'holds':
         return [r for r in _basis_rows(env, requirement) if r.get('status') == 'holds']
     return []
+
+
+def _limit_text(value, bound=LIMIT_BOUND):
+    if not isinstance(value, str) or len(value.encode('utf-8', 'surrogatepass')) > bound:
+        return None
+    t = format_space(_clip(value, len(value))).strip()
+    return t or None
+
+
+def _limits_members(rows):
+    shown, not_shown = [], 0
+    for r in rows:
+        limits = r.get('limits') if isinstance(r, dict) else None
+        if limits is None:
+            continue
+        if not isinstance(limits, list):
+            not_shown += 1
+            continue
+        for x in limits:
+            w = _limit_text(x.get('what')) if isinstance(x, dict) else None
+            if w is None:
+                not_shown += 1
+            elif w not in shown:
+                shown.append(w)
+    return {**({'limits': shown} if shown else {}), **({'limits_not_shown': not_shown} if not_shown else {})}
+
+
+def _limit_lines(item, form=LIMIT_ITEM, name=LIMIT_LABEL):
+    return [form % (name, _esc_line(w)) for w in item.get('limits') or ()] + (
+        [form % (name, LIMIT_NOT_SHOWN % item['limits_not_shown'])] if item.get('limits_not_shown') else [])
+
+
+def _limits_block(items):
+    lines = []
+    for h in items:
+        lines += _limit_lines(h, LIMITS_ITEM, _esc_line(_clip(
+            h['requirement'] if h.get('requirement') is not None else h.get('id'))))
+    return [LIMITS_HEAD] + lines + [''] if lines else []
+
+
+def _kept_with_limits(entries, bound):
+    out, kept = [], 0
+    for line, extra in entries:
+        if len(out) + 1 + len(extra) > bound:
+            break
+        out += [line] + extra
+        kept += 1
+    return out, kept
 
 
 def _basis_unread(requirement):
@@ -3314,9 +3368,12 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
     reqs = requirement_rows(env) if line is not None else None
     if reqs:                                      # serve-019: one line per requirement, under the not-established list
         out += ['### %s' % _esc_line(requirements_words(env)[0].upper() + requirements_words(env)[1:]), '']
-        out += ['- %s' % _esc_line(requirement_line(r, env)) for r in reqs[:MAX_REQUIREMENT_LINES]]
-        if len(reqs) > MAX_REQUIREMENT_LINES:
-            out.append('- and %d more' % (len(reqs) - MAX_REQUIREMENT_LINES))
+        lines, kept = _kept_with_limits([('- %s' % _esc_line(requirement_line(r, env)),
+                                          _limit_lines(_limits_members(_basis_accounting_rows(env, r)))) for r in reqs],
+                                        MAX_REQUIREMENT_LINES)
+        out += lines
+        if len(reqs) > kept:
+            out.append('- and %d more' % (len(reqs) - kept))
         out.append('')
     limits = [e for e in entries if e.get('id') in unsupported]
     if limits:                                    # A25: the profile's own limits, apart from the customer's gaps
@@ -3447,6 +3504,8 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
             if extra:
                 line += ' (%s)' % extra
             out.append(line)
+            if s == 'holds':
+                out += _limit_lines(_limits_members([r]))
             named = objects_text(env, r) if s == 'deviates' else None
             if named:                                     # issue #2176: one entry per object, its roles as a list
                 out.append('  - %s' % esc(named))
@@ -5319,7 +5378,8 @@ def pr_reading(envelope):
         if r.get('state') == 'holds':
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None), 'requirement': r.get('id'),
                           'basis_clause': basis_clause_of(_basis_accounting_rows(env, r)),
-                          **({'mapped': True} if name and _checked_as(r) else {})})
+                          **({'mapped': True} if name and _checked_as(r) else {}),
+                          **_limits_members(_basis_accounting_rows(env, r))})
         else:
             # issue #4626: an empty domain (issue #1292) says there is nothing to check, never its coverage class
             cls = 'vacuous' if empty_domain_requirement(r, env) is not None else r.get('reason_class')
@@ -5360,7 +5420,7 @@ def pr_reading(envelope):
             continue                                   # the intent step never asserts a machine was read
         elif r.get('status') == 'holds':
             holds.append(dict(ids, label=lab, name=name, checked=_pr_checked(env, None, r), requirement=None,
-                              basis_clause=basis_clause(r)))
+                              basis_clause=basis_clause(r), **_limits_members([r])))
         else:
             cls = _pr_reason_class(env, r)
             said = 'vacuous' if _empty_domain(r, env) else cls      # issue #4626: an empty domain, nothing to check
@@ -6341,6 +6401,7 @@ def _pr_sections(env, rd, repository=None, commit=None, requirements_file=None, 
         out += ['### Still holds', '', '| Rule | What Assure checked |', '| --- | --- |']
         out += _pr_holds_rows(env, rd['holds'][:MAX_ANNOTATIONS], names)
         out.append('')
+        out += _limits_block(rd['holds'][:MAX_ANNOTATIONS])
     # issue #3150: "Not checked yet" lists the rules the customer wrote that Assure could not decide, and a check on a
     # machine it could not read; a check they did not write as a rule stays in the proof tree, and with no rules
     # written so does one that needs nothing from anyone and has nothing to check (nothing declared, or Symbolia's gap)
@@ -6658,9 +6719,9 @@ def report_status_lines(envelope):
            for i in rd['broken'][:MAX_ANNOTATIONS]]
     out += ['- **%s** %s.' % (esc(i['label']), PR_STATUS_WORDS['deviates']) for i, _ in rd['deviations'][:MAX_ANNOTATIONS]]
     out += ['- **%s** is %s.' % (esc(i.get('label') or i.get('text')), kinds[k]) for k, i in rd['others'][:MAX_ANNOTATIONS]]
-    out += ['- **%s** %s%s.' % (esc(h['label']), PR_STATUS_WORDS['holds'],
-                                BASIS_JOIN + esc(h['basis_clause']) if h.get('basis_clause') else '')
-            for h in rd['holds'][:MAX_ANNOTATIONS]]
+    out += _kept_with_limits([('- **%s** %s%s.' % (esc(h['label']), PR_STATUS_WORDS['holds'],
+                                                 BASIS_JOIN + esc(h['basis_clause']) if h.get('basis_clause') else ''),
+                               _limit_lines(h)) for h in rd['holds']], MAX_ANNOTATIONS)[0]
     out += ['- **%s** %s.' % (esc(u['label'] or u['name']), PR_STATUS_WORDS['unchecked'])
             for u in _pr_listed_unchecked(env, rd)[:MAX_ANNOTATIONS]]
     return out
@@ -6812,7 +6873,8 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
         out += ['Compared with %s: %d fixed, %d newly broken.' % (ptag, len(fixed), len(newly)), '']
         if fixed:
             out += ['### Fixed since %s' % ptag, '']
-            out += ['- %s: broken → holds' % rule(rid) for rid in fixed[:MAX_ANNOTATIONS]] + ['']
+            out += _kept_with_limits([('- %s: broken → holds' % rule(rid), _limit_lines(_limits_members(
+                _basis_accounting_rows(env, by[rid])))) for rid in fixed], MAX_ANNOTATIONS)[0] + ['']
         if newly:
             out += ['### Newly broken since %s' % ptag, '']
             out += ['- %s: %s → broken' % (rule(rid), _release_state_word(prev['states'][rid]))
@@ -6838,9 +6900,9 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
         out.append('')
     holds = [r for r in rows if r.get('state') == 'holds']
     if holds:
-        out += ['### Holds', ''] + ['- %s%s' % (rule(r.get('id')), BASIS_JOIN + esc(basis_clause_of(
-            _basis_accounting_rows(env, r))) if basis_clause_of(_basis_accounting_rows(env, r)) else '')
-            for r in holds[:MAX_ANNOTATIONS]] + ['']
+        out += ['### Holds', ''] + _kept_with_limits([('- %s%s' % (rule(r.get('id')), BASIS_JOIN + esc(basis_clause_of(
+            _basis_accounting_rows(env, r))) if basis_clause_of(_basis_accounting_rows(env, r)) else ''),
+            _limit_lines(_limits_members(_basis_accounting_rows(env, r)))) for r in holds], MAX_ANNOTATIONS)[0] + ['']
     unsettled = [r for r in rows if r.get('state') not in ('holds', 'disproven')]
     if unsettled:
         out += ['### Not established', '']
