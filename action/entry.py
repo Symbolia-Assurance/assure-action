@@ -2583,7 +2583,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                     say('Assure: declaration proposal: open the pull request yourself: %s' % compare)
                 if d.get('added'):                    # issue #4631: the additions path shows no draft; it names them
                     told += '; it adds the %d field(s) listed below' % len(d['added'])
-                elif not d.get('observed') or d.get('shown') is not None:
+                elif d.get('shown', d['data']) is not None:   # the declared branch too: only a withheld draft
                     told += '; the draft is below'
                 say('::warning title=Assure declaration::%s' % _cmd_data(told))
             finally:
@@ -2608,8 +2608,11 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             if told.startswith('not proposed'):
                 if compare:
                     md += '\n%s\n' % declaration_draft.compare_markdown(compare)
-                md += commit_line(github, d)
-                md += '\n```json\n%s```\n' % d['data'].decode('utf-8')
+                shown = d.get('shown', d['data'])   # pg_withheld: the declared branch shows what the observed shows
+                if shown is not None:
+                    if shown == d['data']:
+                        md += commit_line(github, d)
+                    md += '\n```json\n%s```\n' % shown.decode('utf-8')
                 if d.get('starter'):                # issue #4395: the starter, and its own one-click commit
                     md += declaration_draft.starter_markdown(d['starter'])
                     md += commit_line(github, dict(d, rel=declaration_draft.STARTER_PATH, data=d['starter']))
@@ -2700,13 +2703,26 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             record = state['pg_proposal'] = drafted[0]
             data = declaration_draft.dumps(record['declaration'])
             state['draft'] = {'record': record, 'data': data, 'top': declaration_draft.toplevel(top, env),
-                              'rel': DECLARED_CHECKOUT_PATH,
+                              'rel': DECLARED_CHECKOUT_PATH, 'shown': None,
                               'words': {'title': DECLARED_TITLE, 'source': DECLARED_SOURCE}}
             say('Assure: %s drafted in the runner from %s; %d field(s) to confirm' % (
                 declaration_draft.NAME, DECLARED_SOURCE, len(record['confirm'])))
             return data
         declare.jsonb_schema_requested = jsonb_opt_in(top, cap)
         return declare
+
+    def pg_withheld():
+        """`pg_declare`'s draft as the observed branch shows its own (`observed_draft`): drafted again over the files
+        as collected and withheld (`state['files']`), so the job summary, its commit link and the file beside the
+        verdict hold only what the upload holds; nothing is shown or written when none can be made. What is proposed
+        and sent is unchanged."""
+        try:
+            withheld = draft_proposal(state['files']) if isinstance(state['files'], dict) else None
+        except Exception:  # nothing is shown; the file beside the verdict says the same
+            withheld = None
+        state['pg_proposal'] = None if withheld is None else withheld[0]
+        if state['draft'] is not None and 'shown' in state['draft'] and not state['draft'].get('observed'):
+            state['draft']['shown'] = None if withheld is None else declaration_draft.dumps(withheld[0]['declaration'])
 
     def pg_inventory(top):
         """Issue #6339 (trial-lead 23162): `inventory` for `action.collect._gather`, which calls it only under the rf34
@@ -2923,6 +2939,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         state['withheld'] = collected.withheld
         say(WITHHELD_LINE % {'withheld': withhold.describe(collected.withheld)})
         session(collected.files)
+        if state['pg_proposal'] is not None:
+            pg_withheld()
         bundle.check_files(collected.files, allow, lim)        # nothing unlisted or oversize leaves the runner
         extra = {'allow_partial': True} if inputs['allow_partial'] else {}
         extra.update(upload)
