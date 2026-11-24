@@ -110,7 +110,7 @@ RETRY_TYPED = frozenset({'server_busy'})
 CHECK_ID_RE = re.compile(r'[0-9a-f]{32}')
 _KEY_OK = re.compile(r'[\x21-\x7e]+')
 _TEXT_CAP = 300
-_CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id', 'server_charged'})    # set by the client only, never by a server
+_CLIENT_KEYS = frozenset({'check_id', 'answered', 'sent_check_id', 'server_charged', 'exit_code'})    # set by the client only, never by a server
 # issue #1263 (GitHub OIDC sign-in): with no api-key, the Action asks GitHub for this job's OIDC token with this
 # audience and exchanges it at OIDC_PATH for a key that lives for the run (at most an hour)
 OIDC_AUDIENCE = 'assure'

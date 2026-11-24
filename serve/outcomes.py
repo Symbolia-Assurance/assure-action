@@ -37,6 +37,10 @@ _TABLE = {
     # says the move is to wait and its `needs` (NOT_SERVABLE_NEEDS) names what is missing.
     'profile_not_servable': (503, 3, 'Wait for this profile to be qualified; nothing on your side opens it.'),
     'profile_refused': (422, 3, 'Fix the collection or declaration fault the reason names, then run again.'),
+    # READER-BOUND-OUTCOME-1 (the scope reader's words): the kernel's reader met its bound on what it made of the
+    # application as sent (serve/reader_bound.py); charged as a stop after the reader started.
+    'input_too_large': (422, 3, 'This is a limit of the reader, not a fault in your application, and there is '
+                                'nothing to report; no change on your side is known to clear it at this release.'),
     # issue #5138: the checker, the server or the Action can fail this way (a stored verdict that does not read, a
     # restart, the Action's own fault), so the action names none of them and the reason names which
     'checker_error': (500, 3, 'Report the check id to Symbolia, because Assure failed in a way it should not; the '
@@ -47,8 +51,8 @@ _TABLE = {
     # issue #1420: the refusal names the bound that bound, the check worker's RLIMIT_CPU or RLIMIT_AS (serve/worker.py)
     'checker_cpu_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its CPU time '
                                   'limit.'),
-    'checker_memory_limit': (504, 3, 'Send a smaller input or try again later, because the check ran past its memory '
-                                     'limit.'),
+    'checker_memory_limit': (504, 3, 'Send a smaller input or try again later, because the check reached its memory '
+                                     'bound or its working files\' size bound.'),
     # issue #5138: a full queue, the usage ledger, an Idempotency-Key in flight, a plan change or GitHub's keys
     'server_busy': (503, None, 'Try again after the Retry-After seconds when the answer gives them, else in a minute, '
                                'because the server cannot take this request just now; the reason names why.'),
@@ -120,19 +124,30 @@ NOT_YET_ACTIVE_GROUPS = MappingProxyType({'secret_in_input': 'admission_refusal'
 # Issue #1103: the one table of the failures a paid check is charged for, read by the API's charge decision
 # (serve/api.py), the lint's findings (serve/lint.py) and the envelopes' `charged` (serve/envelope.py): the outcomes
 # only a checker gives once it has started. A refusal before the run is never charged; a verdict always is.
+# PROCESS-BOUNDS-1 (ADDENDUM-1 item 13): a stop of any kind after the checker or kernel started is charged, a stop at
+# the memory or working-file bound (checker_memory_limit) exactly as one at the time bound.
+# CHARGE-ON-READ-1 (the owner's decision of 19 November 2026): a stop at the time, CPU, memory or working-file bound
+# (STOP_OUTCOMES) is charged once the worker began to read the customer's files (its `reading` marker), whether or not the
+# checker started; a stop before the read, and a refusal at intake, is not.
 CHARGED_OUTCOMES = frozenset({'checker_error', 'checker_timeout', 'checker_cpu_limit', 'checker_memory_limit',
                               'profile_refused'})  # Main issue #1420: the worker's limit outcomes
 VERDICT_OUTCOMES = frozenset({'verdict', 'no_verdict'})
+STOP_OUTCOMES = frozenset({'checker_timeout', 'checker_cpu_limit', 'checker_memory_limit'})
+CHARGED_STOP_SENTENCE = 'This check was charged: it stopped after Assure began to read your files.'
 
 
-def charged(outcome, detail=None, started=None):
+def charged(outcome, detail=None, started=None, reading=None):
     """Issue #1103: True when a check that ends in `outcome` is charged. A verdict is; a failure is when its outcome is
     in CHARGED_OUTCOMES (or, when the worker said whether the checker started, when it did), except one whose detail
-    says `charge: false` (the assembler's own internal_error, the checker's fault), which is never charged."""
+    says `charge: false` (the assembler's own internal_error, the checker's fault), which is never charged.
+    CHARGE-ON-READ-1: a stop (STOP_OUTCOMES) is also charged when the worker said it began to read the files
+    (`reading` True), whether or not the checker started."""
     if outcome in VERDICT_OUTCOMES:
         return True
     if isinstance(detail, dict) and detail.get('charge') is False:
         return False
+    if outcome in STOP_OUTCOMES and reading is True:
+        return True
     return (outcome in CHARGED_OUTCOMES) if started is None else bool(started)
 
 
@@ -609,7 +624,7 @@ _CODE_GROUPS = (
       'CONTENT-LENGTH-PREMISE-MISSING', 'TRANSFER-ENCODING-PREMISE-MISSING', 'HSTS-PREMISE-MISSING',
       'COOKIE-CAPTURE-PREMISE-MISSING', 'COOKIE-SYNTAX-PREMISE-MISSING', 'COOKIE-VIOLATION-PREMISE-MISSING',
       'COOKIE-SYNTAX-INVALID', 'COOKIE-SYNTAX-DISAGREEMENT', 'FRAMING-PRESENCE-PREMISE-MISSING',
-      'ACTUAL-OFFER-STATUS-INVALID'),
+      'ACTUAL-OFFER-STATUS-INVALID', 'FACT-DIRECTIVES-INVALID', 'FACT-TEXT-INVALID'),
      'a record in {file} is not in the shape the shipped collector writes (its schema, mode, endpoint and fact fields '
      'are closed); re-run collect_http.py rather than editing it, then run again.'),
     (('FACTS-DIGEST-MISMATCH', 'ARTEFACT-DIGEST-MISMATCH', 'ARTEFACT-DIGESTS-MISSING', 'ARTEFACT-PATH-INVALID',

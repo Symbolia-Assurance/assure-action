@@ -171,6 +171,7 @@ The text after `title=Assure::` in the notice and the `<output>` path in the lin
 - [One-page first run](docs/FIRST-RUN-ACTION.md)
 - [Full quickstart](docs/QUICKSTART-ACTION.md)
 - [What a verdict claims](docs/SCOPE.md)
+- [Known issues](docs/KNOWN-ISSUES.md)
 - [Reading a verdict](docs/VERDICTS.md)
 - [What is collected and where it goes](docs/DATA.md)
 

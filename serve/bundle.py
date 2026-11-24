@@ -112,6 +112,12 @@ class Limits:
 
 LIMITS = Limits()
 
+
+def rule_cap(rule, limits):
+    """The bytes one file a profile input rule admits: its own max_bytes within the bundle's file_bytes, or file_bytes
+    alone for a rule with no max_bytes (PROCESS-BOUNDS-1, ADDENDUM-1 item 10 B: a source file has no bound of its own)."""
+    return limits.file_bytes if rule.max_bytes is None else min(rule.max_bytes, limits.file_bytes)
+
 # Per-plan input limits (the Director, 19 Oct 2026): the request body a plan reads, measured as `body_bytes` is (the
 # encoded request, from Content-Length), applied after the key is verified on the file-carrying routes. LIMITS.body_bytes
 # stays the wire ceiling every request meets first. An unknown tier reads as free.
@@ -542,7 +548,7 @@ def from_directory(root, profile, limits=LIMITS):
             st = os.lstat(full)
             if not stat.S_ISREG(st.st_mode):
                 raise Refusal('bad_input', '%s is a link or not a regular file' % name)
-            cap = min(rule.max_bytes, limits.file_bytes)
+            cap = limits.file_bytes if rule.max_bytes is None else min(rule.max_bytes, limits.file_bytes)
             if st.st_size > cap:
                 if _is_optional(rule, profile):          # issue #295: an optional input over its cap is left out, not refused
                     out.ignored.append('%s: over %d bytes (optional input)' % (name, cap))
@@ -604,7 +610,7 @@ def _beside(parent, profile, limits, out):
             raise Refusal('bad_input', '%s beside raw/ cannot be read' % base) from None
         if not stat.S_ISREG(st.st_mode):
             raise Refusal('bad_input', '%s beside raw/ is a link or not a regular file' % base)
-        cap = min(rule.max_bytes, limits.file_bytes)
+        cap = limits.file_bytes if rule.max_bytes is None else min(rule.max_bytes, limits.file_bytes)
         if st.st_size > cap:
             if _is_optional(rule, profile):          # issue #295: the same rule as inside raw/
                 out.ignored.append('%s beside raw/: over %d bytes (optional input)' % (base, cap))
@@ -641,7 +647,8 @@ def check_files(files, profile, limits=LIMITS):
                               % ('/'.join(parts[:i]), name))
         if not isinstance(data, (bytes, bytearray)):
             raise Refusal('bad_input', 'the content of %s is not bytes' % name)
-        cap = min(_rule_for(name, profile).max_bytes, limits.file_bytes)
+        rule = _rule_for(name, profile)
+        cap = limits.file_bytes if rule.max_bytes is None else min(rule.max_bytes, limits.file_bytes)
         if len(data) > cap:
             raise Refusal('oversize_input', '%s is %d bytes; the limit is %d' % (name, len(data), cap))
         total += len(data)

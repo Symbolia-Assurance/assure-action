@@ -45,14 +45,14 @@ PRODUCER = 'action_identity_fixture.py'
 COLLECTOR = 'collector/collect_http.py'
 #: the producer, the scope helper it verifies and the collector, at the checker entry's listed digests
 FILES = {
-    'action_identity_fixture.py': 'c8699fa2be312d47fbde43dca4bf08b9c95a449189305d2c2575ae42a4fb12ea',
+    'action_identity_fixture.py': '8dbdcdf53eac2772328fde45fcfc97178441e0dcd169420c0a9993f62c5bdfe5',
     'scope_binding.py': '64889563b2b974c736dab5f45f66c9cf1be464a9a16e81cb17e3508f2220be8c',
-    'collector/collect_http.py': 'd0b86d977e5495025f755fda8d5c90a825479424a642b57815c6cb967021d153',
+    'collector/collect_http.py': '55e338f210182699b3c3d8298fd9772e9956dddb45e01f099a27dd0d27fd1e24',
 }
 #: issue #5313: the words production's GET /v1/profiles names in the http-observed-baseline row's `collector_pin`. The
 #: build refuses an Action whose collector differs (the served checker refuses its bundles); set it only once the engine
 #: that pins a new collector is served (deploy/RUNBOOK.md section 14)
-SERVED_COLLECTOR_PIN = 'collector/collect_http.py sha256 d0b86d977e54'
+SERVED_COLLECTOR_PIN = 'collector/collect_http.py sha256 55e338f21018'
 SCOPE_FILE = 'identity-scope.json'
 MAX_SCOPE_BYTES = 65536
 TIMEOUT_S = 60

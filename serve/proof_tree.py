@@ -69,6 +69,8 @@ BASIS_LABEL = 'Basis'
 UNPROVED_LABEL = 'Unproved'
 THEOREM_LABEL = 'Theorem'
 LIMIT_LABEL = 'Limit'
+HELD_LABEL = 'Held at'
+HELD_PAIR = "release %s; the run was made at release %s and carried here by a read of the server's source"
 GOALS_FROM_ROWS = ('Each requirement row stands as its own goal: the goal sentences of requirements.md were not '
                    'stored with this check, only the typed checks they were sent as.')
 # a typed goal row as the Action sends it (declare_proposal.typed_text): '- G1.1 [postgres]: <statement>'
@@ -233,6 +235,11 @@ def _check(env, cid, req, row, state, waypoint, *, repository, commit, source_li
                 ev['limits_not_shown'] = limits.count(None)
         elif row.get('limits') is not None:
             ev['limits_not_shown'] = 1
+        pairs, not_shown = render._held_members(row.get('held_at'))
+        if pairs:
+            ev['held_at'] = [{'release': a, 'from': b} for a, b in pairs]
+        if not_shown:
+            ev['held_at_not_shown'] = not_shown
     else:
         cls = (req.get('reason_class') if req is not None else None) or render._pr_reason_class(env, row)
         entry = _entry(env, row) if req is None else {}
@@ -885,6 +892,10 @@ def _evidence_html(c):
             items.append('<b>%s:</b> %s' % (_e(LIMIT_LABEL), _e(x)))
         if ev.get('limits_not_shown'):
             items.append('<b>%s:</b> %d %s' % (_e(LIMIT_LABEL), ev['limits_not_shown'], _e(PREMISES_NOT_SHOWN)))
+        for x in ev.get('held_at') or ():
+            items.append('<b>%s:</b> %s' % (_e(HELD_LABEL), _e(HELD_PAIR % (x['release'], x['from']))))
+        if ev.get('held_at_not_shown'):
+            items.append('<b>%s:</b> %d %s' % (_e(HELD_LABEL), ev['held_at_not_shown'], _e(PREMISES_NOT_SHOWN)))
     if ev.get('bound'):
         items.append('holds within: %s' % _e(ev['bound']))
     if c['state'] == 'not_established':

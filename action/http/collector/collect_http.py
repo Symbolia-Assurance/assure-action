@@ -27,6 +27,8 @@ FLAGS = dict(execution_authorized=False, hardware_authorized=False,
              industrial_release_authorized=False, release_allowed=False,
              physical_validation=False, simulation=True, self_approved=False)
 UA = 'Symbolia-Assure-HTTP/1'
+# raw/HTTP-FACTS.json names the collector that wrote it; a record without the member reads as 1.
+COLLECTOR_GENERATION = 2
 HEAD_CAP, LINE_CAP, FIELD_CAP, ENDPOINT_CAP = 65536, 8192, 100, 16
 TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 TOKEN_RE = re.compile(TOKEN + r'\Z')
@@ -186,7 +188,7 @@ def _hsts(value):
         raw = raw.strip()
         if not raw:
             continue
-        match = re.fullmatch('(' + TOKEN + r')(?:\s*=\s*(' + TOKEN + r'|"(?:[^"\\\x00-\x1f\x7f]|\\[\x20-\x7e])*"))?', raw)
+        match = re.fullmatch('(' + TOKEN + r')(?:\s*=\s*(' + TOKEN + r'|"(?:[^"\\\x00-\x08\x0a-\x1f\x7f]|\\[\t\x20-\x7e])*"))?', raw)
         if not match:
             return dict(result, syntax='invalid')
         name, val = match[1].lower(), match[2]
@@ -194,7 +196,7 @@ def _hsts(value):
         if name == 'max-age':
             val = val[1:-1] if val and val.startswith('"') else val
             # quoted-pair decodes the escaped CHAR before the digit grammar.
-            val = re.sub(r'\\([\x20-\x7e])', r'\1', val) if val is not None else None
+            val = re.sub(r'\\([\t\x20-\x7e])', r'\1', val) if val is not None else None
             if val is None or not re.fullmatch(r'[0-9]+', val):
                 result['syntax'] = 'invalid'
             elif len(val) > 19 or int(val) > 2**63 - 1:
@@ -215,10 +217,31 @@ def _hsts(value):
     return result
 
 
+CACHE_DIRECTIVE = re.compile('[ \t]*(' + TOKEN + ')(?:=(' + TOKEN +
+                             r'|"(?:[\t\x20\x21\x23-\x5b\x5d-\x7e]|\\[\t\x20-\x7e])*"))?[ \t]*(?:,|\Z)')
+CACHE_EMPTY = re.compile(r'[ \t]*(?:,|\Z)')
+CACHE_NAME_CAP, CACHE_DIRECTIVE_CAP = 64, 32
+
+
 def _cache_control(value):
-    # The directive names only; an argument (max-age=0, private="x") is data that is never returned.
-    names = [p.split('=', 1)[0].strip().lower() for p in value.split(',')]
-    return dict(status='observed', no_store='no-store' in names)
+    # RFC 9110 5.6 and RFC 9111 5.2: a list of `name` or `name=argument`, the argument a token or a quoted string
+    # (a comma inside quotes is no separator); empty elements are ignored. Only the names are read; an argument
+    # (max-age=0, private="x") is data that is never returned. no-store counts only bare.
+    # `directives` lists, in field order, each name (lower-cased, at most CACHE_NAME_CAP bytes) and whether it had an
+    # argument; past CACHE_DIRECTIVE_CAP directives the field does not parse (a list is never cut short).
+    directives, position = [], 0
+    while position < len(value):
+        empty = CACHE_EMPTY.match(value, position)
+        if empty and empty.end() > position:
+            position = empty.end()
+            continue
+        match = CACHE_DIRECTIVE.match(value, position)
+        if (not match or match.end() == position or len(match[1]) > CACHE_NAME_CAP
+                or len(directives) == CACHE_DIRECTIVE_CAP):
+            return dict(status='representation', no_store=None, directives=None)
+        directives.append(dict(name=match[1].lower(), argument=match[2] is not None))
+        position = match.end()
+    return dict(status='observed', no_store=dict(name='no-store', argument=False) in directives, directives=directives)
 
 
 def _location(value, endpoint):
@@ -428,6 +451,8 @@ def sanitize_response(head, endpoint, complete=True):
                 extracted = dict(status='observed', presence=True, mode='report_only' if name.endswith('report-only') else 'enforcing')
             elif name == 'x-content-type-options':
                 extracted = dict(status='observed' if value.lower() == 'nosniff' else 'representation', value='nosniff' if value.lower() == 'nosniff' else None)
+                # The field value as sent (bounded by LINE_CAP: this branch runs only for a parsed unit).
+                extracted['text'] = value
                 facts['nosniff'].append(dict(extracted, source=source))
                 if extracted['value']:
                     retained = 'X-Content-Type-Options: nosniff'
@@ -739,7 +764,7 @@ def publish_observations(observations, out, *, selected_scope, mode='offline_fix
                         request_profile_sha256=hashlib.sha256(canonical(request_profile)).hexdigest()))
         cases.append(case)
     fact_record = dict(FLAGS, schema='assure.http.facts.v1', mode='offline_fixture',
-                       selected_scope=selected_scope, endpoints=cases)
+                       selected_scope=selected_scope, endpoints=cases, collector_generation=COLLECTOR_GENERATION)
     fact_record['mode'] = mode
     artefacts['raw/HTTP-FACTS.json'] = canonical(fact_record) + b'\n'
     sidecar = dict(FLAGS, schema='assure.http.collection-sidecar.v1', mode=mode, source_kind='synthetic' if mode == 'offline_fixture' else 'live',

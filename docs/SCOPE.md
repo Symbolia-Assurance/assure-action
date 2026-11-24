@@ -64,7 +64,7 @@ A new, default database reads mostly needs intent and vacuous. That means there 
 
 ## Checker status
 
-The `postgresql-observed-baseline` checker is served. It was qualified before it was served. Qualification means: on the official PostgreSQL 18 image the readings equal the expected readings, every planted defect is caught, there are zero wrong holds, one independent review found no blocking defect, and two hosted runs give identical bytes.
+The `postgresql-observed-baseline` checker is served. Some answers known to be wrong today are written up in [Known issues](KNOWN-ISSUES.md), which is not a complete list; release notes name known issues too.
 
 ## What each profile never detects
 

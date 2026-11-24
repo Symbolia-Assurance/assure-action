@@ -741,6 +741,7 @@ def _release_tag(env):
 
 
 PR_EVENTS = ('pull_request',)              # the event the docs name for the comment
+LINT_RED_EVENTS = ('pull_request', 'pull_request_target')
 PR_COMMENT_NOTICE = ('the pull request comment was not posted: GitHub answered 403. To have it posted, add '
                      '`pull-requests: write` under the job\'s `permissions:` (keep `contents: read` beside it)')
 PR_COMMENT_PAGES = 10                       # 100 comments a page: the marker is looked for in the first 1000
@@ -2021,7 +2022,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
     # serve-060 (dogfood INC 3372): `::add-mask::` is a GitHub runner command; printed anywhere else it shows the
     # secret it was meant to hide. Emit it only on a GitHub runner; the scrub below still keeps every value out of output.
     on_runner = env.get('GITHUB_ACTIONS') == 'true'          # the exact value GitHub sets on its runners
-    feedback_known_secrets = list(first)
+    feedback_known_secrets = list(first) + [v for v in (str(env.get('GITHUB_TOKEN') or ''),) if v]
     for v in first:                                    # before anything else is printed
         if on_runner:
             say(_mask(v))
@@ -2170,6 +2171,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 state['feedback_server_check_id'] = cid
         e = scrub.refusal(e)
         code = e.detail.pop('exit_code', None) or (e.exit if e.exit is not None else 3)
+        code = code if type(code) is int and 1 <= code <= 125 else 3
         server_cid = state.get('server_check_id')
         if 'check_id' not in e.detail and isinstance(server_cid, str) and CHECK_ID_RE.fullmatch(server_cid):
             e.detail['check_id'] = server_cid          # a verdict came back, so the check reached the server
@@ -2342,7 +2344,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
                 fail_on_text=declared_fail_on(inputs['fail_on']), conn=None, allow_partial=inputs['allow_partial'],
                 collect_kw=None, scratch=work, cwd=cwd, check_id=check_id, load_checker=load_checker, check_timeout=check_timeout,
                 limits=limits, is_mysql=False, root=root, collected=got)[0]
-        declared_reading(inputs['profile'], held[0] if held else None, declared_check, limits, 'checker_error')
+        declared_reading(inputs['profile'], held[0] if held else None, declared_check, limits, 'checker_error',
+                         lambda: local_mode.LocalClient(engine, limits).profiles())
         return dict(verdict, charged=False), ignored             # issue #1103: no API was contacted; nothing charged
 
     def pg_checkout_at(top, cap, skip_links=False):
@@ -2371,7 +2374,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             state['no_checkout_named'] = True
             say('::notice title=Assure declaration::%s' % _cmd_data(declaration_draft.NO_CHECKOUT, cap=None))
 
-    def declared_reading(profile, collected, check, lim, unexpected):
+    def declared_reading(profile, collected, check, lim, unexpected, listing):
         """Issue #2928: on an observed profile with intent committed in the checkout, `check(declared profile, the same
         withheld files plus raw/declaration.json = the committed bytes with their literals withheld in the snapshot's
         numbering, counts)` (`withhold.with_declaration`); `state['declared']` is (profile, verdict or Refusal, the
@@ -2395,6 +2398,8 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             rel, data = at
             files, counts = withhold.with_declaration(collected, data)
             say('Assure: declared check: %s' % withhold.describe(counts))
+            allow = allow_list(listing(), pid)
+            bundle.check_files(files, allow, lim if lim is not None else allow.limits)
             got = check(pid, files, counts)
             if not isinstance(got, dict) or got.get('schema') != VERDICT_SCHEMA:
                 raise Refusal(unexpected, 'no verdict envelope')
@@ -2957,7 +2962,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
         check_verdict(verdict)
         declared_reading(inputs['profile'], collected, lambda pid, files, counts: client.submit(   # issue #2928
             pid, files, declared_fail_on(inputs['fail_on']), limits=lim, key_from_bundle=not state['fresh_check'],
-            **extra), lim, 'api_error')
+            **extra), lim, 'api_error', lambda: listing)
         state['report_on'] = report_wanted(state['report_on'], verdict)      # readable-report-001: 'auto' decides here
         if state['report_on']:                    # serve-014: never changes the verdict, its file or its exit
             state['report_url'] = client.base + '/v1/checks/%s/report.html' % verdict['check_id']
@@ -2997,7 +3002,7 @@ def main(env=None, *, root, argv=None, stdout=None, load_checker=None, pin_path=
             return failed(Refusal('api_error', 'no lint record'))
         found = [f for f in doc['findings'] if isinstance(f, dict)]
         clean = doc.get('ok') is True and not found
-        on_pr = env.get('GITHUB_EVENT_NAME') in PR_EVENTS
+        on_pr = env.get('GITHUB_EVENT_NAME') in LINT_RED_EVENTS
         code = LINT_ON_PR_EXIT if on_pr else (0 if clean else 2)       # lint part c: never green on a pull request
         try:
             summary = LINT_PREFLIGHT + '\n\n' + _lint_markdown(found)     # issue #3168: the first line

@@ -104,6 +104,7 @@ FIELD_WORDS = {
     'public_routes': 'which routes anyone may open without signing in',
     'registrations_complete': 'whether Assure read every route your app registers',
     'requirements_file': 'where your requirements file is',
+    'interpreter_release': 'which Python release your app runs on',
     'instance_config': 'how your app loads its instance configuration',
     'config_surfaces': 'which configuration values you state for your app',   # #5289: stated config facts
     'declared_handoffs': 'which library calls you state hand your app to a library, and what they register',   # #5770

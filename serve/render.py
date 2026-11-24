@@ -201,6 +201,9 @@ LIMIT_ITEM = '  - %s: %s'
 LIMIT_NOT_SHOWN = '%d not shown'
 LIMITS_HEAD = 'Limits'
 LIMITS_ITEM = '- %s: %s'
+GENESIS_LABEL = "Genesis premise: checked by the engine's authors only; the open ledger lists what would raise it."
+HELD_LABEL = 'Held at'
+HELD_PAIR = "release %s; the run was made at release %s and carried here by a read of the server's source"
 
 
 def _basis_labelled(row):
@@ -225,17 +228,29 @@ def _basis_words(shown, count):
     return BASIS_CLAUSE % (shown, count, '' if count == 1 else 's')
 
 
+def _genesis_carried(row):
+    genesis = row.get('genesis') if isinstance(row, dict) and isinstance(row.get('basis'), str) else None
+    return type(genesis) is str and bool(genesis)
+
+
+def _genesis_words(carried, clause):
+    return GENESIS_LABEL + (' ' + clause if clause else '') if carried else clause
+
+
 def basis_clause(row):
-    return _basis_words(_basis_shown(row), _basis_count(row)) if _basis_labelled(row) else ''
+    carried = _genesis_carried(row)
+    return _genesis_words(carried, _basis_words(_basis_shown(row), _basis_count(row))
+                          if carried or _basis_labelled(row) else '')
 
 
 def basis_clause_of(rows):
-    labelled = [r for r in rows if _basis_labelled(r)] if isinstance(rows, list) else []
+    carried = isinstance(rows, list) and any(_genesis_carried(r) for r in rows)
+    labelled = [r for r in rows if _basis_labelled(r) or _genesis_carried(r)] if isinstance(rows, list) else []
     if not labelled:
         return ''
     labelled = labelled[:1] if any(_basis_shown(r) != _basis_shown(labelled[0]) for r in labelled) else labelled
     counts = [_basis_count(r) for r in labelled]
-    return _basis_words(_basis_shown(labelled[0]), None if None in counts else sum(counts))
+    return _genesis_words(carried, _basis_words(_basis_shown(labelled[0]), None if None in counts else sum(counts)))
 
 
 def _basis_rows(env, requirement):
@@ -279,6 +294,49 @@ def _limits_members(rows):
 def _limit_lines(item, form=LIMIT_ITEM, name=LIMIT_LABEL):
     return [form % (name, _esc_line(w)) for w in item.get('limits') or ()] + (
         [form % (name, LIMIT_NOT_SHOWN % item['limits_not_shown'])] if item.get('limits_not_shown') else [])
+
+
+def _held_of(rows):
+    held = []
+    for r in rows:
+        items = r.get('held_at') if isinstance(r, dict) else None
+        if items is not None:
+            held += items if isinstance(items, list) else [items]
+    return held
+
+
+def _held_members(held):
+    pairs, not_shown = [], 0
+    for x in held if isinstance(held, list) else ([] if held is None else [held]):
+        if isinstance(x, dict) and (x.get('by') == 'run' or x.get('by', '') is None and x.get('from', '') is None and (
+                x.get('release', 0) is None or isinstance(x.get('release'), str))):
+            continue
+        pair = (_limit_text(x.get('release')), _limit_text(x.get('from'))) if isinstance(x, dict) and x.get(
+            'by') == 'carried' else (None, None)
+        if None in pair:
+            not_shown += 1
+        elif pair not in pairs:
+            pairs.append(pair)
+    return pairs, not_shown
+
+
+def _held_item(rows):
+    held = _held_of(rows)
+    return {'held_at': held} if held else {}
+
+
+def _held_lines(held, form=LIMIT_ITEM, name=HELD_LABEL):
+    pairs, not_shown = _held_members(held)
+    return [form % (name, HELD_PAIR % (_esc_line(a), _esc_line(b))) for a, b in pairs] + (
+        [form % (name, LIMIT_NOT_SHOWN % not_shown)] if not_shown else [])
+
+
+def _held_block(items):
+    lines = []
+    for h in items:
+        lines += _held_lines(h.get('held_at'), LIMITS_ITEM, _esc_line(_clip(
+            h['requirement'] if h.get('requirement') is not None else h.get('id'))))
+    return [HELD_LABEL] + lines + [''] if lines else []
 
 
 def _limits_block(items):
@@ -1399,7 +1457,7 @@ def gate_stopped(envelope):
     if m is None:
         return True
     read, verdicts = set(m['read']), _verdicts(env)
-    return not any(r.get('machine') in read and r.get('status') in verdicts for r in _rows(env))
+    return not any(r.get('machine') in read and r.get('status') in verdicts and not turned(r) for r in _rows(env))
 
 
 def could_not_look(envelope):
@@ -1418,6 +1476,29 @@ def could_not_look(envelope):
 
 
 _VERDICTS_DEFAULT = ('holds', 'fails', 'deviates', 'vacuous')
+
+
+KERNEL_WORD = 'kernel_word'
+TURNED_WORD = 'not_established'
+TURNED_STATUS = 'missing_method'
+
+
+def turned(row):
+    """A turned row: the rows in tests/serving/test_entry_switch_observed.py."""
+    return isinstance(row, dict) and row.get(KERNEL_WORD) == TURNED_WORD
+
+
+TURNED_WORDS = label(TURNED_WORD)
+
+
+def turned_count(rows):
+    """The turned rows counted: the rows in tests/serving/test_entry_switch_observed.py."""
+    return len([r for r in rows or () if turned(r) and r.get('id') is not None])
+
+
+def shown_status(row):
+    """A row's status in words: the rows in tests/serving/test_entry_switch_observed.py."""
+    return TURNED_WORDS if turned(row) else label((row or {}).get('status'))
 
 
 def _verdicts(env):
@@ -1442,7 +1523,7 @@ def kept_on_refused(envelope, row):
     env = envelope if isinstance(envelope, dict) else {}
     if not isinstance(row, dict) or row.get('id') is None or _machines(env) is None:
         return False
-    return row.get('status') in _verdicts(env) and row.get('machine') not in _read_set(env)
+    return row.get('status') in _verdicts(env) and row.get('machine') not in _read_set(env) and not turned(row)
 
 
 # ---------- supabase-profile-001: rows the managed provider holds ----------
@@ -1580,7 +1661,7 @@ def red_findings(envelope):
     verdicts = _verdicts(env)
     rows, read = _rows(env), _read_set(env)
     out = [('disproven', r.get('id'), r) for r in rows                    # R4-1: holds and vacuous never are
-           if r.get('machine') in read and r.get('status') not in MET
+           if r.get('machine') in read and r.get('status') not in MET and not turned(r)
            and (r.get('status') == 'fails' or (r.get('status') in named and r.get('status') in verdicts))]
     # serve-077: a platform-owned disproof is listed after the customer's own, so the first line leads with theirs
     out = [f for f in out if not platform_owned(env, f[2])] + [f for f in out if platform_owned(env, f[2])]
@@ -1602,7 +1683,8 @@ def red_findings(envelope):
         # DD-079 W3: every unresolved security obligation binds, intent-bound and unobservable at the pin included
         for i in list(bias.get('security') or ()):
             r = by_id.get(i)
-            if i in named_ids or (r is not None and r.get('status') in verdicts and r.get('machine') in read):
+            if i in named_ids or (r is not None and r.get('status') in verdicts and r.get('machine') in read
+                                  and not turned(r)):
                 continue
             if r is not None and (r.get('machine'), i) in managed:       # supabase-profile-001: the provider's
                 continue
@@ -1612,7 +1694,7 @@ def red_findings(envelope):
         key = (r.get('machine'), r.get('id'))
         if key in listed or (r.get('id') is not None and r.get('id') in named_ids) or key in managed:
             continue
-        if r.get('status') in named and r.get('status') not in verdicts and r.get('status') not in MET:
+        if r.get('status') in named and (r.get('status') not in verdicts or turned(r)) and r.get('status') not in MET:
             out.append(('chosen', r.get('id'), r))
         elif kept_on_refused(env, r) and named & set(NOT_OBSERVED_STATUSES):        # R3-1 (i)
             out.append(('chosen', r.get('id'), dict(r, status=KEPT_READ_AS)))
@@ -2180,7 +2262,7 @@ def _red_words(env, finding):
                                            _clip(ob_id if ob_id is not None else row.get('machine')),
                                            BASIS_JOIN + clause if clause else '', _witness_parts(env, row))
     if kind == 'chosen':                             # REFUTATION-028 F2: never "disproven"
-        return 'stopped by your choice: %s — %s' % (_clip(label((row or {}).get('status'))),
+        return 'stopped by your choice: %s — %s' % (_clip(shown_status(row)),
                                                      _clip(ob_id if ob_id is not None else (row or {}).get('machine')))
     lead = 'not proven: ' if kind == 'not_proven' else 'unresolved by your choice (strict): '
     if kind == 'strict':                             # serve-027: the count, then the first in reading order
@@ -2446,7 +2528,8 @@ def verdict_line(envelope):
     parts = [p for p in (_coverage_words(env), _bounds_words(env), _prove_words(env), _strict_words(env)) if p]
     read = _read_set(env)
     obligations = _obligation_rows(env)
-    deviations = len([r for r in obligations if r.get('status') == 'deviates' and r.get('machine') in read])
+    deviations = len([r for r in obligations if r.get('status') == 'deviates' and r.get('machine') in read
+                      and not turned(r)])
     if c == 'red':
         if deviations:                                # 2073 N2: deviations are their own count
             parts.append('deviations: %d' % deviations)
@@ -2931,7 +3014,7 @@ def _meaning_line(envelope):
     if kind == 'strict':
         return '%s %s is marked security, it is not resolved, and you chose strict.' % (first, _clip(ob_id))
     return ('%s %s reads %s, a status you chose to stop on.'          # R2-2: never asserts nothing is disproven
-            % (first, _clip(ob_id), _clip(label((row or {}).get('status')))))
+            % (first, _clip(ob_id), _clip(shown_status(row))))
 
 
 def _witness_fields(env, row):
@@ -3182,17 +3265,43 @@ SUMMARY_STEP_BROKEN = 'Fix each broken rule below: each one names the line and t
 SUMMARY_STEP_FINDINGS = 'Look at each finding below and decide whether this change meant it.'
 SUMMARY_STEP_UNCHECKED = 'Read "Not checked yet" below: each rule there says why Assure could not decide it yet.'
 SUMMARY_STEP_NONE = 'Nothing to do: every rule Assure checked holds.'
+# Where the policy stops the job on a finding that is not a broken rule (`pr_reading`'s `stops`: the findings that bind
+# the exit, `binding_reason`), the summary says so first and names each kind, in this order, for a count of one and of
+# more; findings that do not bind (`loose`) are counted apart. Nothing else moves: where nothing but broken rules binds
+# the exit, the sentences and steps above stand.
+SUMMARY_STOP_KINDS = (('deviates', '1 recommendation not followed', '%d recommendations not followed'),
+                      ('not_proven', '1 rule it asks to be proved that is not proved',
+                       '%d rules it asks to be proved that are not proved'),
+                      ('strict', '1 security rule left unresolved under the strict preset',
+                       '%d security rules left unresolved under the strict preset'),
+                      ('chosen', '1 finding of a status it names', '%d findings of a status it names'))
+SUMMARY_STOPS = 'Your policy stops this change for: %s. It breaks no rule Assure checked.'
+SUMMARY_STOPS_BROKEN = 'This change breaks %s. Your policy also stops it for: %s.'
+SUMMARY_LOOSE = ('1 other finding below needs a look.', '%d other findings below need a look.')
+SUMMARY_STEP_STOPS = ('Each thing that stops the job is listed below with its reason. Mend it, or take it to whoever '
+                      'sets your policy if this change means to leave it.')
+SUMMARY_STEP_LOOSE = 'Look at each other finding below and decide whether this change meant it.'
 
 
 def summary_headline(envelope, reading=None):
     """The job summary's one plain sentence of what happened (issue #4580), from the comment's reading (`pr_reading`):
-    the lines Assure could not read, no reading, the broken rules, the other findings, or none broken."""
+    the lines Assure could not read, no reading, what the policy stops the change for beside any broken rules (each
+    kind of `stops` named, then the findings that do not bind), the broken rules, the other findings, or none broken."""
     rd = reading if reading is not None else pr_reading(envelope)
     if rd['unread']:
         return _pr_unread_words(rd['unread'])
     if rd['no_reading'] is not None:
         return 'Assure reached no reading of this change, so it checked nothing.'
     n = len(rd['broken'])
+    stops = rd.get('stops') or {}
+    if stops:
+        items = '; '.join(one if stops[kind] == 1 else many % stops[kind]
+                          for kind, one, many in SUMMARY_STOP_KINDS if stops.get(kind))
+        words = (SUMMARY_STOPS_BROKEN % (_plural(n, 'rule', 'rules'), items) if n else SUMMARY_STOPS % items)
+        loose = rd.get('loose') or 0
+        if loose:
+            words += ' ' + (SUMMARY_LOOSE[0] if loose == 1 else SUMMARY_LOOSE[1] % loose)
+        return words
     if n:
         return 'This change breaks %s.' % _plural(n, 'rule', 'rules')
     k = len(rd['deviations']) + len(rd['others'])
@@ -3221,7 +3330,11 @@ def summary_steps(envelope, reading=None):
     steps = []
     if rd['broken']:
         steps.append(SUMMARY_STEP_BROKEN)
-    if rd['deviations'] or rd['others']:
+    if rd.get('stops'):
+        steps.append(SUMMARY_STEP_STOPS)
+        if rd.get('loose'):
+            steps.append(SUMMARY_STEP_LOOSE)
+    elif rd['deviations'] or rd['others']:
         steps.append(SUMMARY_STEP_FINDINGS)
     written = bool(requirement_rows(envelope))
     if any(u['requirement'] is not None or u.get('coverage') or not (written or u.get('quiet'))
@@ -3369,7 +3482,8 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
     if reqs:                                      # serve-019: one line per requirement, under the not-established list
         out += ['### %s' % _esc_line(requirements_words(env)[0].upper() + requirements_words(env)[1:]), '']
         lines, kept = _kept_with_limits([('- %s' % _esc_line(requirement_line(r, env)),
-                                          _limit_lines(_limits_members(_basis_accounting_rows(env, r)))) for r in reqs],
+                                          _limit_lines(_limits_members(_basis_accounting_rows(env, r))) +
+                                          _held_lines(_held_of(_basis_accounting_rows(env, r)))) for r in reqs],
                                         MAX_REQUIREMENT_LINES)
         out += lines
         if len(reqs) > kept:
@@ -3474,8 +3588,12 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
     else:
         out.append('This run: exit %s.' % code)
     out += ['', '| Status | Count |', '| --- | --- |']
+    shown_turned = [r for r in env.get('rows') or [] if turned(r) and r.get('id') is not None]
     for s in precedence:
-        out.append('| %s | %d |' % (esc(label(s)), int(counts.get(s, 0))))
+        out.append('| %s | %d |' % (esc(label(s)), int(counts.get(s, 0))
+                                     - len([r for r in shown_turned if r.get('status') == s])))
+    if shown_turned:
+        out.append('| %s | %d |' % (esc(TURNED_WORDS), len(shown_turned)))
     refused_line = machines_refused_line(env)            # serve-071: the table counts the obligation rows only
     if refused_line:
         out += ['', refused_line]
@@ -3490,14 +3608,14 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
     managed = provider_managed(env)                      # supabase-profile-001: listed apart, never by status
     managed_keys = {(e['machine'], e['id']) for e in managed}
     rows = [r for r in rows if (r.get('machine'), r.get('id')) not in managed_keys]
-    for s in precedence:
-        group = [r for r in rows if r.get('status') == s]
+    for s in dict.fromkeys(list(precedence) + [TURNED_WORD]):
+        group = [r for r in rows if (TURNED_WORD if turned(r) else r.get('status')) == s]
         if not group:
             continue
         out += ['', '### %s' % esc(label(s)), '']
         for r in group:
             where = esc(r.get('machine')) + (' ' + esc(r.get('id')) if r.get('id') is not None else '')
-            line = '- %s: %s' % (where, esc(r.get('status_text')))
+            line = '- %s: %s' % (where, esc(TURNED_WORDS if turned(r) else r.get('status_text')))
             if basis_clause(r):
                 line += BASIS_JOIN + esc(basis_clause(r))
             extra = _row_extra(env, r)
@@ -3505,7 +3623,7 @@ def agent_summary_markdown(envelope, now=None, *, include_adapter=True, footer=T
                 line += ' (%s)' % extra
             out.append(line)
             if s == 'holds':
-                out += _limit_lines(_limits_members([r]))
+                out += _limit_lines(_limits_members([r])) + _held_lines(_held_of([r]))
             named = objects_text(env, r) if s == 'deviates' else None
             if named:                                     # issue #2176: one entry per object, its roles as a list
                 out.append('  - %s' % esc(named))
@@ -3617,8 +3735,8 @@ def annotations(envelope):
     if envelope.get('colour') in COLOURS:         # R2-1: a row the checker kept on a refused machine is coverage
         read = _read_set(envelope)
         rows = [r for r in rows if r.get('machine') in read]
-    picked = [('error', r) for r in rows if r.get('status') == 'fails']
-    picked += [('warning', r) for r in rows if r.get('status') == 'deviates']
+    picked = [('error', r) for r in rows if r.get('status') == 'fails' and not turned(r)]
+    picked += [('warning', r) for r in rows if r.get('status') == 'deviates' and not turned(r)]
     lines = []
     first = verdict_line(envelope)
     if first is not None:
@@ -3885,12 +4003,14 @@ OUTCOME_WORDS = MappingProxyType({
     'collector_refused': 'Assure did not run this check: the collector refused something in the input it cannot read.',
     'profile_not_servable': 'Assure did not run this check: the profile is not qualified to serve yet.',
     'profile_refused': 'Assure gave no reading: the checker refused the collection or the declaration it was sent.',
+    'input_too_large': 'Assure gave no reading: the application as sent is larger than this release reads.',
     # issue #5138: the checker, the server (a stored verdict that does not read, a restart) or the Action's own step
     'checker_error': 'Assure gave no reading: a part of Assure failed in a way it should not.',
     # issue #5138: the check's own limit, the Action's collector or its wait for the check, or a job lease
     'checker_timeout': 'Assure gave no reading: a time limit was reached.',
     'checker_cpu_limit': 'Assure gave no reading: the check ran past its CPU time limit.',
-    'checker_memory_limit': 'Assure gave no reading: the check ran past its memory limit.',
+    'checker_memory_limit': ('Assure gave no reading: the check reached its memory bound or its working files\' size '
+                             'bound.'),
     # issue #5138: a full queue, the usage ledger, an Idempotency-Key in flight, a plan change or GitHub's keys
     'server_busy': 'Assure did not run this check: the server could not take this request just now.',
     'not_found': 'Assure did not find what the request asked for.',
@@ -5323,6 +5443,9 @@ def pr_reading(envelope):
     - broken: the 'disproven' findings whose reading is not `deviates` (a deviation is never called broken);
     - deviations: every `deviates` reading on a machine that was read, as (item, red);
     - others: the 'not_proven', 'strict' and 'chosen' findings, as (kind, item);
+    - stops: {kind: count} of the findings that bind the exit (`binding_reason`) and are not broken rules, by kind
+      ('deviates', 'not_proven', 'strict', 'chosen'); loose: the deviations and others that do not bind, so the
+      deviations and others count sum(stops) + loose, none in both;
     - holds: the requirement rows that hold, then the `holds` readings on read machines no requirement row names, each
       {label, name, checked} (`_pr_label`, `_pr_checked`);
     - unchecked: every other requirement row and reading, vacuous ones included (never shown as holds), and a reading
@@ -5333,9 +5456,17 @@ def pr_reading(envelope):
     red = red_findings(env)
     read = _read_set(env)
     broken, others, red_dev = [], [], set()
+    stops, loose = {}, 0
     shown_reqs, shown_rows, shown_ids = set(), set(), set()
     for f in red:
         kind, ob_id, row = f
+        binds = binding_reason(env, f) is not None
+        deviates = kind == 'disproven' and isinstance(row, dict) and row.get('status') == 'deviates'
+        if kind != 'disproven' or deviates:
+            if binds:
+                stops['deviates' if deviates else kind] = stops.get('deviates' if deviates else kind, 0) + 1
+            elif not deviates:
+                loose += 1
         item = _pr_item(env, f, by_id, by_ob)
         if item['requirement'] is not None:
             shown_reqs.add(item['requirement'])
@@ -5353,7 +5484,7 @@ def pr_reading(envelope):
     obligations = [r for r in _obligation_rows(env) if not is_machine_refusal(r)]
     deviations = []
     for r in obligations:
-        if r.get('status') == 'deviates' and r.get('machine') in read:
+        if r.get('status') == 'deviates' and r.get('machine') in read and not turned(r):
             key = (r.get('machine'), r.get('id'))
             item = _pr_item(env, ('disproven', r.get('id'), r), by_id, by_ob)
             item['objects'] = top_objects(row_objects(env, r))     # issue #3221: the objects, most roles first
@@ -5361,6 +5492,7 @@ def pr_reading(envelope):
             if item['requirement'] is not None:
                 shown_reqs.add(item['requirement'])
             deviations.append((item, key in red_dev))
+            loose += key not in red_dev
     holds, unchecked = [], []
     spent_rows = _pr_spent_rows(env)
     # issue #3146: when the check could not read a named line, that line is the reason for every rule; no rule's
@@ -5379,7 +5511,8 @@ def pr_reading(envelope):
             holds.append({'label': lab, 'name': name, 'checked': _pr_checked(env, r, None), 'requirement': r.get('id'),
                           'basis_clause': basis_clause_of(_basis_accounting_rows(env, r)),
                           **({'mapped': True} if name and _checked_as(r) else {}),
-                          **_limits_members(_basis_accounting_rows(env, r))})
+                          **_limits_members(_basis_accounting_rows(env, r)),
+                          **_held_item(_basis_accounting_rows(env, r))})
         else:
             # issue #4626: an empty domain (issue #1292) says there is nothing to check, never its coverage class
             cls = 'vacuous' if empty_domain_requirement(r, env) is not None else r.get('reason_class')
@@ -5420,7 +5553,7 @@ def pr_reading(envelope):
             continue                                   # the intent step never asserts a machine was read
         elif r.get('status') == 'holds':
             holds.append(dict(ids, label=lab, name=name, checked=_pr_checked(env, None, r), requirement=None,
-                              basis_clause=basis_clause(r), **_limits_members([r])))
+                              basis_clause=basis_clause(r), **_limits_members([r]), **_held_item([r])))
         else:
             cls = _pr_reason_class(env, r)
             said = 'vacuous' if _empty_domain(r, env) else cls      # issue #4626: an empty domain, nothing to check
@@ -5442,7 +5575,10 @@ def pr_reading(envelope):
         no_reading = None
     return {'no_reading': no_reading, 'red': red, 'broken': broken, 'deviations': deviations, 'others': others,
             'holds': holds, 'unchecked': unchecked, 'unread': unread,
-            'app_unread': bool(unread) and not read}
+            'app_unread': bool(unread) and not read, 'stops': stops, 'loose': loose}
+
+
+PR_STOPPED_HEAD = 'stopped by your policy'
 
 
 def pr_heading(reading, setup=False):
@@ -5456,6 +5592,8 @@ def pr_heading(reading, setup=False):
         return PR_UNREAD_HEAD                         # issue #3174: no machine read, the lines it could not read named
     if reading['no_reading'] is not None:
         parts.append(NO_READING_HEAD)
+    if reading['no_reading'] is None and n == 0 and reading.get('stops'):
+        parts.append(PR_STOPPED_HEAD)                 # the job is stopped and no rule is broken: said first
     if reading['no_reading'] is None or n:
         parts.append('%s broken %s' % ('no rule' if n == 0 else _plural(n, 'rule', 'rules'),
                                        'in your code' if setup else 'by this change'))
@@ -6402,6 +6540,7 @@ def _pr_sections(env, rd, repository=None, commit=None, requirements_file=None, 
         out += _pr_holds_rows(env, rd['holds'][:MAX_ANNOTATIONS], names)
         out.append('')
         out += _limits_block(rd['holds'][:MAX_ANNOTATIONS])
+        out += _held_block(rd['holds'][:MAX_ANNOTATIONS])
     # issue #3150: "Not checked yet" lists the rules the customer wrote that Assure could not decide, and a check on a
     # machine it could not read; a check they did not write as a rule stays in the proof tree, and with no rules
     # written so does one that needs nothing from anyone and has nothing to check (nothing declared, or Symbolia's gap)
@@ -6721,7 +6860,8 @@ def report_status_lines(envelope):
     out += ['- **%s** is %s.' % (esc(i.get('label') or i.get('text')), kinds[k]) for k, i in rd['others'][:MAX_ANNOTATIONS]]
     out += _kept_with_limits([('- **%s** %s%s.' % (esc(h['label']), PR_STATUS_WORDS['holds'],
                                                  BASIS_JOIN + esc(h['basis_clause']) if h.get('basis_clause') else ''),
-                               _limit_lines(h)) for h in rd['holds']], MAX_ANNOTATIONS)[0]
+                               _limit_lines(h) + _held_lines(h.get('held_at'))) for h in rd['holds']],
+                              MAX_ANNOTATIONS)[0]
     out += ['- **%s** %s.' % (esc(u['label'] or u['name']), PR_STATUS_WORDS['unchecked'])
             for u in _pr_listed_unchecked(env, rd)[:MAX_ANNOTATIONS]]
     return out
@@ -6874,7 +7014,8 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
         if fixed:
             out += ['### Fixed since %s' % ptag, '']
             out += _kept_with_limits([('- %s: broken → holds' % rule(rid), _limit_lines(_limits_members(
-                _basis_accounting_rows(env, by[rid])))) for rid in fixed], MAX_ANNOTATIONS)[0] + ['']
+                _basis_accounting_rows(env, by[rid]))) + _held_lines(_held_of(_basis_accounting_rows(env, by[rid]))))
+                for rid in fixed], MAX_ANNOTATIONS)[0] + ['']
         if newly:
             out += ['### Newly broken since %s' % ptag, '']
             out += ['- %s: %s → broken' % (rule(rid), _release_state_word(prev['states'][rid]))
@@ -6902,7 +7043,8 @@ def release_report_markdown(envelope, tag, repository=None, commit=None, previou
     if holds:
         out += ['### Holds', ''] + _kept_with_limits([('- %s%s' % (rule(r.get('id')), BASIS_JOIN + esc(basis_clause_of(
             _basis_accounting_rows(env, r))) if basis_clause_of(_basis_accounting_rows(env, r)) else ''),
-            _limit_lines(_limits_members(_basis_accounting_rows(env, r)))) for r in holds], MAX_ANNOTATIONS)[0] + ['']
+            _limit_lines(_limits_members(_basis_accounting_rows(env, r))) +
+            _held_lines(_held_of(_basis_accounting_rows(env, r)))) for r in holds], MAX_ANNOTATIONS)[0] + ['']
     unsettled = [r for r in rows if r.get('state') not in ('holds', 'disproven')]
     if unsettled:
         out += ['### Not established', '']
